@@ -9,11 +9,13 @@
 #   klayout -b -r icps2023_5.lvs \
 #     -rd input=layout.gds -rd schematic=reference.cir \
 #     [-rd top=CELL] [-rd layer_mode=design|fab] \
-#     [-rd report=out.lyrdb] [-rd output=extracted.cir] [-rd substrate=SUB] [-rd filters=legacy]
+#     [-rd report=out.lyrdb] [-rd output=extracted.cir] [-rd substrate=SUB] [-rd filters=legacy] \
+#     [-rd gate_overlap_um=2.0]
 # =============================================================================
 
 # `source` aborts when a GDS has more than one top cell.  Probe first so the
 # batch error tells the user how to select one (same convention as the DRC deck).
+require File.expand_path("../process_profile", __dir__)
 if $input.nil? || $input.to_s.empty?
   raise "ICPS2023_5 LVS: input=layout.gds is REQUIRED"
 end
@@ -24,25 +26,29 @@ unless File.file?($schematic.to_s)
   raise "ICPS2023_5 LVS: schematic '#{$schematic}' does not exist"
 end
 
+probe = RBA::Layout::new
+probe.read($input)
 if $top && !$top.to_s.empty?
+  selected_top = probe.cell($top.to_s)
+  raise "cell '#{$top}' not found in #{$input}" if selected_top.nil?
   source($input, $top)
 else
-  probe = RBA::Layout::new
-  probe.read($input)
   if probe.top_cells.size > 1
     raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
   end
+  selected_top = probe.top_cells.first
   source($input)
 end
-# With -rd top=CELL the selected cell is the circuit name; otherwise the file
-# must have a single top cell (checked above). source.layout.top_cell would
-# fail for multi-cell library files even when a cell was selected.
-layout_top = ($top && !$top.to_s.empty?) ? $top.to_s : source.layout.top_cell.name
+layout_top = selected_top.name
 
 layer_mode = ($layer_mode && !$layer_mode.to_s.empty?) ? $layer_mode.to_s : "design"
 unless ["design", "fab"].include?(layer_mode)
   raise "layer_mode must be 'design' or 'fab' (got '#{layer_mode}')"
 end
+profile_name = ICPS2023_5ProcessProfile.resolve($process_profile)
+ICPS2023_5ProcessProfile.reject_unpermitted_layers!(
+  probe, selected_top, layer_mode, profile_name, "ICPS2023_5 LVS"
+)
 
 input_stem = $input.to_s.sub(/\.(gds|gdsii|oas|oasis)\z/i, "")
 # Defaults are absolute so they land in the caller's directory (KLayout resolves
@@ -50,7 +56,7 @@ input_stem = $input.to_s.sub(/\.(gds|gdsii|oas|oasis)\z/i, "")
 report_file = ($report && !$report.to_s.empty?) ? $report.to_s : File.expand_path("#{File.basename(input_stem)}_lvs.lyrdb")
 output_file = ($output && !$output.to_s.empty?) ? $output.to_s : File.expand_path("#{File.basename(input_stem)}_extracted.cir")
 
-puts "ICPS2023_5 LVS  layer_mode=#{layer_mode}  input=#{$input}  schematic=#{$schematic}"
+puts "ICPS2023_5 LVS  layer_mode=#{layer_mode}  profile=#{profile_name}  input=#{$input}  schematic=#{$schematic}"
 puts "ICPS2023_5 LVS  layout_top=#{layout_top}  report=#{report_file}  output=#{output_file}"
 
 # BSIMSOI uses D/G/S/E, with optional P for an external body contact. KLayout's
@@ -294,8 +300,8 @@ extract_devices(mos3("PMOS"), {"SD" => psd, "G" => lv_pgate, "tS" => psd, "tD" =
 extract_devices(mos3("NMOS"), {"SD" => nsd, "G" => lv_ngate, "tS" => nsd, "tD" => nsd, "tG" => tin})
 extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => lv_bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin, "tW" => pwl})
 
-# Connectivity, copied from the design legacy deck.  ML2/VIA1/VIA2/ML3 remain
-# available options even though only the first metal is foundry-qualified.
+# Connectivity, copied from the design legacy deck. VIA1/ML2 are available in
+# the experimental profile; VIA2/ML3 have no extracted connectivity.
 connect(psd, cnt)
 connect(nsd, cnt)
 connect(bt_nsd, cnt)
@@ -322,14 +328,30 @@ connect(ml1, cnt_d)
 connect(nplus, ncnt)
 connect(ncnt, cnt_d)
 
-# Both extraction modes retain the documented 2 um gate overlap at each end.
-# The BSIMSOI model uses channel L, so remove that 4 um from every extracted
-# MOS device regardless of the design or fab layer numbering.
+# Both extraction modes retain the documented gate overlap at each end.
+# The BSIMSOI model uses channel L, so remove the caller-selected overlap from
+# both ends of every extracted MOS device. The 2023 PDF gives 2 um per end.
+begin
+  gate_overlap_um = ($gate_overlap_um.nil? || $gate_overlap_um.to_s.empty?) ?
+    2.0 : Float($gate_overlap_um)
+rescue ArgumentError, TypeError
+  raise "ICPS2023_5 LVS: gate_overlap_um must be finite, non-negative microns per end"
+end
+unless gate_overlap_um.finite? && gate_overlap_um >= 0.0
+  raise "ICPS2023_5 LVS: gate_overlap_um must be finite, non-negative microns per end"
+end
+gate_length_correction_um = 2.0 * gate_overlap_um
+puts "ICPS2023_5 LVS  gate_overlap_um=#{gate_overlap_um} per end"
 netlist.each_circuit do |circuit|
   circuit.each_device do |device|
     next unless ["NMOS", "PMOS", "NMOS4"].include?(device.device_class.name)
     gate_length = device.parameter("L")
-    device.set_parameter("L", gate_length - 4.0) if gate_length && gate_length > 4.0
+    next unless gate_length
+    channel_length = gate_length - gate_length_correction_um
+    unless channel_length > 0.0
+      raise "ICPS2023_5 LVS: extracted MOS gate length #{gate_length} um must exceed the total gate overlap #{gate_length_correction_um} um"
+    end
+    device.set_parameter("L", channel_length)
   end
 end
 # Write the extracted netlist before comparison, as the old Mineda wrapper did.
@@ -351,6 +373,7 @@ same_device_classes("MIMCAP", "CAP")
 same_device_classes("TINCAP", "CAP")
 same_device_classes("PDIFFCAP", "CAP")
 same_device_classes("NDIFFCAP", "CAP")
+same_device_classes("NRES", "RES")
 # Strict comparison is the default. `legacy` retains the pad-array smoke
 # filter for old reference layouts; those cutoffs apply to both netlists.
 filter_mode = ($filters && !$filters.to_s.empty?) ? $filters.to_s : "off"

@@ -11,11 +11,20 @@ extraction.
 cd ~/Documents/librelane && nix-shell --run \
   'python3 libs.tech/klayout/pex/icps2023_5_pex.py \
       --input <layout.gds> [--top CELL] [--output <parasitics.spice>] \
-      [--layer-mode design|fab] [--no-capacitance]'
+      [--layer-mode design|fab] [--no-capacitance] [--process-profile NAME]'
 ```
 
-Defaults: `--output <input>_pex.spice`, `--layer-mode design`. Files with more
-than one top cell require `--top CELL` (library GDS files do).
+Defaults: `--output <input>_pex.spice` and `--layer-mode design`. Profile
+selection precedence is `--process-profile`, the
+`ICPS2023_5_PROCESS_PROFILE` environment variable, then
+`process_profiles.json`'s `icps2023_5_1m` default. The resolved profile is
+printed in the PEX banner. Files with more than one top cell require
+`--top CELL` (library GDS files do).
+
+PEX rejects any unmasked VIA1/ML2/VIA2/ML3 geometry in both profiles rather than
+silently omitting it: no upper-metal sheet/contact resistance or coupling
+capacitance model is qualified. Experimental permits VIA1/ML2 PCell geometry
+and provisional DRC/fab-prep handling only; it does not extend PEX coverage.
 
 ## Model
 
@@ -65,29 +74,59 @@ accepts area resistance in Ω·µm², not fixed Ω. The deck sets
 and other cut areas use inverse-area scaling. Only the 5 × 5 µm value is
 measured; scaling other contact sizes is an explicit model assumption.
 
+### Ownership with LVS
+
+The PEX subcircuit contains parasitics only; it does not emit MOS, resistor,
+capacitor, or diode devices. Use this allocation when pairing it with the LVS
+device netlist:
+
+| Geometry/term | Owner | PEX behavior and limit |
+|---|---|---|
+| MOS channel and intrinsic charge | BSIMSOI device model | No duplicate MOS element or gate/channel C. PEX also suppresses N/P diffusion polygons touching `TIN ∩ DIFF` outside `CAP`, plus their N/P contacts. B4SOI `RDSW` is an effective fit with no separate access-resistance data; MOS terminal access is therefore omitted from additive PEX, not claimed as characterized by either model. |
+| `RES ∩ DIFF` resistor body | LVS `NRES`/`PRES` device | PEX removes the marked N/P body from sheet-R and diffusion-C extraction. Contacts whose lower conductor is wholly within the marker are omitted too; the resistor model has no independently measured terminal-contact term. |
+| Explicit `CAP ∩ TIN ∩ DIFF` | LVS `NDIFFCAP`/`PDIFFCAP` device | PEX emits no duplicate 2.3 fF/µm² Cox. Plate wiring resistance and qualified CNT contacts remain PEX-owned outside MOS/RES exclusions. |
+| `DIO` diode primitive | LVS diode I/V model | The shipped diode model specifies `Is` and `N`, not series R or junction C. PEX owns measured N/P diffusion and CNT access resistance in DIO geometry; it emits no diode capacitance because the MOSFET diffusion density is not a diode C–V characterization. |
+| Other N/P diffusion | PEX | PEX owns the measured sheet/contact resistance. It may emit the reported diffusion density only outside MOS-access, `RES`, `CAP`, and `DIO` regions, mapped to assumed global `SUB` as described below. |
+| TiN, ML1, and TiN-to-ML1 CNT | PEX | PEX owns sheet and contact resistance; these terms are not represented by the LVS device primitives. |
+
+MOS-access suppression is geometric: the extractor removes each N/P polygon
+that interacts with a one-database-unit halo around the remaining
+`TIN ∩ DIFF` region. This avoids emitting a second access path around the
+effective `RDSW` fit; it is not a foundry device classifier. MOS and marked-RES
+terminal access not covered by an independent model remains uncharacterized and
+is deliberately absent from additive PEX.
+
 ### Capacitance
 
-The script emits lumped Cox only for explicit diffusion-capacitor windows:
-`CAP` must overlap TiN and N/P diffusion. Before resistance extraction and
-diffusion-to-`SUB` area calculation, it removes TiN-over-DIFF MOS channel regions
-from the N/P conductors, except where `CAP` marks an explicit capacitor. This
-prevents a false source-drain sheet path through the channel; intrinsic MOS
-charge remains the BSIMSOI device model's responsibility. Diffusion-capacitance
-densities are mapped to global `SUB`.
+PEX does not emit Cox for explicit `CAP` windows. LVS owns those two-terminal
+capacitor devices at the measured 2.3 fF/µm² density. Intrinsic MOS charge is
+left to BSIMSOI; the stage-1 fit has no validated C–V characterization. The
+only emitted PEX capacitance is the reported N/P diffusion density on eligible
+non-device diffusion:
 
-| Term | Value | Extracted? | Source |
+| Term | Value | Extracted? | Source/ownership |
 |------|------:|:----------:|--------|
-| TiN ↔ N+ diffusion (Cox; explicit `CAP` windows only) | 2.3 fF/µm² | yes | minimalFab p.9, Gate Oxide; reference p.4 `CoxN` |
-| TiN ↔ P+ diffusion (Cox; explicit `CAP` windows only) | 2.3 fF/µm² | yes | minimalFab p.9, Gate Oxide; reference p.4 `CoxP` |
-| N+ diffusion capacitance density (deck maps to `SUB`) | 0.086 fF/µm² | yes | minimalFab p.9, MOSFET Capacitance; reference p.4 `CNdiff` |
-| P+ diffusion capacitance density (deck maps to `SUB`) | 0.086 fF/µm² | yes | minimalFab p.9, MOSFET Capacitance; reference p.4 `CPdiff` |
-| NFET overlap | 5 fF/µm | **no** | minimalFab p.9, MOSFET Capacitance |
-| PFET overlap | 6.8 fF/µm | **no** | minimalFab p.9, MOSFET Capacitance |
+| Eligible N/P diffusion to assumed `SUB` | 0.086 fF/µm² | yes, model assumption | minimalFab p.9, MOSFET Capacitance; reference p.4 `CNdiff`/`CPdiff` |
+| Explicit diffusion-capacitor Cox | 2.3 fF/µm² | **no** | LVS `NDIFFCAP`/`PDIFFCAP`; minimalFab p.9 |
+| NFET overlap | 5 fF/µm | **no** | minimalFab p.9; no validated perimeter rule |
+| PFET overlap | 6.8 fF/µm | **no** | minimalFab p.9; no validated perimeter rule |
+
+For each merged electrical component, the total eligible capacitance remains
+`0.086 fF/µm² × eligible area`; the extractor divides that total equally among
+all located resistance-network nodes in the component, including internal and
+vertex-port nodes. This is a graph-node allocation, not a local-area field
+solution or full distributed-RC model.
 
 The PDFs report `CNdiff`/`CPdiff` density, measurement dimensions, and bias,
-but do not identify the return conductor. Attaching those densities to the
-single global `SUB` node is an extractor assumption, not evidence of measured
-diffusion-to-BOX coupling.
+but do not identify the return conductor. Mapping eligible passive diffusion
+to global `SUB` is an explicit assumption, not evidence of measured
+diffusion-to-BOX coupling. MOS-access, `RES`, explicit `CAP`, and `DIO` regions
+are excluded from this density to keep device-owned terms separate.
+
+The PDK gives no numeric qualified interconnect-coupling coefficient: p.9
+reports device Cox, MOSFET diffusion density, and one-dimensional MOS overlap,
+not TiN/ML1 or wire-to-wire coupling. The deck emits no interconnect coupling
+instead of reusing a device value or inferring a dielectric coefficient.
 
 `AIST-SOI-CMOS.xs` is v0.2 based on a July 2021 cross-section; it is a process
 prior, not a validated complete 2023 production stack. The October 2023 PDK
@@ -112,35 +151,64 @@ numeric value for it, and M2 is marked T.B.D.
 
 ### Terminals and output
 
-Every cut assigned to a qualified conductor pair becomes a port at the
-common via footprint. In `design` mode, `TEXT` (13/0) labels name nets. Fab
-prep preserves those labels on 13/1 so they do not collide with the N-channel
-mask on 13/0; `--layer-mode fab` reads that label layer. A mask-only fab input
-without preserved text uses generated conductor names.
-Output contains a subcircuit named `<top cell>_pex`; it always exposes the
-global substrate node as `SUB` and emits `R…` elements plus sequentially named
-`C…` elements. Diffusion-capacitance elements connect N/P conductor components
-to `SUB`; Cox elements connect overlapping TiN/diffusion components only inside
-explicit `CAP` windows. If a text label is named `SUB` (case-insensitive), it
-supplies that port without adding a duplicate.
+Every cut assigned to a qualified conductor pair becomes an internal port at
+the common via footprint. In `design` mode, `TEXT` (13/0) labels are read. Fab
+prep preserves them on 13/1 so they do not collide with the N-channel mask on
+13/0; `--layer-mode fab` reads that layer.
 
-`SUB` is the deck's global model reference, not a PDK-identified BOX coupling
-terminal and not a source/drain body pin. The PDK PDFs do not specify the return
-node for `CNdiff`/`CPdiff`; mapping their densities to `SUB` is an explicit
-single-node modeling assumption. Connect `SUB` explicitly in the consumer
-testbench. The deck does not infer a substrate contact from a text label or
-solve the SOI-film potential.
+Each distinct `(logical label, conductor layer, x, y)` text anchor becomes a
+physical formal port named `PORT0001`, `PORT0002`, etc. IDs are deterministic
+for a fixed set of anchors. The `.SUBCKT <top>_pex` header lists every physical
+port followed by the global `SUB` return. A SPICE comment for each terminal
+contains JSON:
 
-### Research-only 2-D BOX FEM
+```text
+* PORT_MAP {"layer":"ML1","logical":"OUT","physical":"PORT0001","x_um":10.0,"y_um":5.0}
+.SUBCKT CELL_pex PORT0001 PORT0002 SUB
+```
+
+Repeated logical labels at different physical anchors remain distinct PEX
+ports; exact duplicate label/layer/coordinate records are deduplicated. The
+mapping is metadata, not an electrical short: the caller's wrapper/assembler
+must use each `physical` port and apply logical connectivity from its source
+netlist. Do not blindly bind repeated logical labels to one node if the
+physical separation is meant to remain represented. No automatic LVS-to-PEX
+netlist merge is provided.
+
+`SUB` is always a separate global model reference. A physical text label named
+`SUB` is exported as a `PORT####` with `"logical":"SUB"`; it is not silently
+aliased to the assumed diffusion-capacitance return. Connect both only when
+the consuming circuit explicitly intends that topology. Generated CNT and
+unlabelled internal nodes are not formal subcircuit pins.
+
+### Research-only 2-D electrostatics FEM
 
 `fieldsolve_box.py` is an optional scikit-fem 11.0.0 finite-element study,
-run on tinybox with NumPy 2.2.6 and SciPy 1.14.1. It solves a homogeneous
-400 nm SiO2 slab (`epsilon_r=3.9`) between an ideal grounded bottom plane and
-a finite-width top strip. The dielectric surface outside the strip and the
+run on tinybox with NumPy 2.2.6 and SciPy 1.14.1. Its default mode solves a
+homogeneous 400 nm SiO2 slab using an assumed `epsilon_r=3.9` (not a measured
+2023 PDK parameter), between an ideal grounded bottom plane and a finite-width
+top strip. The dielectric surface outside the strip and the
 lateral boundaries are insulating; the 2-D cross-section represents an
 infinitely long strip. Capacitance per unit length is calculated from
 electrostatic energy. This is an ideal BOX coupon, not the PDK's complete
 conductor stack or a qualified substrate-return model.
+
+The same script has an opt-in generic layered mode. Repeat
+`--dielectric-layer NAME:THICKNESS_UM:EPSILON_R` in bottom-to-top order and
+`--electrode NAME:Z_UM:CENTER_X_UM:WIDTH_UM` for each finite conductor strip.
+Electrodes must lie on layer boundaries. This mode returns a Maxwell
+capacitance matrix in fF/um, with rows and columns in electrode order; the
+bounded domain's lateral and unelectroded top boundaries are insulating.
+Relative permittivities and electrode geometry are required caller inputs;
+there is no embedded 2023 multilayer stack or default dielectric coefficient.
+
+The 2023 PDK PDF gives 15 nm gate oxide (p.4; also p.18's diffusion-capacitor
+cross-sections) and 300 nm TEOS in the TiN/Al capacitor cross-section (p.18),
+but no relative permittivities or complete 2023 conductor/return stack. These
+separate device cross-sections do not establish one combined stack. The
+generic solver can evaluate only a specifically justified caller-supplied
+stack; it does not infer one from the older 2021 XS examples. Any supplied
+permittivity not backed by process data is a sensitivity input, not a PDK fact.
 
 With a 20 nm maximum Cartesian grid step (triangle edges up to 28.3 nm) and a lateral
 margin of 12 BOX thicknesses, the infinite-plate analytic limit is 0.0863283 fF/um2.
@@ -159,7 +227,7 @@ thicknesses changes the 10 um result by less than 0.001%. This checks
 numerical stability for this coupon only; the remaining mesh refinement error
 is not a process-model uncertainty estimate.
 
-Reproduce with:
+Reproduce the homogeneous coupon and its tests with:
 
 ```sh
 python3 -m venv .venv
@@ -167,57 +235,56 @@ python3 -m venv .venv
   "numpy==2.2.6" "scipy==1.14.1" "scikit-fem==11.0.0"
 .venv/bin/python libs.tech/klayout/pex/fieldsolve_box.py \
   --widths-um 1 10 100 --max-step-um 0.02
+.venv/bin/python libs.tech/klayout/pex/test_fieldsolve_box.py
 ```
 
-Do not transfer these values into the PEX deck. The coupon assumes an ideal
-substrate return across homogeneous BOX, whereas the PDK does not identify the
-return terminal for measured `CNdiff`/`CPdiff`; its 2021 cross-section is also
-not a validated 2023 stack. It contains no MOS charge, TEOS/metal layers,
-layout-derived finite-length geometry, or distributed RC.
+Do not transfer either coupon's results into the PEX deck. The homogeneous
+study assumes an ideal substrate return across BOX; the layered mode is only
+as meaningful as its caller-provided material and electrode inputs. The PDK
+does not identify the return terminal for measured `CNdiff`/`CPdiff`, and its
+2021 cross-section is not a validated 2023 stack. Neither mode models MOS
+charge, layout-derived finite-length geometry, or distributed RC.
+## Shipped sample limitation
 
-## Exercised behavior
-
-* Unlabelled `Samples/Semicon2023/NAND/nand_sample.GDS` in design mode:
-  1088 contact ports, 1264 R-network nodes, 1260 resistors, 124 capacitors;
-  the output header is `.SUBCKT nand_pex SUB`.
-* The same NAND after fab preparation in fab mode: 1088 contact ports, 1264
-  nodes, 1260 resistors, and 124 capacitors; the output also exposes only `SUB`.
+The shipped NAND contest GDS contains unmasked VIA1/ML2 geometry. PEX rejects
+that input in both profiles before writing an output file; earlier NAND
+extraction counts are not current PEX evidence. The integration suite exercises
+bounded, hand-built geometries instead of claiming full-chip extraction.
 
 ## Limits (read before trusting a number)
 
-* Baseline PEX capacitance is **lumped per conductor component**. It consumes no
-  field-solver result and does not model layout-driven fringing or sidewall
-  capacitance, nor distributed RC line behaviour. The research-only BOX coupon
-  above is separate and supplies no PEX coefficient. A component that carries
-  several extracted R nodes attaches its capacitance to one of them.
-* The PEX net names come from `TEXT` labels only. Without labels, conductor
-  nodes use generated names and only the explicit `SUB` substrate port is
-  exposed; run LVS (`../lvs/icps2023_5.lvs`) or label nets for named terminals.
-* Coupling capacitance is computed per overlapping TiN/NAREA or TiN/PAREA
-  component pair only where an explicit `CAP` window preserves the diffusion
-  plate. MOS channel overlap is excluded from interconnect PEX; no unqualified
-  M2/ML2 or TiN–Al dielectric term is emitted.
-* The extractor maps the reported diffusion capacitance densities to global
-  `SUB` as an explicit assumption; it does not model a physical BOX/substrate
-  network or connect `SUB` to the drawn NCH/body-tie path.
+* Eligible passive-diffusion capacitance is split equally over the located
+  resistance-network nodes in each merged electrical component. The geometry
+  total is conserved; the equal node weighting is an explicit lumping rule,
+  not local-area capacitance or a full distributed-RC solution. It emits no
+  MOS intrinsic C, explicit CAP Cox, DIO C, fringing, or interconnect coupling.
+  The research-only BOX coupon above supplies no PEX coefficient.
+* MOS source/drain access and diffusion contacts adjacent to `TIN ∩ DIFF` are
+  omitted from additive PEX because the fitted `RDSW` cannot be separated from
+  physical access resistance. Marked `RES` bodies and wholly enclosed terminal
+  contacts are also omitted because LVS owns the resistor body. Their
+  terminal-contact contributions are not independently characterized.
+* `PORT_MAP` JSON rows preserve each physical text anchor and its logical
+  label. Duplicate logical labels are not merged inside the PEX subcircuit.
+  The global `SUB` model reference remains separate from any physical text
+  label named `SUB`; see [Terminals and output](#terminals-and-output).
+* The diffusion-to-`SUB` coefficient remains an explicit return-node
+  assumption; it does not model a physical BOX/substrate network or connect
+  `SUB` to the drawn NCH/body-tie path.
 * `CNT` is not type-encoded. The per-cut priority (TiN, NAREA, PAREA) is a
   geometric disambiguation heuristic; layouts whose contact geometry does not
   uniquely identify its lower conductor need review before using extracted R.
-* The resistance network uses the square-counting algorithm, which assumes
-  "thin" conductor parts. For large sheet-like regions the tesselation
-  algorithm would be the better choice — swap
-  `pex.Algorithm.SquareCounting` for `pex.Algorithm.Tesselation` in the script
-  if your layout has them.
+* The resistance network uses square counting, which assumes thin conductor
+  parts. For large sheet-like regions, use the tessellation algorithm only
+  after comparing its result against geometry-appropriate references.
 
 ## Regression checks
 
 Run `python3 libs.tech/klayout/pex/test_pex.py` inside the KLayout/LibreLane
-Nix shell. The checks solve the extracted resistor network for the analytic
-100 × 10 µm N+, P+, TiN, and ML1 sheet values and 5 × 5 µm N+, P+, and TiN
-contact values; prove that design-mode `MASK` and `EXCLUDE` and fab-mode
-`EXCLUDE` break an N+ path; and verify fab-prep → fab-mode labels on 13/1.
-They also assert 230 fF Cox for an explicit 100 µm² `CAP` window connected
-through an N+/ML1 via, verify the lumped capacitances follow that merged
-electrical component, exclude unmarked MOS gate overlap from PEX Cox, and account
-separately for the documented diffusion-to-`SUB` density. They do not claim
-BOX, fringe, coupling, or MOS C–V signoff.
+Nix shell. The 12 fixtures verify analytic N/P/TiN/ML1 sheet resistance, typed
+contact resistance, MOS/RES/CAP/DIO ownership, duplicate-label and physical-SUB
+port mappings, equal node-level passive-diffusion C with conserved total,
+omission of unqualified interconnect coupling, mask/exclude behavior, and
+fab-prep label preservation. They do not claim characterized MOS-access or
+resistor-terminal contact resistance, BOX return, fringe, coupling, or MOS C–V
+signoff.

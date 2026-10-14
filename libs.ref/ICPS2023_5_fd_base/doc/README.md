@@ -13,6 +13,7 @@ instead of placing the full 1600 µm frame as a blocking macro.
 | LEF | `lef/ICPS2023_5_fd_base.lef` | reusable 60 × 60 µm pad-cell macro only |
 | DEF | `def/ICPS2023_5_fd_base.def` | 28 independent fixed `PAD_00`–`PAD_27` ML1 top-level pins |
 | Liberty | `lib/ICPS2023_5_fd_base.lib` | physical pin identity only; no pad capacitance or timing constraint |
+| Pad crosswalk | `doc/pad_map.csv` | source GDS pin labels, array side, and ML1 centers for all DEF pins |
 
 Cells in the GDS:
 
@@ -44,9 +45,13 @@ cd ~/Documents/librelane && nix-shell --run 'cd <repo> && \
 GDS unchanged, emits a pad-cell-only LEF and a DEF with one fixed top-level pin
 per physical pad, and emits Liberty without unqualified pad capacitance or
 timing constraints.
-The generic `PAD_XX` names are assigned top-to-bottom, left-to-right within each
-row. Map them to design nets in the floorplan; the DEF pins use the original
-GDS coordinate origin.
+The generic `PAD_XX` aliases are assigned top-to-bottom, then left-to-right.
+`doc/pad_map.csv` cross-references them to the source GDS text labels `pin01`–
+`pin28`, the `pad_60_m1_tin` array side, and each ML1 pad rectangle center.
+The GDS has four unnamed regular arrays of that child (8 + 8 + 6 + 6 pads), not
+named per-pad instances; array side and center identify each member. The source
+labels provide no signal function, bonding schedule, or package-to-design-net
+assignment. Assign design nets separately; do not infer functions from labels.
 
 ## Limits
 

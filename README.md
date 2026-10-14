@@ -44,7 +44,7 @@ this repository below KLayout's salt directory:
 
 ```bash
 mkdir -p ~/.klayout/salt && cd ~/.klayout/salt
-git clone https://github.com/mineda-support/ICPS2023_5.git
+git clone https://github.com/luyanaa/ICPS2023_5.git
 ```
 
 Point the standard command-line tools at the repository root:
@@ -53,6 +53,39 @@ Point the standard command-line tools at the repository root:
 export PDK_ROOT=$(pwd)         # directory containing ICPS2023_5/
 export PDK=ICPS2023_5
 ```
+
+## Process profiles
+
+`libs.tech/klayout/process_profiles.json` defines the process profiles. The
+default `icps2023_5_1m` keeps the flow within the qualified single-metal
+process: MOS and resistor PCells default `with_via` to false, reject an explicit
+VIA1/ML2 request, and DRC, fab-prep, and LVS reject unmasked upper-layer
+geometry. Default DRC omits provisional upper-metal rules.
+
+`icps2023_5_multimetal_experimental` permits VIA1/ML2 PCell geometry, enables
+provisional DRC rules for those layers, and maps only VIA1/ML2 in fab prep.
+Unmasked VIA2/ML3 remains rejected because no LVS connectivity is defined and
+fab prep does not emit them. This profile does not confer foundry qualification.
+LVS has VIA1/ML2 connectivity; PEX rejects all upper-metal geometry in either
+profile because no qualified upper-metal resistance or capacitance model is
+available.
+
+Batch resolution precedence is explicit `-rd process_profile=NAME` (KLayout)
+or `--process-profile NAME` (PEX), then
+`ICPS2023_5_PROCESS_PROFILE`, then the JSON default. KLayout PCells use the
+environment variable or JSON default because they load outside a batch deck.
+Thus an exported experimental profile also affects batch tools when no
+command-line profile is supplied. To select the experimental PCell defaults
+before starting KLayout:
+
+```bash
+export ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental
+```
+
+For reproducible batch runs, pass the profile explicitly; `-rd` and
+`--process-profile` override an inherited environment setting. DRC, fab-prep,
+LVS, and PEX report the resolved profile. `MASK` and `EXCLUDE` geometry retains
+its existing exclusion behavior.
 
 ## Flows
 
@@ -63,19 +96,22 @@ All KLayout decks are plain, headless DRC/LVS DSL — no external Ruby gems, no
 ```bash
 # DRC (design numbering; add -rd layer_mode=fab for foundry-numbered data)
 klayout -b -r libs.tech/klayout/drc/icps2023_5.drc \
-        -rd input=design.gds -rd report=drc.lyrdb
+        -rd input=design.gds -rd report=drc.lyrdb \
+        -rd process_profile=icps2023_5_1m
 
 # design -> foundry mask numbering
 klayout -b -r libs.tech/klayout/drc/icps2023_5_fab_prep.drc \
-        -rd input=design.gds -rd output=fab.gds
+        -rd input=design.gds -rd output=fab.gds \
+        -rd process_profile=icps2023_5_1m
 
 # LVS against a schematic netlist
 klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
-        -rd input=design.gds -rd schematic=design.cir -rd output=extracted.cir
+        -rd input=design.gds -rd schematic=design.cir -rd output=extracted.cir \
+        -rd process_profile=icps2023_5_1m
 
 # parasitic extraction (R network + lumped C)
 nix-shell ~/Documents/librelane --run \
-  'cd "$PDK_ROOT/ICPS2023_5" && python3 libs.tech/klayout/pex/icps2023_5_pex.py --input design.gds --top CELL'
+  'cd "$PDK_ROOT/ICPS2023_5" && python3 libs.tech/klayout/pex/icps2023_5_pex.py --input design.gds --top CELL --process-profile icps2023_5_1m'
 ```
 
 SPICE:
@@ -107,14 +143,17 @@ source `libs.tech/xschem/xschemrc`).
 
 | Check | Result |
 |-------|--------|
-| Default DRC on contest and NAND shipped GDS | 0 markers on both |
-| Strict DRC on contest / NAND | 160 / 166 contact-enclosure markers; strict remains opt-in |
-| Default DRC on 14 generated PCell variants | 0 markers |
-| Fab prep + fab-mode DRC on NAND | 0 markers |
-| LVS `nand_sample_b4soi_reference.cir` compatibility smoke | MATCH, 0 mismatches with explicit `filters=legacy` in design and fab modes |
-| LVS strict default on NAND reference | NO MATCH; unmodelled pad-array parasitics remain in scope |
-| PEX design/fab NAND after via extraction | 1088 contact ports, 1264 R nodes, 1260 resistors, 124 capacitors in both modes |
-| PEX regression fixtures | 5 tests: analytic sheet/contact values, MASK/EXCLUDE, fab TEXT, Cox ownership and via-merged capacitance |
+| Default 1M DRC on shipped NAND sample | Rejected at preflight: unmasked VIA1/ML2 are outside the default profile |
+| Experimental DRC on shipped NAND GDS | 0 markers in design mode with `strict=false`; compatibility smoke only |
+| Strict 1M DRC on shipped samples | Same preflight rejection; earlier marker counts are historical, not current default-profile evidence |
+| Profile-specific DRC/PCell checks | `libs.tech/klayout/test_process_profiles.py` exercises the 1M and experimental gates |
+| Experimental fab prep + fab-mode DRC on NAND GDS | 0 markers with explicit experimental profile and `strict=false`; compatibility smoke only |
+| NAND legacy fab-prep/LVS compatibility | Requires explicit experimental profile; compatibility does not qualify VIA1/ML2 |
+| LVS `nand_sample_b4soi_reference.cir` compatibility smoke | MATCH, 0 mismatches with `filters=legacy` and explicit experimental profile in design and fab modes |
+| LVS strict compare on NAND reference | NO MATCH under explicit experimental process profile; unmodelled pad-array parasitics remain in scope |
+| PEX on shipped NAND GDS | Rejected in either profile for unmasked upper-metal geometry; no extraction output |
+| PEX regression fixtures | 12 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, and unqualified-coupling omission |
+| Layered FEM matrix fixtures | `libs.tech/klayout/pex/test_fieldsolve_box.py` checks matrix symmetry, passivity, charge conservation, material sensitivity, and layer-boundary validation; test permittivities are synthetic |
 | Pad LEF/DEF consistency | 28 fixed independent DEF pins match the frame GDS; LEF/Liberty remain physical-only |
 | ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
 | ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
@@ -133,25 +172,24 @@ source `libs.tech/xschem/xschemrc`).
   pad-view, and xschem-contract checks are documented local commands, not PR
   gates.
 * **ML2 / VIA2 / ML3 are not qualified.** The reference manual marks them
-  T.B.D. The PEX deck omits their resistance/capacitance values; DRC and layer
-  documentation retain only explicitly marked unqualified entries.
-* **No standard cells or characterized I/O cells.** The frame GDS is an
-  overlay, with 28 fixed independent I/O ports in `libs.ref/ICPS2023_5_fd_base/def/`;
-  `libs.tech/librelane/` remains intentionally empty.
-* **DRC document limits.** Strict mode remains opt-in: it reports 160 markers
-  on the contest GDS and 166 on the NAND GDS, while default mode reports none.
-  The fabricated examples therefore do not meet all strict contact-enclosure
-  rules. See `libs.tech/klayout/drc/README.md` for per-rule results.
+  T.B.D. Experimental DRC and fab prep permit only VIA1/ML2; VIA2/ML3 are
+  rejected because their connectivity and mask handling are undefined. PEX
+  rejects all upper-metal geometry.
+* **DRC document limits.** Strict checks remain opt-in. The shipped NAND sample
+  is rejected before rule evaluation by the default 1M profile due to unmasked
+  VIA1/ML2, so earlier strict-marker counts are not current default-profile
+  evidence. See `libs.tech/klayout/drc/README.md` for per-rule limits.
 * **LVS scope.** Strict resistor/capacitor comparison is the default. Explicit
   `-rd filters=legacy` enables the old `max_res`/`min_caps` compatibility
   behavior; even strict LVS cannot check layout substrate/backgate connectivity
   because this PDK has no substrate/BOX geometry. See
   `libs.tech/klayout/lvs/README.md`.
-* **PEX limits.** Routine PEX capacitance remains lumped per conductor component;
+* **PEX limits.** Routine PEX distributes each connected component's existing
+  qualified diffusion capacitance evenly over its resistance-network nodes;
   it does not consume field-solver results or model layout-driven fringing,
-  sidewall capacitance, or distributed RC. A separate research-only scikit-fem
-  ideal-BOX coupon is documented in `libs.tech/klayout/pex/README.md`; it does
-  not qualify the 2023 process stack or provide PEX coefficients. MOS channel
+  sidewall capacitance, or full distributed RC. Research-only FEM studies include
+  neither qualifies the 2023 stack or provides PEX coefficients. The layered
+  solver has no embedded 2023 stack or dielectric constants. MOS channel
   geometry is excluded from interconnect PEX; intrinsic channel charge remains
   with the BSIMSOI device model. The PDK does not identify the return conductor
   for its N/P diffusion-capacitance density; mapping it to `SUB` is an explicit

@@ -16,25 +16,26 @@
 #         Al-N+ contact  150 ohm
 #         Al-P+ contact  200 ohm
 #         Al-TiN contact 0.9 ohm
-#   * capacitance -- lumped per conductor component plus coupling between
-#     overlapping conductors.  PDK_minimalFabSOICMOS.pdf p.9 (Tables of Gate
-#     Oxide and MOSFET Capacitance) reports Cox=2.3 fF/um^2 and N/P diffusion
-#     capacitance density=0.086 fF/um^2, but does not identify the diffusion
-#     capacitance return conductor.  This deck maps that density to global SUB
-#     as an explicit modeling assumption, not as a measured BOX coupling.
-#     The same table reports overlap capacitance of 5 fF/um (N) and 6.8 fF/um
-#     (P).  It is intentionally not extracted: the documents do not define a
-#     validated layout edge/perimeter model for that 1-D value.
+#   * capacitance -- only the reported 0.086 fF/um^2 passive-diffusion
+#     density, mapped to global SUB as an explicit assumption because the PDK
+#     does not identify its return terminal. The 2.3 fF/um^2 CAP windows are
+#     LVS-owned devices and are not emitted here.
+#
+# Ownership: LVS owns MOS devices, RES bodies, CAP devices, and diode I/V.
+# PEX owns TiN/ML1 wiring and eligible passive/diode diffusion access. MOS
+# terminal access is excluded from additive PEX because fitted B4SOI RDSW
+# cannot be separated from physical access resistance. RES-marker contacts
+# are also excluded; neither model supplies independent contact characterization
+# at those device pins.
 #
 # The reference manual p.3 marks Via, M2(Al), Via and M3(Al) T.B.D.; they are
 # therefore omitted rather than assigned an inferred resistance/capacitance.
 # The un-doped SOI film has no direct sheet-resistance value in either source
 # PDF, so it is not silently assigned the legacy LVS R_SOI value.
-#
-# Model limits (read the README): baseline C is lumped per conductor component;
-# the deck consumes no field-solver result and has no fringing capacitance. A
-# component that carries several extracted R nodes gets its capacitance
-# attached to one of them.
+# Model limits (read the README): eligible passive-diffusion C is split evenly
+# over the located resistance-network nodes in each electrical component; it
+# is not local-area distributed RC. No qualified interconnect-coupling value
+# is emitted.
 #
 # Usage (inside the LibreLane nix-shell, which provides this KLayout):
 #   python3 libs.tech/klayout/pex/icps2023_5_pex.py \
@@ -45,6 +46,7 @@
 # Licensed under the Apache License, Version 2.0
 # =============================================================================
 import argparse
+import json
 import os
 import sys
 
@@ -62,12 +64,27 @@ import klayout.pex as pex
 # --------------------------------------------------------------------------
 DESIGN = {
     "DIFF": (3, 0), "TIN": (5, 0), "CNT": (7, 0), "ML1": (8, 0),
-    "TEXT": (13, 0), "CAP": (16, 0), "PAREA": (18, 0), "NAREA": (19, 0),
+    "TEXT": (13, 0), "RES": (15, 0), "CAP": (16, 0), "DIO": (17, 0),
+    "PAREA": (18, 0), "NAREA": (19, 0),
 }
 FAB = {
     "DIFF": (4, 0), "TIN": (5, 0), "CNT": (6, 0), "ML1": (7, 0),
-    "PAREA": (2, 0), "NAREA": (3, 0), "CAP": (16, 0), "TEXT": (13, 1),
+    "PAREA": (2, 0), "NAREA": (3, 0), "CAP": (16, 0), "RES": (15, 0),
+    "DIO": (17, 0), "TEXT": (13, 1),
 }
+PROFILE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "process_profiles.json")
+)
+with open(PROFILE_PATH, encoding="utf-8") as profile_file:
+    PROFILE_DATA = json.load(profile_file)
+
+
+def resolve_process_profile(name):
+    name = name or os.environ.get("ICPS2023_5_PROCESS_PROFILE") or PROFILE_DATA["default_profile"]
+    if name not in PROFILE_DATA["profiles"]:
+        choices = ", ".join(PROFILE_DATA["profiles"])
+        sys.exit("unknown ICPS2023_5 process profile '%s' (choose %s)" % (name, choices))
+    return name, PROFILE_DATA["profiles"][name]
 
 # --------------------------------------------------------------------------
 # Technology data.  Values are direct measurements from the source PDFs;
@@ -100,17 +117,12 @@ VIAS = [
     ("CNT_PAREA", "PAREA", "ML1", 200.0 * CONTACT_REFERENCE_AREA_UM2),
 ]
 
-# Measured Cox applies to the explicit diffusion-capacitor windows (`CAP`).
-# MOS channel overlap is removed from conductor geometry below, so this pair
-# does not duplicate intrinsic capacitance from BSIMSOI device models.
-CAP_PAIRS = [
-    ("TIN", "NAREA", 2.3 * F_PER_UM2),
-    ("TIN", "PAREA", 2.3 * F_PER_UM2),
-]
+# PEX does not emit device capacitance. LVS owns explicit CAP windows, and the
+# MOS model owns intrinsic gate/channel charge.
 
-# PDK p.9 reports diffusion capacitance density (reference manual p.4
-# `CNdiff`/`CPdiff`) without specifying the return terminal. The deck assigns
-# it to global SUB as a single-node modeling assumption.
+# The reported density has no identified return terminal. For eligible
+# passive diffusion only, this deck maps it to global SUB as an explicit
+# single-node modeling assumption.
 CAP_TO_SUB = {
     "NAREA": 0.086 * F_PER_UM2,
     "PAREA": 0.086 * F_PER_UM2,
@@ -159,8 +171,10 @@ def main():
     ap.add_argument("--output")
     ap.add_argument("--layer-mode", default="design", choices=["design", "fab"])
     ap.add_argument("--no-capacitance", action="store_true")
+    ap.add_argument("--process-profile", help="process profile (default: configured 1M profile)")
     ap.add_argument("--simplify", action="store_true", default=True)
     args = ap.parse_args()
+    profile_name, process_profile = resolve_process_profile(args.process_profile)
 
     layers = DESIGN if args.layer_mode == "design" else FAB
     output = args.output or os.path.basename(args.input).rsplit(".", 1)[0] + "_pex.spice"
@@ -176,7 +190,8 @@ def main():
         if len(tops) != 1:
             sys.exit("%s has %d top cells: pass --top CELL" % (args.input, len(tops)))
         cell = tops[0]
-    print("ICPS2023_5 PEX  layer_mode=%s  top=%s  dbu=%g" % (args.layer_mode, cell.name, layout.dbu))
+    print("ICPS2023_5 PEX  layer_mode=%s  profile=%s  top=%s  dbu=%g" %
+          (args.layer_mode, profile_name, cell.name, layout.dbu))
 
     def raw_region(spec):
         li = layout.find_layer(pya.LayerInfo(*spec))
@@ -190,20 +205,52 @@ def main():
     def region(name):
         return raw_region(layers[name]) - exclude - mask
 
-    # input geometry ------------------------------------------------------
-    # DIFF is used only to clip the dopant masks to the SOI island.  The
-    # undoped SOI film itself has no sheet resistance in either source PDF,
-    # so it is deliberately not an R-extractor conductor.
+    upper_layers = PROFILE_DATA["upper_metal_layers"][args.layer_mode]
+    unsupported = [
+        name for name, spec in upper_layers.items()
+        if not (raw_region(spec) - exclude - mask).is_empty()
+    ]
+    if unsupported:
+        if process_profile["permitted_upper_layers"]:
+            reason = "has no qualified extraction model for upper-metal geometry"
+        else:
+            reason = "process profile %s forbids upper-metal geometry" % profile_name
+        sys.exit("ICPS2023_5 PEX %s: %s" % (reason, ", ".join(unsupported)))
+
+    # Geometry ownership --------------------------------------------------
+    # DIFF clips doped regions to SOI. MOS terminal access is omitted from additive
+    # PEX because the fitted RDSW is inseparable from physical access; RES bodies
+    # are omitted because LVS already owns their sheet resistance.
     diff = region("DIFF")
-    # Keep P/N regions as diffusion conductors only. Gate TiN removes the SOI
-    # channel from R/C-to-SUB geometry; explicit CAP windows remain electrodes.
     tin = region("TIN")
     ml1 = region("ML1")
     cap = region("CAP")
+    res = region("RES")
+    dio = region("DIO")
     mos_gate = (tin & diff) - cap
-    narea = (region("NAREA") & diff) - mos_gate
-    parea = (region("PAREA") & diff) - mos_gate
-
+    raw_narea = region("NAREA") & diff
+    raw_parea = region("PAREA") & diff
+    narea = raw_narea - mos_gate
+    parea = raw_parea - mos_gate
+    mos_halo = mos_gate.sized(1)
+    mos_access = {
+        "NAREA": narea.interacting(mos_halo),
+        "PAREA": parea.interacting(mos_halo),
+    }
+    res_active = {
+        "NAREA": raw_narea & res,
+        "PAREA": raw_parea & res,
+    }
+    cap_active = {
+        "NAREA": raw_narea & cap & tin,
+        "PAREA": raw_parea & cap & tin,
+    }
+    diode_active = {
+        "NAREA": raw_narea & dio,
+        "PAREA": raw_parea & dio,
+    }
+    narea = narea - mos_access["NAREA"] - res_active["NAREA"]
+    parea = parea - mos_access["PAREA"] - res_active["PAREA"]
     # Design TEXT is 13/0. Fab prep preserves labels as 13/1 so they remain
     # distinct from the N-channel mask on 13/0.
     labels = []
@@ -217,8 +264,9 @@ def main():
                     t = sh.text
                     labels.append((t.string, it.trans() * t.position()))
                 it.next()
-    # NAREA and PAREA are separate conductors so their measured sheet and
-    # contact resistances cannot be conflated.
+    # N/P diffusion remains PEX-owned only outside MOS access and explicit
+    # RES bodies. DIO access remains PEX-owned because the diode model has no
+    # characterized series resistance.
     conductor_region = {
         "TIN": tin,
         "ML1": ml1,
@@ -238,9 +286,35 @@ def main():
                 via_regions[cut].insert(contact_poly)
             break
 
+    # A physical text terminal is a (label, conductor, anchor) tuple. Keep
+    # separate anchors separate even when their logical label is identical.
+    label_keys = set()
+    label_records = []
+    for logical, point in labels:
+        if not logical:
+            continue
+        for layer_name in sorted(conductor_region):
+            if not contains_point(conductor_region[layer_name], point):
+                continue
+            key = (logical, layer_name, point.x, point.y)
+            if key in label_keys:
+                continue
+            label_keys.add(key)
+            label_records.append(key)
+    label_records.sort()
+    physical_labels = [
+        {
+            "physical": "PORT%04d" % (index + 1),
+            "logical": logical,
+            "layer": layer_name,
+            "point": pya.Point(x, y),
+        }
+        for index, (logical, layer_name, x, y) in enumerate(label_records)
+    ]
+
     # ---------------------------------------------------------------- ports
-    # Ports are the points where a device or an external net meets a
-    # conductor: contact/via locations, plus text labels.
+    # Ports are points where external text terminals or typed CNT contacts
+    # meet an extracted conductor.
     ports = {layer_id(layers[n]): [] for n in conductor_region}
     port_names = {}
 
@@ -250,19 +324,20 @@ def main():
         lst.append(point)
         port_names[(lid, len(lst) - 1)] = name
 
-    # Each CNT cut is assigned to one conductor pair, and the port is placed
-    # at the shared via footprint.
+    # Each CNT cut is assigned to one conductor pair. Stable names follow
+    # sorted contact geometry within each lower conductor.
+    def polygon_key(poly):
+        box = poly.bbox()
+        return box.left, box.bottom, box.right, box.top
+
     for cut, bottom, _top, _r in VIAS:
-        for poly in region_polygons(via_regions[cut]):
-            pt = poly_centroid(poly)
-            add_port("c_%d_%d" % (pt.x, pt.y), bottom, pt)
-    for name, pt in labels:
-        for lname, r in conductor_region.items():
-            if contains_point(r, pt):
-                add_port(name, lname, pt)
+        for index, poly in enumerate(sorted(region_polygons(via_regions[cut]), key=polygon_key), 1):
+            add_port("C_%s_%04d" % (bottom, index), bottom, poly_centroid(poly))
+    for record in physical_labels:
+        add_port(record["physical"], record["layer"], record["point"])
 
     n_ports = sum(len(v) for v in ports.values())
-    print("ports: %d (%d named)" % (n_ports, len(labels)))
+    print("ports: %d (%d named physical terminals)" % (n_ports, len(physical_labels)))
     if n_ports == 0:
         sys.exit("no ports found - nothing to extract")
 
@@ -295,20 +370,15 @@ def main():
     net.simplify()
 
     node_name = {}
-    wifi = {}
     for node in net.each_node():
         if str(node.type()) == "VertexPort":
             lid, idx = node.layer(), node.port_index()
             nname = port_names.get((lid, idx))
             if nname is None:
                 pt = dbox_to_point(node.location(), layout.dbu)
-                nname = "x_%d_%d" % (pt.x, pt.y)
+                nname = "x_%d_%d_%d_%d" % (lid, idx, pt.x, pt.y)
         else:
             nname = "n%d" % node.object_id()
-        # node names must be unique: several ports can share a text label
-        if nname in wifi and wifi[nname] != node.object_id():
-            nname = "%s#%d" % (nname, node.object_id())
-        wifi[nname] = node.object_id()
         node_name[node.object_id()] = nname
 
     elements = list(net.each_element())
@@ -317,24 +387,32 @@ def main():
     # ------------------------------------------------------------ C extract
     caps = []          # (node_a, node_b, farad)
     if not args.no_capacitance:
-        # 1. conductor components per layer (connected parts of the merged
-        #    region) and their area
+        # 1. conductor components per layer. CAP/RES/DIO device regions are
+        #    excluded from this assumed substrate-capacitance area below.
         comps = {}          # layer name -> list of (key, polygon)
         comp_area = {}
         comp_of_cell = {}   # grid index: (layer, cx, cy) -> [key, ...]
         CELL = 10000        # 10 um grid in database units
 
+        substrate_eligible = {
+            "NAREA": conductor_region["NAREA"] - diode_active["NAREA"] - cap_active["NAREA"],
+            "PAREA": conductor_region["PAREA"] - diode_active["PAREA"] - cap_active["PAREA"],
+        }
         for lname, rgn in conductor_region.items():
             comps[lname] = []
             for i, poly in enumerate(region_polygons(rgn)):
                 key = (lname, i)
                 comps[lname].append((key, poly))
-                comp_area[key] = poly.area() * layout.dbu * layout.dbu
+                eligible = substrate_eligible.get(lname)
+                if eligible is None:
+                    area = 0.0
+                else:
+                    area = (pya.Region(poly) & eligible).area() * layout.dbu * layout.dbu
+                comp_area[key] = area
                 b = poly.bbox()
                 for cx in range(b.left // CELL, b.right // CELL + 1):
                     for cy in range(b.bottom // CELL, b.top // CELL + 1):
                         comp_of_cell.setdefault((lname, cx, cy), []).append(key)
-
         def component_at(lname, pt):
             """Key of the component of `lname` containing point `pt`."""
             for key in comp_of_cell.get((lname, pt.x // CELL, pt.y // CELL), []):
@@ -368,25 +446,23 @@ def main():
                 if kb is not None and kt is not None:
                     union(kb, kt)
 
-        # 3. map every R network node to the merged component it sits in, so
-        #    capacitance is attached to the same nodes as the resistance network
-        component_node = {}
+        # 3. map every located R-network node to the merged component it
+        #    occupies. Internal nodes and explicit vertex ports both receive C.
+        component_nodes = {}
+        conductor_by_id = {
+            layer_id(spec): name for name, spec in layers.items() if name in comps
+        }
         for node in net.each_node():
-            if node.location() is None or str(node.type()) != "VertexPort":
+            if node.location() is None:
                 continue
-            lname = None
-            for cand, spec in layers.items():
-                if layer_id(spec) == node.layer():
-                    lname = cand
-                    break
-            if lname is None or lname not in comps:
+            lname = conductor_by_id.get(node.layer())
+            if lname is None:
                 continue
             key = component_at(lname, dbox_to_point(node.location(), layout.dbu))
             if key is None:
                 continue
             root = find(key)
-            if root not in component_node:
-                component_node[root] = node.object_id()
+            component_nodes.setdefault(root, set()).add(node.object_id())
 
         substrate_cap = {}
         for key, area in comp_area.items():
@@ -395,54 +471,48 @@ def main():
                 root = find(key)
                 substrate_cap[root] = substrate_cap.get(root, 0.0) + area * cpa
 
-        # 4. capacitance to the substrate. Sum only N/P diffusion areas;
-        #    wire and gate area share electrical roots but do not use this
-        #    diffusion-density parameter.
-        for root, capacitance in substrate_cap.items():
-            if root not in component_node:
+        # 4. Preserve total density*area and split it evenly across the
+        #    resistance-network nodes in the merged passive-diffusion component.
+        cap_node_count = 0
+        for root in sorted(substrate_cap):
+            capacitance = substrate_cap[root]
+            node_ids = sorted(
+                component_nodes.get(root, ()),
+                key=lambda object_id: node_name[object_id],
+            )
+            if capacitance <= 0.0 or not node_ids:
                 continue
-            caps.append((node_name[component_node[root]], "SUB", capacitance))
-
-        # 5. coupling capacitance between overlapping conductors of different
-        #    components (lumped per component pair)
-        for la, lb, cpa in CAP_PAIRS:
-            if la not in comps or lb not in comps:
-                continue
-            inter = conductor_region[la] & conductor_region[lb]
-            if inter.is_empty():
-                continue
-            pair_area = {}
-            for poly in region_polygons(inter):
-                pt = poly_centroid(poly)
-                ka = component_at(la, pt)
-                kb = component_at(lb, pt)
-                if ka is None or kb is None:
-                    continue
-                ra, rb = find(ka), find(kb)
-                if ra == rb or ra not in component_node or rb not in component_node:
-                    continue
-                key = (ra, rb) if ra <= rb else (rb, ra)
-                pair_area[key] = pair_area.get(key, 0.0) + poly.area() * layout.dbu * layout.dbu
-            for (ra, rb), area in pair_area.items():
-                caps.append((node_name[component_node[ra]], node_name[component_node[rb]],
-                             area * cpa))
-        print("capacitors: %d (%d nodes carry capacitance)" % (len(caps), len(component_node)))
-
+            share = capacitance / len(node_ids)
+            cap_node_count += len(node_ids)
+            for object_id in node_ids:
+                caps.append((node_name[object_id], "SUB", share))
+        print(
+            "capacitors: %d (%d R-network nodes carry eligible capacitance)"
+            % (len(caps), cap_node_count)
+        )
     # ---------------------------------------------------------------- write
     with open(output, "w") as f:
         f.write("* ICPS2023_5 (minimal Fab SOI-CMOS) parasitics\n")
         f.write("* extracted by libs.tech/klayout/pex/icps2023_5_pex.py\n")
         f.write("* layout: %s  top cell: %s  layer_mode: %s\n" % (args.input, cell.name, args.layer_mode))
+        f.write("* process profile: %s\n" % profile_name)
         f.write("* R model: KLayout RNetExtractor, square counting, per-conductor\n")
-        f.write("* C model: lumped per conductor component, documented areal values\n")
-        pinned = sorted({lbl for lbl, _ in labels if lbl})
-        subckt_ports = list(pinned)
-        if not any(name.upper() == "SUB" for name in subckt_ports):
-            subckt_ports.append("SUB")
+        f.write("* C model: equal node shares of eligible passive diffusion density to assumed global SUB\n")
+        for record in physical_labels:
+            mapping = {
+                "physical": record["physical"],
+                "logical": record["logical"],
+                "layer": record["layer"],
+                "x_um": round(record["point"].x * layout.dbu, 6),
+                "y_um": round(record["point"].y * layout.dbu, 6),
+            }
+            f.write("* PORT_MAP %s\n" %
+                    json.dumps(mapping, sort_keys=True, separators=(",", ":")))
+        subckt_ports = [record["physical"] for record in physical_labels] + ["SUB"]
         f.write(".SUBCKT %s_pex %s\n" % (cell.name, " ".join(subckt_ports)))
-        if not pinned:
-            f.write("* no TEXT labelled nets found: only the substrate port is external\n")
-            f.write("* all conductor nodes use generated internal names\n")
+        if not physical_labels:
+            f.write("* no TEXT-labelled physical terminals found\n")
+            f.write("* conductor nodes use generated internal names\n")
         f.write("* ---- resistors ----\n")
         for i, el in enumerate(elements, 1):
             aid, bid = el.a().object_id(), el.b().object_id()
@@ -450,7 +520,7 @@ def main():
             b = node_name.get(bid, "n%d" % bid)
             f.write("R%-5d %s %s %.6g\n" % (i, a, b, el.resistance()))
         if caps:
-            f.write("* ---- capacitors (to SUB and coupling) ----\n")
+            f.write("* ---- capacitors (eligible diffusion to SUB) ----\n")
             for i, (a, b, val) in enumerate(caps, 1):
                 f.write("C%-5d %s %s %.6g\n" % (i, a, b, val))
         f.write(".ENDS %s_pex\n" % cell.name)

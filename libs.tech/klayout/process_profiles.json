@@ -1,0 +1,29 @@
+{
+  "default_profile": "icps2023_5_1m",
+  "upper_metal_layers": {
+    "design": {
+      "VIA1": [9, 0],
+      "ML2": [10, 0],
+      "VIA2": [11, 0],
+      "ML3": [12, 0]
+    },
+    "fab": {
+      "VIA1": [8, 0],
+      "ML2": [9, 0],
+      "VIA2": [11, 0],
+      "ML3": [12, 0]
+    }
+  },
+  "profiles": {
+    "icps2023_5_1m": {
+      "permitted_upper_layers": [],
+      "with_via_default": false,
+      "provisional_drc": false
+    },
+    "icps2023_5_multimetal_experimental": {
+      "permitted_upper_layers": ["VIA1", "ML2"],
+      "with_via_default": true,
+      "provisional_drc": true
+    }
+  }
+}

@@ -28,8 +28,14 @@ Licensed under the Apache License, Version 2.0.
  # e7a7e958671a98d854d87747f09fb27413c07f49; this file copies no source.
 # This is an independent implementation using public RBA APIs; no runtime
 # import or upstream class is required.
+require File.expand_path("../process_profile", __dir__)
 
 module ICPS2023_5NativeGeometry
+  PROFILE_NAME = ICPS2023_5ProcessProfile.resolve
+  PROFILE_DATA = ICPS2023_5ProcessProfile::DATA
+  PROFILE = ICPS2023_5ProcessProfile.profile(PROFILE_NAME)
+  UPPER_METAL_IDS = PROFILE_DATA.fetch("upper_metal_layers").fetch("design").values
+  DEFAULT_WITH_VIA = PROFILE.fetch("with_via_default")
   DIFF = 3
   TIN = 5
   TIN_BLK = 5
@@ -51,8 +57,21 @@ module ICPS2023_5NativeGeometry
   def micron(value)
     (value.to_f / layout.dbu).round
   end
+  def validate_via_profile!(enabled)
+    return unless enabled &amp;&amp; !ICPS2023_5ProcessProfile.supports_via_pcells?(PROFILE_NAME)
+
+    raise "Process profile #{PROFILE_NAME} forbids VIA1/ML2 PCell geometry; " \
+          "set ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental before launching KLayout"
+  end
 
   def add_box(number, x1, y1, x2, y2, datatype = 0)
+    if UPPER_METAL_IDS.include?([number, datatype])
+      layer_name = PROFILE_DATA.fetch("upper_metal_layers").fetch("design").key([number, datatype])
+      unless PROFILE.fetch("permitted_upper_layers").include?(layer_name)
+        raise "Process profile #{PROFILE_NAME} forbids #{layer_name} layer #{number}/#{datatype}; " \
+              "set ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental before launching KLayout"
+      end
+    end
     a = [micron(x1), micron(y1), micron(x2), micron(y2)]
     a[0], a[2] = a[2], a[0] if a[0] > a[2]
     a[1], a[3] = a[3], a[1] if a[1] > a[3]
@@ -116,7 +135,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
     param(:sdg, TypeDouble, "Source Drain gap", :default => 22.0, :unit => "um")
     param(:dsl, TypeDouble, "Minimum Dumbbell shaft length", :default => 22.0, :unit => "um")
     param(:with_pcont, TypeBoolean, "Use external TiN contact", :default => true)
-    param(:with_via, TypeBoolean, "Put Via over contacts", :default => true, :hidden => false)
+    param(:with_via, TypeBoolean, "Put Via over contacts", :default => ICPS2023_5NativeGeometry::DEFAULT_WITH_VIA, :hidden => false)
     param(:with_sdcont, TypeBoolean, "Use source/drain contact", :default => true)
     param(:wide_metal, TypeBoolean, "Wide metal entry?", :default => false, :hidden => true)
     param(:soi_bridge, TypeBoolean, "Bridge TiN gate over SOI edge?", :default => true)
@@ -144,6 +163,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
   end
 
   def produce_impl
+    validate_via_profile!(with_via)
     width = clamp_minimum(w, 13.0)
     length = clamp_minimum(l, 6.0)
     fingers = [n.to_i, 1].max
@@ -298,7 +318,7 @@ class ICPS2023_5NativeResistor &lt; RBA::PCellDeclarationHelper
     param(:m, TypeDouble, "Maximum stripe length", :default => 1000.0, :unit => "um")
     param(:ho, TypeBoolean, "Headers outside?", :default => false)
     param(:rval, TypeDouble, "Resistor value", :default => 0.0, :hidden => true)
-    param(:with_via, TypeBoolean, "Put Via over contacts", :default => true, :hidden => false)
+    param(:with_via, TypeBoolean, "Put Via over contacts", :default => ICPS2023_5NativeGeometry::DEFAULT_WITH_VIA, :hidden => false)
   end
 
   def resistance_sheet
@@ -323,6 +343,7 @@ class ICPS2023_5NativeResistor &lt; RBA::PCellDeclarationHelper
   end
 
   def produce_impl
+    validate_via_profile!(with_via)
     count = [n.to_i, 1].max
     width = clamp_minimum(w, 10.0)
     length = clamp_minimum(l, 25.0)

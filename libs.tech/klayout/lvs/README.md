@@ -11,11 +11,10 @@ Run KLayout 0.30.7 in batch mode:
 
 ```sh
 klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
-  -rd input=layout.gds \
-  -rd schematic=reference.cir \
-  [-rd top=CELL] [-rd layer_mode=design|fab] \
+  -rd input=layout.gds -rd schematic=reference.cir \
+  [-rd top=CELL] [-rd layer_mode=design|fab] [-rd process_profile=NAME] \
   [-rd report=out.lyrdb] [-rd output=extracted.cir] \
-  [-rd substrate=NET] [-rd filters=legacy]
+  [-rd substrate=NET] [-rd filters=legacy] [-rd gate_overlap_um=2.0]
 ```
 
 `layer_mode` defaults to `design`. If omitted, `report` defaults to
@@ -24,6 +23,17 @@ with multiple top cells must be invoked with `-rd top=CELL`; the deck reports
 the available top-cell names when this is missing. `schematic` is required and
 must point to a readable SPICE-format netlist.
 
+The default `icps2023_5_1m` profile rejects unmasked VIA1/ML2/VIA2/ML3 geometry.
+The experimental profile preserves the VIA1/ML2 connectivity option and
+rejects VIA2/ML3 because no extracted connectivity is defined for them. Select
+it with `-rd process_profile=icps2023_5_multimetal_experimental`; it does not
+imply foundry qualification.
+
+The shipped NAND contest GDS contains unqualified VIA1/ML2 geometry. Select
+the experimental profile explicitly to reproduce its legacy LVS and
+fab-prep checks; the profile is not foundry qualification. The regression
+helper uses this profile only for those legacy samples.
+
 The B4SOI SPICE reader preserves `Mname D G S E model ...` terminal order.
 The deck requires every `E` terminal to use the declared global substrate;
 default is `.GLOBAL SUB`, overridable with `-rd substrate=NET`. `E` is still
@@ -31,9 +41,9 @@ projected out of layout comparison because this PDK has no matching
 substrate/BOX geometry, so this checks the schematic substrate contract, not a
 physical backside contact or layout-to-E connection. A five-terminal
 `D G S E P` device is rewritten so `P` maps to the extracted `NMOS4` body tie.
-Design and fab extractions both reduce measured `L` by 4 µm, removing the
-PDF-documented 2 µm overlap at each end so the compared parameter is channel
-length.
+The default `gate_overlap_um=2.0` removes 2 µm at each gate end from extracted
+`L`, matching the PDF-documented overlap. Override it in microns per end with
+`-rd gate_overlap_um=VALUE`; extracted channel length must remain positive.
 
 The shipped NAND's B4SOI reference is
 `Samples/Semicon2023/NAND/nand_sample_b4soi_reference.cir`; the legacy
@@ -61,9 +71,10 @@ uses the measured 2.3 fF/um² gate-oxide Cox from p.9. The PDFs do not qualify
 the listed `R_SOI`, MIMCAP, or TiN/Al-capacitance values; `R_SOI` and MIM/TIN
 extraction remain legacy compatibility entries.
 
-The connectivity stack is TiN, contact, ML1, VIA1, ML2, and body-tie path,
-with the legacy capacitor, resistor, and diode connections retained. `MASK`
-(20/0) excludes all geometry below it; `EXCLUDE` (63/63) is also ignored.
+In the experimental profile, the connectivity stack is TiN, contact, ML1,
+VIA1, and ML2, with the legacy capacitor, resistor, and diode connections
+retained. The default 1M profile rejects upper-metal geometry. `MASK` (20/0)
+excludes all geometry below it; `EXCLUDE` (63/63) is also ignored.
 `TIN_BLK` (5/1) splits a TiN gate and enables `NMOS4` body-tie extraction.
 
 ## Comparison
@@ -101,9 +112,8 @@ the following behavior changes:
 * The old MOS reader maps `S/G/D` against SPICE node order `D/G/S`, swapping
   drain and source. This reader preserves `D/G/S` and adds B4SOI `E` validation
   plus optional external-body `P` mapping to `NMOS4`.
-* Both design and fab modes subtract 4 µm from extracted `L`, removing the
-  PDF-documented 2 µm TiN overlap at each channel end and comparing channel
-  length.
+* Both design and fab modes subtract `2 * gate_overlap_um` from extracted `L`;
+  the default 2 µm per end is documented on PDF p.4 and p.20.
 * Body-tied NCH gate geometry is removed from both `diff_nores` calculations,
   preventing the tied gate region from also being extracted as source/drain.
 
@@ -124,8 +134,11 @@ are retained as options because the foundry qualification is still T.B.D.
 
 ## Regression checks
 
-Run `python3 libs.tech/klayout/lvs/test_lvs_contract.py` inside the KLayout
-environment. It verifies the NAND reference matches in design and fab modes
-with explicit legacy filters; strict default comparison exposes the unmodelled
-pad-array parasitics. It also checks that a wrong common `E`, heterogeneous `E`
-nets, or a missing `.GLOBAL SUB` declaration fail before layout comparison.
+Run `python3 libs.tech/klayout/lvs/test_lvs_contract.py` and
+`python3 libs.tech/klayout/test_process_profiles.py` inside the KLayout
+environment. The profile suite verifies upper-layer rejection in 1M mode and
+preservation of supported experimental VIA1/ML2 handling.
+
+`test_lvs_contract.py` also builds a strict design-layer fixture with a positive
+MOS/resistor/PDIFFCAP reference, then checks that a changed MOS terminal,
+changed width, and changed overlap setting fail comparison.

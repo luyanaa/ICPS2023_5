@@ -10,12 +10,18 @@ PDK-document rules the golden deck was missing.
 ```bash
 klayout -b -r icps2023_5.drc -rd input=layout.gds \
         [-rd top=CELL] [-rd layer_mode=design|fab] \
-        [-rd report=out.lyrdb] [-rd strict=true]
+        [-rd report=out.lyrdb] [-rd strict=true] [-rd process_profile=NAME]
 ```
 
 Rule IDs use the PDK symbol names (W1, W2, S1, m1..m7, d1, W3, S2) and keep the
 golden deck's numbers in the description. `MASK` (20/0) and `EXCLUDE` (63/63)
 regions are ignored.
+
+The shared profile file is `../process_profiles.json`. The default
+`icps2023_5_1m` rejects unmasked VIA1/ML2/VIA2/ML3 geometry and omits
+provisional upper-metal checks. The experimental profile permits VIA1/ML2 and
+runs their provisional checks; unmasked VIA2/ML3 remains rejected because no
+LVS connectivity is defined and fab prep does not emit those layers.
 
 Compared with upstream [`drc.lydrc` (design/product auto-detect)](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/drc/drc.lydrc) and the [design-to-SOI conversion deck](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/drc/ICPS2023_5_to_SOI.lydrc), this headless deck uses explicit `layer_mode=design|fab`. It preserves the core design/fab predicates, adds PDF-backed design checks that the golden deck omitted, and fixes the golden deck's VIA1 spacing output typo (which reported the width rule instead).
 
@@ -25,7 +31,8 @@ Added relative to the golden design-mode rules:
 * `TIN.d1` gate TiN to contact distance ≥ 8 µm
 * `TIN.m1` TiN overlap of the diffusion ≥ 2 µm (the golden deck checked this only in product mode)
 * `TIN.S4` TiN space ≥ 6 µm (documentation; the golden deck used 4 µm)
-* `VIA2.*`, `ML3.*` for the unqualified upper metal option, marked `[TBD]`
+* `VIA1.*`, `ML2.*` in the experimental profile only; these rules remain
+  provisional and do not qualify the layers.
 
 `DIFF.m3` is retained from the original deck: `PAREA` and `NAREA` must each enclose SOI by 2 µm. The rule's correct direction is dopant-area enclosure of the SOI island.
 
@@ -40,10 +47,18 @@ the two Al enclosure rules (m6 = 4 µm, m7 = 2.5 µm) expressible at all.
 ### `-rd strict=true`
 
 The strict-mode limits are the published design limits that the golden deck
-relaxed. Keep `strict=false` as the default: the contest GDS has 160 violations
-(32 `CNT.m5`, 128 `CNT.m6`) and the NAND GDS has 166 (32 `CNT.m5`, 134
-`CNT.m6`). Both pass with default golden limits. The shipped `pcont_min` also
+relaxed. Earlier unprofiled checks reported 160 contest-layout markers (32
+`CNT.m5`, 128 `CNT.m6`) and 166 NAND markers (32 `CNT.m5`, 134 `CNT.m6`).
+Those counts are historical: the current 1M profile rejects unmasked upper
+metal before rule evaluation. Reproduce contact-rule results only with the
+explicit experimental profile, and only when no unmasked VIA2/ML3 is present;
+those results are not foundry qualification. The shipped `pcont_min` also
 provides only 2.0 µm enclosure for two strict 2.5 µm gate-contact rules.
+
+The shipped NAND GDS was checked in design mode and after experimental
+fab-preparation in fab mode, each with `strict=false`; both DRC reports
+contained no items. This is a legacy compatibility smoke, not foundry
+qualification.
 
 | Rule | Default | `strict=true` | Evidence |
 |------|---------|---------------|----------|
@@ -63,11 +78,15 @@ legacy conversion script (2 µm doping-mask bias, gate-window bias, diode guard
 ring).
 
 ```bash
-klayout -b -r icps2023_5_fab_prep.drc -rd input=design.gds -rd output=fab.gds
+klayout -b -r icps2023_5_fab_prep.drc -rd input=design.gds -rd output=fab.gds \
+        [-rd process_profile=NAME]
 ```
 
-The output is checked with `-rd layer_mode=fab` on the DRC and LVS decks; the
-fabricated NAND sample passes both after conversion.
+The shipped contest NAND layout contains unqualified VIA1/ML2 geometry, so
+the default 1M profile rejects it. Select
+`icps2023_5_multimetal_experimental` explicitly when reproducing legacy
+fab-prep/DRC/LVS checks; it permits only VIA1/ML2 and does not establish foundry
+qualification. Unmasked VIA2/ML3 remains rejected.
 
 Compared with the upstream [`ICPS2023_5_to_SOI.lydrc`](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/drc/ICPS2023_5_to_SOI.lydrc), this deck accepts canonical design layers only; the legacy script also preserved already-mask-numbered geometry inside `EXCLUDE`. The TiN output retains the legacy 2 µm gate-window union and `TIN_BLK` geometry; a 4 µm guard around diffusion-capacitor `CAP` windows excludes their electrode fringe from gate-window bias. Mask `N_CH` (13/0) now maps directly from canonical `NCH` (21/0), as specified by the PDK layer table, instead of synthesizing legacy `pwell` from NAREA/TiN geometry. `MASK`/`EXCLUDE` input geometry is stripped rather than mixed into the output.
 

@@ -13,6 +13,8 @@ drc/  icps2023_5.drc          design rule check (design|fab numbering)
 lvs/  icps2023_5.lvs          layout vs schematic
 pex/  icps2023_5_pex.py       parasitic extraction (R network + lumped C)
 pcells/                       native RBA device PCells (no AnagixLoader)
+process_profiles.json        shared 1M and experimental profile definitions
+process_profile.rb           shared KLayout profile and upper-layer guards
 macros/                       utility macros from the original package
 xs/                           process cross sections and their colour maps
 doc/layers.md                 canonical layer table + numbering history
@@ -37,12 +39,31 @@ klayout -b -r lvs/icps2023_5.lvs -rd input=design.gds -rd schematic=design.cir \
         -rd output=extracted.cir -rd report=lvs.lyrdb
 
 # PEX
-python3 pex/icps2023_5_pex.py --input design.gds --top CELL --output pex.spice
+python3 pex/icps2023_5_pex.py --input design.gds --top CELL --output pex.spice \
+        [--process-profile icps2023_5_multimetal_experimental]
 ```
 
 Common options: `-rd top=CELL` for files with several top cells (library GDS
-files need it), `-rd layer_mode=design|fab` for the two number spaces, and
+files need it), `-rd layer_mode=design|fab` for the two number spaces,
+`-rd process_profile=NAME` to select a profile for DRC, fab prep, or LVS, and
 `-rd report=`/`-rd output=` to place the outputs.
+
+## Process profiles
+
+The default `icps2023_5_1m` rejects unmasked VIA1/ML2/VIA2/ML3 geometry in DRC,
+fab prep, and LVS. PCell `with_via` defaults are false. The
+`icps2023_5_multimetal_experimental` profile permits VIA1/ML2 PCell geometry,
+enables provisional DRC rules for those layers, and maps only VIA1/ML2 in fab
+prep. Unmasked VIA2/ML3 remains rejected. Experimental LVS covers VIA1/ML2
+only; PEX rejects all upper-metal geometry because it has no qualified
+extraction model. Experimental does not mean foundry-qualified.
+
+Batch profile precedence is an explicit `-rd process_profile=NAME` for DRC,
+fab-prep, and LVS (or `--process-profile NAME` for PEX), then
+`ICPS2023_5_PROCESS_PROFILE`, then the JSON default. An explicit command-line
+profile overrides an inherited environment variable; without either, the
+configured 1M default is used. KLayout PCells read the environment variable or
+the JSON default at library load.
 
 ## Comparison with the legacy KLayout package
 
@@ -56,13 +77,25 @@ actionable message instead of writing into the design directory.
 KLayout's RBA PCell API. It runs in batch mode without AnagixLoader, the
 `MinedaPCell` base classes, or the `ICPS2023_5_Basic` library.
 
-The nine default PCells and five optional variants were batch-generated and
-pass the default design-mode DRC with zero markers. Optional variants cover
-Nch body ties, p-substrate contacts, two fingers, Pch n-substrate contacts, and
-an N-well P-diffusion resistor. The two-finger Nch variant has a continuous
-TiN gate bus below the SOI island; the gate-to-source/drain-contact spacing
-rule still passes. The utility scripts under `macros/` remain GUI macros; only
-document paths inside `macros/Documents/` were updated.
+The library registers nine active PCell types and documents five optional
+variants for Nch body ties, p-substrate contacts, two fingers, Pch n-substrate
+contacts, and an N-well P-diffusion resistor. The selected process profile
+controls whether optional VIA1/ML2 geometry is enabled. Utility scripts under
+`macros/` remain GUI macros; only document paths inside `macros/Documents/`
+were updated.
+
+The PCells read `process_profiles.json` through `process_profile.rb`; keep both
+files alongside the macro when installing the technology.
+
+Run `python3 test_process_profiles.py` inside the KLayout environment to verify
+PCell defaults, upper-layer rejection, and profile-specific DRC/fab-prep/LVS/
+PEX behavior.
+
+`python3 pcells/test_native_pcells.py` checks representative mask bounding
+boxes for all nine native PCell types, a multi-finger MOS routing variant,
+and the default profile's upper-metal exclusion. The original Anagix PCell
+generator is absent; these native geometry baselines do not claim legacy
+equivalence.
 
 ## Layer numbering
 

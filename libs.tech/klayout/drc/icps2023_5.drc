@@ -30,26 +30,39 @@
 # Source layout: `source()` aborts on files with more than one top cell
 # (library GDS files do). Pick the cell explicitly, or fail with a list.
 # -----------------------------------------------------------------------------
+require File.expand_path("../process_profile", __dir__)
+profile_name = ICPS2023_5ProcessProfile.resolve($process_profile)
+process_profile = ICPS2023_5ProcessProfile.profile(profile_name)
+
+probe = RBA::Layout::new
+probe.read($input)
 if $top && $top.to_s != ""
+  selected_top = probe.cell($top.to_s)
+  raise "cell '#{$top}' not found in #{$input}" if selected_top.nil?
   source($input, $top)
 else
-  probe = RBA::Layout::new
-  probe.read($input)
   if probe.top_cells.size > 1
     raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
   end
+  selected_top = probe.top_cells.first
   source($input)
 end
 
 layer_mode = ($layer_mode && $layer_mode.to_s != "") ? $layer_mode.to_s : "design"
-STRICT     = $strict.to_s == "true" || $strict.to_s == "1"
+unless ["design", "fab"].include?(layer_mode)
+  raise "layer_mode must be 'design' or 'fab' (got '#{layer_mode}')"
+end
+ICPS2023_5ProcessProfile.reject_unpermitted_layers!(
+  probe, selected_top, layer_mode, profile_name, "ICPS2023_5 DRC"
+)
+STRICT = $strict.to_s == "true" || $strict.to_s == "1"
 
 # The default report goes to the current directory (absolute path): KLayout
 # resolves relative paths against the input layout's directory, which would
 # otherwise drop report files into the PDK tree.
 report_file = ($report && $report.to_s != "") ? $report :
   File.expand_path("#{File.basename(source.path).sub(/\.(gds|gdsii|oas|oasis)$/i, '')}_drc.lyrdb")
-report("ICPS2023_5 DRC (#{layer_mode}), #{File.basename(source.path)}", report_file)
+report("ICPS2023_5 DRC (#{layer_mode}, #{profile_name}), #{File.basename(source.path)}", report_file)
 
 # -----------------------------------------------------------------------------
 # Input layers
@@ -196,28 +209,23 @@ end
 r = cnt_via.without_perimeter(20.0.um);   r.output("CNT.J TiN-ML1 Cnt not 5x5 um (golden CNT-J)")
 
 # =============================================================================
-# 4. Metal 1 (Al) / via1 / metal 2 / metal 3
+# 4. Metal 1 (Al) / via1 / metal 2
 # =============================================================================
-puts "Check Metal, Via1, Metal2, Metal3"
+puts "Check Metal1, Via1, Metal2"
 r = ml1.width(6.0.um);             r.output("ML1.A ML1 width < 6 um (golden ML1-A)")
 r = ml1.space(4.0.um);             r.output("ML1.B ML1 space < 4 um (golden ML1-B)")
 r = ml1.enclosing(cnt, 2.0.um);    r.output("ML1.C ML1 enclosing Cnt < 2 um (golden ML1-C)")
-r = via1.width(4.0.um);            r.output("VIA1.D Via1 width < 4 um (golden VIA1-D)")
-r = via1.space(4.0.um);            r.output("VIA1.E Via1 space < 4 um (golden VIA1-E)")
-r = ml1.enclosing(via1, 2.0.um);   r.output("VIA1.F ML1 enclosing Via1 < 2 um (golden VIA1-F)")
-r = via1_via.without_perimeter(20.0.um); r.output("VIA1.G ML1-ML2 Via not 5x5 um (golden VIA1-G)")
-r = ml2.width(6.0.um);             r.output("ML2.H ML2 width < 6 um (golden ML2-H)")
-r = ml2.space(6.0.um);             r.output("ML2.I ML2 space < 6 um (golden ML2-I)")
-r = ml2.enclosing(via1, 2.0.um);   r.output("ML2.J ML2 enclosing Via1 < 2 um (golden ML2-J)")
+if process_profile.fetch("provisional_drc")
+  r = via1.width(4.0.um);            r.output("VIA1.D Via1 width < 4 um (golden VIA1-D)")
+  r = via1.space(4.0.um);             r.output("VIA1.E Via1 space < 4 um (golden VIA1-E)")
+  r = ml1.enclosing(via1, 2.0.um);   r.output("VIA1.F ML1 enclosing Via1 < 2 um (golden VIA1-F)")
+  r = via1_via.without_perimeter(20.0.um); r.output("VIA1.G ML1-ML2 Via not 5x5 um (golden VIA1-G)")
+  r = ml2.width(6.0.um);             r.output("ML2.H ML2 width < 6 um (golden ML2-H)")
+  r = ml2.space(6.0.um);             r.output("ML2.I ML2 space < 6 um (golden ML2-I)")
+  r = ml2.enclosing(via1, 2.0.um);   r.output("ML2.J ML2 enclosing Via1 < 2 um (golden ML2-J)")
 
-# ML2/VIA2/ML3 are not qualified by the foundry (T.B.D. in the reference
-# manual). Rules below are the ML2 rules carried one level up; they are
-# advisory until the foundry releases the mask set.
-r = via2.width(4.0.um);            r.output("VIA2.K [TBD] Via2 width < 4 um")
-r = via2.space(4.0.um);            r.output("VIA2.L [TBD] Via2 space < 4 um")
-r = ml2.enclosing(via2, 2.0.um);   r.output("VIA2.M [TBD] ML2 enclosing Via2 < 2 um")
-r = ml3.width(6.0.um);             r.output("ML3.N [TBD] ML3 width < 6 um")
-r = ml3.space(6.0.um);             r.output("ML3.O [TBD] ML3 space < 6 um")
-r = ml3.enclosing(via2, 2.0.um);   r.output("ML3.P [TBD] ML3 enclosing Via2 < 2 um")
+  # VIA2/ML3 have no connectivity model and are not permitted by any profile;
+  # unmasked geometry on those layers is rejected during profile preflight.
+end
 
-puts "DRC finished"
+puts "DRC finished (profile=#{profile_name})"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check generated pad LEF/DEF identities against the unchanged frame GDS."""
 
+import csv
 import re
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ GDS = ROOT / "libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds"
 LEF = ROOT / "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef"
 DEF = ROOT / "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def"
 LIB = ROOT / "libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib"
+PAD_MAP = ROOT / "libs.ref/ICPS2023_5_fd_base/doc/pad_map.csv"
 
 
 def def_pin_records(text):
@@ -88,6 +90,93 @@ class PadViewsTests(unittest.TestCase):
             self.assertEqual(record["height"], int(round(box.height() * layout.dbu * units_per_micron)))
             self.assertEqual(record["x"], int(round(box.left * layout.dbu * units_per_micron)))
             self.assertEqual(record["y"], int(round(box.bottom * layout.dbu * units_per_micron)))
+
+    def test_source_pin_labels_map_to_def_pads_and_gds_arrays(self):
+        layout = pya.Layout()
+        layout.read(str(GDS))
+        top = layout.cell("ICPS2023_5_fd_base")
+        self.assertIsNotNone(top)
+
+        pad_arrays = [
+            instance for instance in top.each_inst()
+            if instance.cell.name == "pad_60_m1_tin"
+        ]
+        self.assertEqual(len(pad_arrays), 4)
+        self.assertTrue(all(instance.is_regular_array() for instance in pad_arrays))
+        self.assertEqual(
+            sorted(instance.na * instance.nb for instance in pad_arrays),
+            [6, 6, 8, 8],
+        )
+
+        top.flatten(True)
+        ml1 = layout.find_layer(pya.LayerInfo(8, 0))
+        self.assertIsNotNone(ml1)
+        boxes = [
+            polygon.bbox()
+            for polygon in pya.Region(top.shapes(ml1)).merged().each()
+        ]
+        boxes.sort(key=lambda box: (-(2 * box.bottom + box.height()), box.left))
+
+        labels = {}
+        for layer_index in range(layout.layers()):
+            for shape in top.shapes(layer_index).each():
+                if not shape.is_text():
+                    continue
+                text = shape.text
+                if not re.fullmatch(r"pin\d{2}", text.string):
+                    continue
+                point = text.trans.disp
+                self.assertNotIn(text.string, labels)
+                labels[text.string] = (point.x, point.y)
+
+        self.assertEqual(
+            set(labels), {"pin%02d" % index for index in range(1, 29)}
+        )
+        with PAD_MAP.open(newline="") as source:
+            reader = csv.DictReader(source)
+            self.assertEqual(
+                reader.fieldnames,
+                [
+                    "def_pin",
+                    "source_pin_label",
+                    "gds_cell",
+                    "array_side",
+                    "center_x_um",
+                    "center_y_um",
+                ],
+            )
+            mappings = list(reader)
+        self.assertEqual(len(mappings), 28)
+        by_pin = {row["def_pin"]: row for row in mappings}
+        self.assertEqual(len(by_pin), 28)
+
+        for index, box in enumerate(boxes):
+            def_pin = "PAD_%02d" % index
+            row = by_pin[def_pin]
+            containing_labels = [
+                label
+                for label, (x, y) in labels.items()
+                if box.left <= x <= box.right and box.bottom <= y <= box.top
+            ]
+            self.assertEqual(len(containing_labels), 1, def_pin)
+            self.assertEqual(row["source_pin_label"], containing_labels[0])
+            self.assertEqual(row["gds_cell"], "pad_60_m1_tin")
+
+            center_x = (box.left + box.right) * layout.dbu / 2.0
+            center_y = (box.bottom + box.top) * layout.dbu / 2.0
+            self.assertAlmostEqual(float(row["center_x_um"]), center_x, places=3)
+            self.assertAlmostEqual(float(row["center_y_um"]), center_y, places=3)
+            if abs(center_y - 720.0) < 1.0:
+                array_side = "north"
+            elif abs(center_y + 720.0) < 1.0:
+                array_side = "south"
+            elif abs(center_x - 720.0) < 1.0:
+                array_side = "east"
+            elif abs(center_x + 720.0) < 1.0:
+                array_side = "west"
+            else:
+                self.fail("pad center is not on a source GDS edge: %s" % def_pin)
+            self.assertEqual(row["array_side"], array_side)
 
     def test_lef_and_liberty_are_physical_only_views(self):
         lef = LEF.read_text()

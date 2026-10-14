@@ -19,21 +19,31 @@
 # Licensed under the Apache License, Version 2.0
 # =============================================================================
 
+require File.expand_path("../process_profile", __dir__)
+profile_name = ICPS2023_5ProcessProfile.resolve($process_profile)
+process_profile = ICPS2023_5ProcessProfile.profile(profile_name)
+
 if $input.nil? || $input.to_s.empty?
   raise "icps2023_5_fab_prep: -rd input=<design.gds> is REQUIRED"
 end
 output = ($output && $output.to_s != "") ? $output.to_s : $input.to_s.sub(/\.(gds|gdsii)$/i, '_fab.gds')
 
+probe = RBA::Layout::new
+probe.read($input)
 if $top && $top.to_s != ""
+  selected_top = probe.cell($top.to_s)
+  raise "cell '#{$top}' not found in #{$input}" if selected_top.nil?
   source($input, $top)
 else
-  probe = RBA::Layout::new
-  probe.read($input)
   if probe.top_cells.size > 1
     raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
   end
+  selected_top = probe.top_cells.first
   source($input)
 end
+ICPS2023_5ProcessProfile.reject_unpermitted_layers!(
+  probe, selected_top, "design", profile_name, "ICPS2023_5 fab prep"
+)
 target(output)
 
 # ---- design layers ---------------------------------------------------------
@@ -81,11 +91,14 @@ DIFF.output(4, 0)                      # SOI      (active)
 tin_out.output(5, 0)                   # TiN-Gate
 CNT.output(6, 0)                       # Contact
 ML1.output(7, 0)                       # M1(Al)
-VIA1.output(8, 0)                      # Via
-ML2.output(9, 0)                       # M2(Al)
 PAD.output(10, 0)                      # PAD opening (no mask in the PDK table)
-VIA2.output(11, 0)                     # Via2   [foundry T.B.D.]
-ML3.output(12, 0)                      # M3(Al) [foundry T.B.D.]
+permitted_upper_layers = process_profile.fetch("permitted_upper_layers")
+if permitted_upper_layers.include?("VIA1")
+  VIA1.output(8, 0)                    # Via
+end
+if permitted_upper_layers.include?("ML2")
+  ML2.output(9, 0)                     # M2(Al)
+end
 NCH.output(13, 0)                      # N-ch   (channel dope NMOS)
 FRAME.output(14, 0)
 RES.output(15, 0)
@@ -94,4 +107,5 @@ DIO.output(17, 0)
 TEXT.output(13, 1)                     # labels kept, datatype 1 so they do not
                                        # collide with the N-ch mask geometry
 
+puts "icps2023_5_fab_prep: profile=#{profile_name}"
 puts "icps2023_5_fab_prep: wrote #{output}"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Geometry-to-netlist checks for the qualified ICPS2023_5 PEX paths."""
 
+import json
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,39 @@ def run_checked(command):
     return result.stdout
 
 
+def port_mappings(netlist):
+    return [
+        json.loads(line[len("* PORT_MAP "):])
+        for line in netlist.splitlines()
+        if line.startswith("* PORT_MAP ")
+    ]
+
+
+def physical_ports(netlist, logical):
+    return [
+        item["physical"]
+        for item in port_mappings(netlist)
+        if item["logical"] == logical
+    ]
+
+
+def capacitance_elements(netlist):
+    elements = []
+    for line in netlist.splitlines():
+        fields = line.split()
+        if len(fields) == 4 and fields[0].startswith("C"):
+            elements.append((fields[1], fields[2], float(fields[3])))
+    return elements
+
+
+def mapped_port(netlist, name):
+    matches = physical_ports(netlist, name)
+    return matches[0] if len(matches) == 1 else name
+
+
 def equivalent_resistance(netlist, source, sink):
+    source = mapped_port(netlist, source)
+    sink = mapped_port(netlist, sink)
     edges = []
     for line in netlist.splitlines():
         fields = line.split()
@@ -184,12 +217,106 @@ class PexRegressionTests(unittest.TestCase):
                 self.assertIsNotNone(measured, spice + "\n" + self.last_pex_log)
                 self.assertAlmostEqual(measured, expected, delta=expected * 0.01)
 
-    def test_mos_channel_capacitance_requires_an_explicit_cap_window(self):
-        cases = [
-            (False, 0.0, 8.6e-15),
-            (True, 230.0e-15, 17.2e-15),
-        ]
-        for explicit_cap, expected_cox, expected_substrate in cases:
+    def test_duplicate_text_labels_export_distinct_physical_ports(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("DUPLICATE_LABELS")
+            for x in (0, 100):
+                add_box(layout, cell, (3, 0), x, 0, x + 10, 10)
+                add_box(layout, cell, (19, 0), x, 0, x + 10, 10)
+                add_text(layout, cell, (13, 0), "VDD", x + 5, 5)
+
+            spice = self.extract(layout, cell, tempdir)
+            header = next(
+                line for line in spice.splitlines() if line.startswith(".SUBCKT ")
+            ).split()
+            physical_names = header[2:-1]
+            mappings = port_mappings(spice)
+            self.assertEqual(len(physical_names), 2, spice)
+            self.assertEqual(len(set(physical_names)), 2, spice)
+            self.assertEqual(len(mappings), 2, spice)
+            self.assertEqual({item["logical"] for item in mappings}, {"VDD"})
+            self.assertEqual(
+                {item["physical"] for item in mappings}, set(physical_names)
+            )
+            self.assertEqual({item["layer"] for item in mappings}, {"NAREA"})
+            self.assertEqual({item["x_um"] for item in mappings}, {5.0, 105.0})
+            self.assertNotIn("VDD#", spice)
+
+            repeated = self.extract(layout, cell, tempdir)
+            self.assertEqual(
+                [line for line in spice.splitlines() if line.startswith("* PORT_MAP ")],
+                [line for line in repeated.splitlines() if line.startswith("* PORT_MAP ")],
+            )
+
+    def test_physical_sub_label_is_separate_from_global_return(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("PHYSICAL_SUB")
+            add_box(layout, cell, (8, 0), 0, 0, 100, 10)
+            add_text(layout, cell, (13, 0), "SUB", 50, 5)
+
+            spice = self.extract(layout, cell, tempdir)
+            header = next(
+                line for line in spice.splitlines() if line.startswith(".SUBCKT ")
+            ).split()
+            mappings = port_mappings(spice)
+            self.assertEqual(len(mappings), 1, spice)
+            self.assertEqual(mappings[0]["logical"], "SUB")
+            self.assertNotEqual(mappings[0]["physical"], "SUB")
+            self.assertEqual(header[2:], [mappings[0]["physical"], "SUB"])
+
+    def test_mos_access_resistance_and_capacitance_are_not_reextracted(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("MOS_ACCESS_OWNER")
+            add_box(layout, cell, (3, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (19, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (5, 0), 40, 0, 60, 10)
+            for x, label in ((10, "DRAIN"), (90, "SOURCE")):
+                add_box(layout, cell, (8, 0), x - 5, 0, x + 5, 10)
+                add_box(layout, cell, (7, 0), x - 2.5, 2.5, x + 2.5, 7.5)
+                add_text(layout, cell, (13, 0), label, x, 5)
+
+            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            self.assertIsNone(equivalent_resistance(spice, "DRAIN", "SOURCE"))
+            self.assertFalse(
+                any(line.startswith("C") for line in spice.splitlines()), spice
+            )
+
+    def test_lvs_owns_marked_resistor_body(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("RESISTOR_OWNER")
+            add_box(layout, cell, (3, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (19, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (15, 0), 0, 0, 100, 10)
+            for x, label in ((5, "LEFT"), (95, "RIGHT")):
+                add_box(layout, cell, (8, 0), x - 2, 0, x + 2, 10)
+                add_box(layout, cell, (7, 0), x - 2.5, 2.5, x + 2.5, 7.5)
+                add_text(layout, cell, (13, 0), label, x, 5)
+
+            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            self.assertIsNone(equivalent_resistance(spice, "LEFT", "RIGHT"))
+            self.assertFalse(
+                any(line.startswith("C") for line in spice.splitlines()), spice
+            )
+
+    def test_diode_model_owns_iv_while_pex_owns_diffusion_access(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("DIODE_ACCESS_OWNER")
+            add_box(layout, cell, (3, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (19, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (17, 0), 0, 0, 100, 10)
+            add_text(layout, cell, (13, 0), "ANODE", 5, 5)
+            add_text(layout, cell, (13, 0), "CATHODE", 95, 5)
+
+            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            measured = equivalent_resistance(spice, "ANODE", "CATHODE")
+            self.assertAlmostEqual(measured, 1620.0, delta=16.2)
+            self.assertFalse(
+                any(line.startswith("C") for line in spice.splitlines()), spice
+            )
+
+    def test_lvs_owns_explicit_capacitance_windows(self):
+        cases = [(False, 0.0), (True, 8.6e-15)]
+        for explicit_cap, expected_substrate in cases:
             with self.subTest(explicit_cap=explicit_cap), tempfile.TemporaryDirectory() as tempdir:
                 layout, cell = self.make_layout("CAP_WINDOW_%s" % explicit_cap)
                 add_box(layout, cell, (3, 0), 0, 0, 20, 10)
@@ -202,35 +329,83 @@ class PexRegressionTests(unittest.TestCase):
                 add_text(layout, cell, (13, 0), "GATE", -5, 5)
                 add_text(layout, cell, (13, 0), "PLATE", 15, 50)
                 spice = self.extract(layout, cell, tempdir, capacitance=True)
-                capacitors = []
-                for line in spice.splitlines():
-                    fields = line.split()
-                    if len(fields) == 4 and fields[0].startswith("C"):
-                        capacitors.append((frozenset(fields[1:3]), float(fields[3])))
+                capacitors = capacitance_elements(spice)
+                substrate_caps = [
+                    (a, b, value)
+                    for a, b, value in capacitors
+                    if "SUB" in {a, b}
+                ]
+                gate_ports = set(physical_ports(spice, "GATE"))
+                self.assertEqual(len(gate_ports), 1, spice)
+                gate_caps = [
+                    (a, b, value) for a, b, value in capacitors
+                    if not {a, b}.isdisjoint(gate_ports)
+                ]
+                self.assertEqual(gate_caps, [])
+                self.assertEqual(len(substrate_caps), len(capacitors))
+                csub = sum(value for _a, _b, value in substrate_caps)
+                self.assertAlmostEqual(
+                    csub,
+                    expected_substrate,
+                    delta=max(expected_substrate * 1e-6, 1e-20),
+                )
+                if substrate_caps:
+                    plate_ports = set(physical_ports(spice, "PLATE"))
+                    self.assertEqual(len(plate_ports), 1, spice)
+                    for a, b, _value in substrate_caps:
+                        other = b if a == "SUB" else a
+                        if other not in plate_ports:
+                            self.assertIsNotNone(
+                                equivalent_resistance(spice, "PLATE", other),
+                                spice + "\n" + self.last_pex_log,
+                            )
 
-                substrate_caps = [(nodes, value) for nodes, value in capacitors if "SUB" in nodes]
-                gate_caps = [(nodes, value) for nodes, value in capacitors if "GATE" in nodes]
-                self.assertEqual(len(substrate_caps), 1, spice + "\n" + self.last_pex_log)
-                self.assertEqual(len(gate_caps), 1 if explicit_cap else 0)
-                csub = substrate_caps[0][1]
-                cox = gate_caps[0][1] if gate_caps else 0.0
-                self.assertAlmostEqual(
-                    cox,
-                    expected_cox,
-                    delta=max(expected_cox * 1e-6, 1e-20),
-                    msg=spice + "\n" + self.last_pex_log,
-                )
-                self.assertAlmostEqual(
-                    csub, expected_substrate, delta=expected_substrate * 1e-6
-                )
-                self.assertEqual(len(capacitors), 2 if explicit_cap else 1)
-                for nodes, _value in substrate_caps + gate_caps:
-                    other = next(node for node in nodes if node not in {"SUB", "GATE"})
-                    if other != "PLATE":
-                        self.assertIsNotNone(
-                            equivalent_resistance(spice, "PLATE", other),
-                            spice + "\n" + self.last_pex_log,
-                        )
+
+    def test_passive_diffusion_capacitance_is_distributed_over_network_nodes(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("DISTRIBUTED_DIFF_CAP")
+            add_box(layout, cell, (3, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (19, 0), 0, 0, 100, 10)
+            add_text(layout, cell, (13, 0), "LEFT", 0, 5)
+            add_text(layout, cell, (13, 0), "RIGHT", 100, 5)
+
+            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            capacitors = capacitance_elements(spice)
+            self.assertGreater(len(capacitors), 1, spice)
+            self.assertTrue(
+                all("SUB" in {a, b} for a, b, _value in capacitors), spice
+            )
+            total = sum(value for _a, _b, value in capacitors)
+            expected = 0.086e-15 * 1000.0
+            self.assertAlmostEqual(total, expected, delta=expected * 1e-6)
+            share = total / len(capacitors)
+            for _a, _b, value in capacitors:
+                self.assertAlmostEqual(value, share, delta=expected * 1e-6)
+
+            capacitance_nodes = {
+                b if a == "SUB" else a for a, b, _value in capacitors
+            }
+            self.assertTrue(
+                set(physical_ports(spice, "LEFT") + physical_ports(spice, "RIGHT"))
+                <= capacitance_nodes,
+                spice,
+            )
+            self.assertAlmostEqual(
+                equivalent_resistance(spice, "LEFT", "RIGHT"),
+                1800.0,
+                delta=18.0,
+            )
+
+    def test_unqualified_interconnect_coupling_is_not_emitted(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("NO_UNQUALIFIED_COUPLING")
+            add_box(layout, cell, (5, 0), 0, 0, 100, 10)
+            add_box(layout, cell, (8, 0), 0, 0, 100, 10)
+            add_text(layout, cell, (13, 0), "GATE", 0, 5)
+            add_text(layout, cell, (13, 0), "METAL", 100, 5)
+
+            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            self.assertEqual(capacitance_elements(spice), [], spice)
 
     def test_mask_and_exclude_remove_diffusion_paths(self):
         cases = [
@@ -286,9 +461,17 @@ class PexRegressionTests(unittest.TestCase):
                 if shape.is_text()
             }
             self.assertEqual(labels, {"LEFT", "RIGHT"})
-
             spice = self.extract(converted, converted.top_cell(), tempdir, mode="fab")
-            self.assertIn(".SUBCKT FAB_LABELS_pex LEFT RIGHT SUB", spice)
+
+
+            header = next(
+                line for line in spice.splitlines() if line.startswith(".SUBCKT ")
+            ).split()
+            mappings = port_mappings(spice)
+            self.assertEqual([item["logical"] for item in mappings], ["LEFT", "RIGHT"])
+            self.assertEqual(
+                header[2:-1], [item["physical"] for item in mappings]
+            )
             measured = equivalent_resistance(spice, "LEFT", "RIGHT")
             self.assertAlmostEqual(measured, 2.0, delta=0.02)
 

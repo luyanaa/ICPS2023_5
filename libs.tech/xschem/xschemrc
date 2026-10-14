@@ -1,0 +1,30 @@
+# ICPS2023_5 xschem setup.  Keep the normal xschem defaults and add this PDK.
+# PDK_ROOT may be the directory containing the PDK, or the PDK itself; PDK
+# selects the repository directory when PDK_ROOT contains several PDKs.
+if {[info exists ::env(PDK_ROOT)]} {
+    set PDK_ROOT $::env(PDK_ROOT)
+} else {
+    set PDK_ROOT [file normalize [file join [file dirname [info script]] ../..]]
+}
+if {[info exists ::env(PDK)]} {
+    set PDK $::env(PDK)
+} else {
+    set PDK ICPS2023_5
+}
+set icps_pdk_dir [file join $PDK_ROOT $PDK]
+if {![file isdirectory [file join $icps_pdk_dir libs.tech]]} {
+    set icps_pdk_dir $PDK_ROOT
+}
+set icps_symbol_dir [file join $icps_pdk_dir libs.tech xschem symbols]
+# Both spellings are exported: XSCHHEM_SYMBOL_PATH is retained for scripts
+# that used the historical spelling, while xschem_library_path is xschem's
+# native Tcl search path.
+set XSCHHEM_SYMBOL_PATH $icps_symbol_dir
+if {[info exists xschem_library_path] && $xschem_library_path ne ""} {
+    set xschem_library_path "$icps_symbol_dir:$xschem_library_path"
+} else {
+    set xschem_library_path $icps_symbol_dir
+}
+set icps_spice_lib [file join $icps_pdk_dir libs.tech ngspice icps2023_5.lib.spice]
+set spice_netlist_commands "* ICPS2023_5 ngspice models\n.include $icps_spice_lib\n"
+# Leave xschem's standard netlist and simulation defaults in place.

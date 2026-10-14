@@ -1,0 +1,88 @@
+ICPS2023_5 -- minimal Fab SOI-CMOS PDK -- provenance
+===================================================
+
+Repository
+----------
+  PDK              ICPS2023_5, PDK version 1.05 (documents), package version 2.0
+  Process          minimal Fab SOI-CMOS, AIST ACPS (gate last, 1 metal)
+  Licence          Apache License 2.0 (see LICENSE)
+  Upstream         https://github.com/mineda-support/ICPS2023_5
+  Refactor base    git commit 343fb28 ("Update README.md"), branch main
+
+Sources of the artefacts in this repository
+-------------------------------------------
+libs.ref/doc/PDK_minimalFabSOICMOS.pdf
+  "minimal Fab SOI-CMOS PDK", Minimal Fab PDK authors, 31 Oct 2023 (22 pages).
+  Device/process explanation, device characteristics, design manual, SPICE
+  model, PCell and DRC/LVS rule tables. Source of every documented electrical
+  constant used by the ngspice models, the DRC deck and the PEX deck.
+
+libs.ref/doc/PDK_reference_manual.pdf
+  "ミニマルファブ(臨海センター)向け PDK リファレンスマニュアル", 1 Nov 2023
+  (11 pages). Mask layer table, device list, absolute maximum ratings,
+  layout rules, design example.
+
+libs.ref/ICPS2023_5_fd_base/
+  Derived from Samples/Semicon2023/base_contest2023.GDS, top cell
+  "base_Rev0.93" (minimal Fab design contest 2023 template). The pre-placed
+  device arrays (pmos_array, nmos_array, resistor_array, tin_m1_cap_array)
+  were removed; the 1600x1600 um frame and its 28 pads are kept unchanged.
+  Regenerate with tools/make_fd_base.rb; the LEF/Liberty views with
+  tools/make_lef_lib.rb.
+
+libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds
+  The "ICPS2023_5_Basic" static library of the original KLayout salt package
+  (contact, via and pad primitive cells dcont, pcont, pcont_min, psubcont,
+  nsubcont, DCNT, DCNT2, Via, PAD60, PAD100, PAD150). Renamed, contents
+  unchanged.
+
+libs.tech/ngspice/models/
+  legacy_*.inc are the foundry SPICE cards as published (BSIM3, LEVEL=8):
+    MF_CMOS20240109.txt  -> ICPS2023Ver1.01, revised 2024-01-09 (newest)
+    MF_CMOS20230922.txt  -> ICPS2023Ver1.0
+    SOI_CMOS             -> wrapper including MF_CMOS20240109
+  icps2023_5_b3soipd.inc / icps2023_5_b3soifd.inc are generated from the
+  newest card by tools/convert_bulk3_to_b3soi.py (BSIM3SOI level 57 / 55).
+
+libs.tech/klayout/
+  tech.lyt, the layer properties and the legacy decks come from the original
+  salt package ("Technology" grain). The decks were consolidated:
+    drc.lydrc               -> src/icps2023_5.drc      (Mineda2022_6 v0.32 rules)
+    lvs.lylvs, lvs_fabrication.lylvs
+                            -> lvs/icps2023_5.lvs      (design and fab modes)
+    ICPS2023_5_to_SOI.lydrc -> drc/icps2023_5_fab_prep.drc
+    area_cut.lydrc          -> dropped (stale Mineda2022_6 copy; its 20/0 "pad"
+                               contradicted the PDK's PAD 50/0)
+  pex/icps2023_5_pex.py is new: the legacy PDK shipped no PEX deck.
+  The PCells (pcells_v0.1.lym) and the utility macros keep their original
+  content; only the document paths inside macros/Documents were updated.
+
+libs.tech/xschem/symbols/
+  The legacy Xschem symbol directory, plus the device set of the retired
+  LTspice library (MinedaLIB: CAP_MIN, HR_POLY_MIN, NDIO_MIN, NMOS_ESD_MIN,
+  NMOS_MIN, PDIO_MIN, PMOS_ESD_MIN, PMOS_MIN, RES_MIN, R_POLY_MIN) expressed
+  as Xschem symbols bound to the ngspice models. See libs.tech/xschem/README.md.
+
+libs.tech/kicad/MinedaSymbols.lib
+  Legacy EEschema/KiCad symbol library, migrated unchanged and unmaintained.
+
+libs.tech/klayout/xs/
+  Process cross sections (AIST-SOI-CMOS.xs, YSS-SOI-CMOS.xs) and their layer
+  colour maps. Source of the film thicknesses used by the BSIM3SOI models
+  (TSI = 0.095 um, TBOX = 0.4 um) and of the layer stack order.
+
+Samples/Semicon2023/
+  base_contest2023.GDS  minimal Fab design contest 2023 template (Rev 0.93)
+  NAND/                 NAND gate tutorial sample: schematics (Xschem), layout,
+                        LVS reference netlist and the legacy LVS run artefacts
+                        (lvs_work/). Kept as the regression reference for the
+                        DRC/LVS/PEX decks.
+
+Not carried over
+----------------
+  Technology/tech/models/SOI_CMOS~   (editor backup, contained only two stale
+                                      .include lines)
+  Basic/libraries/new_lib.gds        (unreferenced scratch layout: six cells
+                                      named A..F on Mineda2022_6 layer numbers)
+  Basic/grain.xml, Technology/grain.xml
+                                     (replaced by the single root grain.xml)

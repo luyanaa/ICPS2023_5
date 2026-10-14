@@ -1,0 +1,20 @@
+v {xschem version=3.0.0 file_version=1.2 }
+G {type=subcircuit
+format="@name @pinlist @symname l=@l w=@w"
+template="name=D1 symname=dio_pdio l=25u w=25u"
+}
+V {}
+S {}
+E {}
+L 4 0 0 0 20 {}
+L 4 -12 20 12 20 {}
+L 4 0 20 0 40 {}
+L 4 -12 40 12 40 {}
+L 4 -12 20 12 40 {}
+L 4 12 20 -12 40 {}
+B 5 -2 -2 2 2 {name=PLUS dir=in}
+B 5 -2 58 2 62 {name=MINUS dir=in}
+T {PLUS} 5 0 0 0 0.2 0.2 {layer=13}
+T {MINUS} 5 60 0 0 0.2 0.2 {layer=13}
+T {@symname} 20 50 0 0 0.2 0.2 {}
+T {@name} 20 10 0 0 0.2 0.2 {}

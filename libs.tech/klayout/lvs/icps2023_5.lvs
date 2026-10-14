@@ -1,0 +1,304 @@
+# =============================================================================
+# ICPS2023_5 LVS -- plain KLayout LVS/DRC DSL
+#
+# Consolidates the former lvs.lylvs (design numbering) and
+# lvs_fabrication.lylvs (fab numbering).  Device rules are intentionally kept
+# close to the 2023 legacy decks; only the Anagix/Mineda wrapper is removed.
+#
+# Usage:
+#   klayout -b -r icps2023_5.lvs \
+#     -rd input=layout.gds -rd schematic=reference.cir \
+#     [-rd top=CELL] [-rd layer_mode=design|fab] \
+#     [-rd report=out.lyrdb] [-rd output=extracted.cir]
+# =============================================================================
+
+# `source` aborts when a GDS has more than one top cell.  Probe first so the
+# batch error tells the user how to select one (same convention as the DRC deck).
+if $input.nil? || $input.to_s.empty?
+  raise "ICPS2023_5 LVS: input=layout.gds is REQUIRED"
+end
+if $schematic.nil? || $schematic.to_s.empty?
+  raise "ICPS2023_5 LVS: schematic=reference.cir is REQUIRED"
+end
+unless File.file?($schematic.to_s)
+  raise "ICPS2023_5 LVS: schematic '#{$schematic}' does not exist"
+end
+
+if $top && !$top.to_s.empty?
+  source($input, $top)
+else
+  probe = RBA::Layout::new
+  probe.read($input)
+  if probe.top_cells.size > 1
+    raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
+  end
+  source($input)
+end
+# With -rd top=CELL the selected cell is the circuit name; otherwise the file
+# must have a single top cell (checked above). source.layout.top_cell would
+# fail for multi-cell library files even when a cell was selected.
+layout_top = ($top && !$top.to_s.empty?) ? $top.to_s : source.layout.top_cell.name
+
+layer_mode = ($layer_mode && !$layer_mode.to_s.empty?) ? $layer_mode.to_s : "design"
+unless ["design", "fab"].include?(layer_mode)
+  raise "layer_mode must be 'design' or 'fab' (got '#{layer_mode}')"
+end
+
+input_stem = $input.to_s.sub(/\.(gds|gdsii|oas|oasis)\z/i, "")
+# Defaults are absolute so they land in the caller's directory (KLayout resolves
+# relative paths against the input layout's directory).
+report_file = ($report && !$report.to_s.empty?) ? $report.to_s : File.expand_path("#{File.basename(input_stem)}_lvs.lyrdb")
+output_file = ($output && !$output.to_s.empty?) ? $output.to_s : File.expand_path("#{File.basename(input_stem)}_extracted.cir")
+
+puts "ICPS2023_5 LVS  layer_mode=#{layer_mode}  input=#{$input}  schematic=#{$schematic}"
+puts "ICPS2023_5 LVS  layout_top=#{layout_top}  report=#{report_file}  output=#{output_file}"
+
+# The legacy reader converted four-terminal SPICE MOS statements to the
+# three-terminal MOS classes extracted by this deck.  Keep that behavior here;
+# W and L arrive in SI units from the SPICE reader and are stored in um, as in
+# the legacy MOS4To3ConvertingSpiceReader.
+class MOS4To3ConvertingSpiceReader < RBA::NetlistSpiceReaderDelegate
+  def element(circuit, el, name, model, value, nets, params)
+    if el != "M" || nets.size != 4
+      return super
+    end
+    cls = circuit.netlist.device_class_by_name(model)
+    unless cls
+      cls = RBA::DeviceClassMOS3Transistor::new
+      cls.name = model
+      circuit.netlist.add(cls)
+    end
+    device = circuit.create_device(cls, name)
+    ["S", "G", "D"].each_with_index do |terminal, index|
+      device.connect_terminal(terminal, nets[index])
+    end
+    device.set_parameter("W", (params["W"] || 0.0) * 1e6)
+    device.set_parameter("L", (params["L"] || 0.0) * 1e6)
+    true
+  end
+end
+
+reader = RBA::NetlistSpiceReader::new(MOS4To3ConvertingSpiceReader::new)
+# KLayout resolves relative netlist paths against the source layout's directory;
+# resolve against the invoking shell instead so scripts behave predictably.
+schematic(File.expand_path($schematic.to_s), reader)
+
+# Only create the report database once every input has been read successfully:
+# otherwise an aborted run leaves a stray LVS database in the caller's directory.
+report_lvs(report_file)
+
+# Input layers.  MASK is the documented design exclusion layer.  EXCLUDE is
+# also ignored, matching the consolidated DRC deck's hard keep-out behavior.
+MASK_LAYER = [20, 0]
+EXCLUDE_LAYER = [63, 63]
+if layer_mode == "design"
+  DIFF_LAYER = [3, 0]
+  TIN_LAYER = [5, 0]
+  TINBLK_LAYER = [5, 1]
+  CNT_LAYER = [7, 0]
+  ML1_LAYER = [8, 0]
+  VIA1_LAYER = [9, 0]
+  ML2_LAYER = [10, 0]
+  VIA2_LAYER = [11, 0]
+  ML3_LAYER = [12, 0]
+  PAREA_LAYER = [18, 0]
+  NAREA_LAYER = [19, 0]
+  PWL_LAYER = [21, 0]
+else
+  DIFF_LAYER = [4, 0]
+  TIN_LAYER = [5, 0]
+  TINBLK_LAYER = [5, 1]
+  CNT_LAYER = [6, 0]
+  ML1_LAYER = [7, 0]
+  VIA1_LAYER = [8, 0]
+  ML2_LAYER = [9, 0]
+  VIA2_LAYER = [11, 0]
+  ML3_LAYER = [12, 0]
+  PAREA_LAYER = [2, 0]
+  NAREA_LAYER = [3, 0]
+  PWL_LAYER = [13, 0]
+end
+RES_LAYER = [15, 0]
+CAP_LAYER = [16, 0]
+DIO_LAYER = [17, 0]
+
+exclude = input(*EXCLUDE_LAYER)
+mask = input(*MASK_LAYER)
+def lvs_layer(spec, exclude, mask)
+  input(spec[0], spec[1]).not(exclude) - mask
+end
+
+diff = lvs_layer(DIFF_LAYER, exclude, mask)
+tin = lvs_layer(TIN_LAYER, exclude, mask)
+tin_blk = lvs_layer(TINBLK_LAYER, exclude, mask)
+cnt_a = lvs_layer(CNT_LAYER, exclude, mask)
+ml1 = lvs_layer(ML1_LAYER, exclude, mask)
+via1 = lvs_layer(VIA1_LAYER, exclude, mask)
+ml2 = lvs_layer(ML2_LAYER, exclude, mask)
+via2 = lvs_layer(VIA2_LAYER, exclude, mask)
+ml3 = lvs_layer(ML3_LAYER, exclude, mask)
+res = lvs_layer(RES_LAYER, exclude, mask)
+cap = lvs_layer(CAP_LAYER, exclude, mask)
+dio = lvs_layer(DIO_LAYER, exclude, mask)
+parea = lvs_layer(PAREA_LAYER, exclude, mask)
+narea = lvs_layer(NAREA_LAYER, exclude, mask)
+pwl = lvs_layer(PWL_LAYER, exclude, mask)
+
+# Special empty layer retained from the legacy deck for substrate/bulk hooks.
+bulk = polygon_layer
+
+# Computed layers.  The design branch is the original `&` implementation.  In
+# fab mode the old product deck used overlapping() for the mask-derived dopant
+# regions and represented channel as SOI outside the dopant mask.
+diode_region = diff.overlapping(dio)
+cnt_d = cnt_a & diode_region
+cnt = cnt_a - cnt_d
+diff_nores = diff - res - cap - diode_region
+if layer_mode == "design"
+  ndiff = diff_nores & narea
+  pdiff = diff_nores & parea
+else
+  ndiff = diff_nores.overlapping(narea)
+  pdiff = diff_nores.overlapping(parea)
+end
+
+if layer_mode == "design"
+  pgate = pdiff & tin
+  psd = pdiff - pgate
+  ngate = ndiff & tin
+  bt_ngate = ndiff & tin.interacting(tin_blk)
+  ngate = ngate - bt_ngate
+  bt_ndiff = ndiff.interacting(bt_ngate)
+  ndiff = ndiff - bt_ndiff
+  nsd = ndiff - ngate
+  bt_nsd = bt_ndiff - bt_ngate
+else
+  # Preserve the fab legacy's mask interpretation while retaining the same
+  # TIN_BLK body-tie split when a fab data set contains that marker.
+  ngate = ndiff - narea
+  pgate = pdiff - parea
+  nsd = ndiff - ngate
+  psd = pdiff - pgate
+  bt_ngate = ngate & tin.interacting(tin_blk)
+  ngate = ngate - bt_ngate
+  bt_ndiff = ndiff.interacting(bt_ngate)
+  ndiff = ndiff - bt_ndiff
+  nsd = ndiff - ngate
+  bt_nsd = bt_ndiff - bt_ngate
+end
+
+diff_nores = diff_nores - ngate - pgate
+lv_ngate = ngate
+lv_pgate = pgate
+
+diff_in_pwl = diff & pwl
+ptie = diff_in_pwl & parea
+
+mim_c1 = (cap & ml1 & ml2) - tin
+mim_c2 = (cap & ml1 & ml2) - tin
+tin_c1 = (cap & ml1 & tin) - diff
+tin_c2 = (cap & ml1 & tin) - diff
+pdiff_c1 = cap & tin & diff & parea
+pdiff_c2 = cap & tin & diff & parea
+ndiff_c1 = cap & tin & diff & narea
+ndiff_c2 = cap & tin & diff & narea
+
+nres = narea & res & diff
+pres = parea & res & diff
+soi_res = (res & diff) - nres - pres
+diff_nores = diff - nres - pres - soi_res - ngate - pgate - pdiff_c2 - ndiff_c2
+rs_layer = soi_res.sized(0.5.um) & (diff - soi_res)
+rn_layer = nres.sized(0.5.um) & (diff - nres)
+rp_layer = pres.sized(0.5.um) & (diff - pres)
+
+# Device extraction -- densities are F/um^2 and sheet values are ohms/square,
+# exactly as specified by the legacy decks.
+extract_devices(capacitor("MIMCAP", 0.115e-15), {"P1" => mim_c1, "P2" => mim_c2})
+extract_devices(capacitor("TINCAP", 0.115e-15), {"P1" => tin_c1, "P2" => tin_c2})
+extract_devices(capacitor("PDIFFCAP", 2.3e-15), {"P1" => pdiff_c1, "P2" => pdiff_c2})
+extract_devices(capacitor("NDIFFCAP", 2.3e-15), {"P1" => ndiff_c1, "P2" => ndiff_c2})
+
+pplus = diode_region & parea
+nplus = diode_region
+ncnt = diode_region & narea
+extract_devices(diode("D"), {"P" => pplus, "N" => nplus, "tA" => pplus, "tC" => nplus})
+
+extract_devices(resistor("NRES", 180), {"R" => nres, "C" => rn_layer, "tA" => rn_layer, "tB" => rn_layer})
+extract_devices(resistor("PRES", 1200), {"R" => pres, "C" => rp_layer, "tA" => rp_layer, "tB" => rp_layer})
+extract_devices(resistor("R_SOI", 250e6), {"R" => soi_res, "C" => rs_layer, "tA" => rs_layer, "tB" => rs_layer})
+
+extract_devices(mos3("PMOS"), {"SD" => psd, "G" => lv_pgate, "tS" => psd, "tD" => psd, "tG" => tin})
+extract_devices(mos3("NMOS"), {"SD" => nsd, "G" => lv_ngate, "tS" => nsd, "tD" => nsd, "tG" => tin})
+extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin, "tW" => pwl})
+
+# Connectivity, copied from the design legacy deck.  ML2/VIA1/VIA2/ML3 remain
+# available options even though only the first metal is foundry-qualified.
+connect(psd, cnt)
+connect(nsd, cnt)
+connect(bt_nsd, cnt)
+connect(tin, cnt)
+connect(cnt, ml1)
+connect(ml1, via1)
+connect(via1, ml2)
+connect(diff_nores, cnt)
+connect(cnt, ptie)
+connect(pwl, ptie)
+connect(mim_c1, ml1)
+connect(mim_c2, ml2)
+connect(tin_c1, ml1)
+connect(tin_c2, tin)
+connect(pdiff_c1, tin)
+connect(pdiff_c2, diff_nores)
+connect(ndiff_c1, tin)
+connect(ndiff_c2, diff_nores)
+connect(rn_layer, diff_nores)
+connect(rp_layer, diff_nores)
+connect(rs_layer, diff_nores)
+connect(pplus, cnt_d)
+connect(ml1, cnt_d)
+connect(nplus, ncnt)
+connect(ncnt, cnt_d)
+
+# Write the extracted netlist before comparison, as the old Mineda wrapper did.
+netlist.purge
+target_netlist(output_file, write_spice, "Created by KLayout")
+
+# Comparison settings formerly loaded from nand_sample_lvs_settings.rb.  The
+# extracted top is paired with the SPICE reader's .TOP circuit; device-class
+# equivalences and 3% relative tolerances are explicit and gem-free.
+netlist.make_top_level_pins
+netlist.flatten_circuit("Nch*")
+netlist.flatten_circuit("Pch*")
+same_circuits(layout_top, ".TOP")
+align
+same_device_classes("NMOS", "NCH")
+same_device_classes("PMOS", "PCH")
+same_device_classes("MIMCAP", "CAP")
+same_device_classes("TINCAP", "CAP")
+same_device_classes("PDIFFCAP", "CAP")
+same_device_classes("NDIFFCAP", "CAP")
+# The legacy NAND extracted SPICE form contains no pad-array parasitic R/C;
+# these compare-only filters preserve that established match scope without
+# removing the resistor/capacitor extractors above.
+#
+# WARNING: the KLayout compare filters apply to BOTH netlists. They are kept
+# because they reproduce the established legacy match, but they mean that a
+# schematic-only resistor above 500 ohm (or capacitor below 1 pF) would NOT be
+# flagged as a mismatch. Use -rd filters=off to disable them when you are
+# checking a design that contains resistors/capacitors near those values.
+if ($filters && $filters.to_s == "off")
+  puts "ICPS2023_5 LVS  compare filters DISABLED (max_res/min_caps)"
+else
+  puts "ICPS2023_5 LVS  compare filters: max_res=500 ohm, min_caps=1 pF (see lvs/README.md)"
+  max_res(500)
+  min_caps(1.0e-12)
+end
+same_device_classes("PRES", "RES")
+same_device_classes("R_SOI", "RES")
+["RES", "NRES", "PRES", "R_SOI"].each { |klass| tolerance(klass, "R", :relative => 0.03) }
+["MIMCAP", "TINCAP", "PDIFFCAP", "NDIFFCAP"].each { |klass| tolerance(klass, "C", :relative => 0.03) }
+netlist.combine_devices
+schematic.combine_devices
+
+matched = compare
+puts(matched ? "ICPS2023_5 LVS MATCH (mismatches=0)" : "ICPS2023_5 LVS NO MATCH (see #{report_file} for mismatches)")

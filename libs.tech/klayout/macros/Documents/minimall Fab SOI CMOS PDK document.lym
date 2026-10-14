@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<klayout-macro>
+ <description>minimal Fab SOI CMOS PDK document</description>
+ <version/>
+ <category/>
+ <prolog/>
+ <epilog/>
+ <doc/>
+ <autorun>false</autorun>
+ <autorun-early>false</autorun-early>
+ <priority>0</priority>
+ <shortcut/>
+ <show-in-menu>true</show-in-menu>
+ <group-name/>
+ <menu-path/>
+ <interpreter>ruby</interpreter>
+ <dsl-interpreter-name/>
+ <text>module MyMacro
+  home = ENV['USERPROFILE'] || ENV['HOME']
+  klayout = '.klayout'  
+  ampasand = '&amp;'
+  case RbConfig::CONFIG['host_os']
+    when /mswin|mingw|cygwin/ 
+      cmd = "start "
+      klayout = 'KLayout' 
+      ampasand = ''
+    when /darwin/
+      cmd = "open "
+    when /linux|bsd/
+      cmd = "xdg-open "
+    else raise "No OS detected"
+  end
+
+  b = system cmd + "file:///#{home}/#{klayout}/salt/ICPS2023_5/libs.ref/doc/PDK_minimalFabSOICMOS.pdf" + ampasand
+
+end
+
+</text>
+</klayout-macro>

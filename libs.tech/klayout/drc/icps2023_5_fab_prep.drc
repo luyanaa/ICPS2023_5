@@ -1,0 +1,98 @@
+# =============================================================================
+# ICPS2023_5 fab preparation -- design layers -> foundry mask layers
+#
+# Replaces the legacy `ICPS2023_5_to_SOI.lydrc` (and the stale `area_cut.lydrc`).
+# The legacy script mixed two number spaces: it read design layers, but also
+# ORed in layer numbers that were already fab-numbered, which made the output
+# depend on how the input file had been produced. This deck does one thing:
+# map the canonical design layers (see ../doc/layers.md) to the mask numbers of
+# the minimal Fab mask set, applying the mask biases the foundry asked for.
+#
+# Usage:
+#   klayout -b -r icps2023_5_fab_prep.drc \
+#           -rd input=<design.gds> -rd output=<fab.gds> [-rd top=CELL]
+#
+# The result can be checked with the DRC/LVS decks in fab mode:
+#   klayout -b -r icps2023_5.drc -rd input=<fab.gds> -rd layer_mode=fab
+#
+# Copyright 2023 minimalFab Promoting Organization
+# Licensed under the Apache License, Version 2.0
+# =============================================================================
+
+if $input.nil? || $input.to_s.empty?
+  raise "icps2023_5_fab_prep: -rd input=<design.gds> is REQUIRED"
+end
+output = ($output && $output.to_s != "") ? $output.to_s : $input.to_s.sub(/\.(gds|gdsii)$/i, '_fab.gds')
+
+if $top && $top.to_s != ""
+  source($input, $top)
+else
+  probe = RBA::Layout::new
+  probe.read($input)
+  if probe.top_cells.size > 1
+    raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
+  end
+  source($input)
+end
+target(output)
+
+# ---- design layers ---------------------------------------------------------
+EXCLUDE = input(63, 63)
+MASK    = input(20, 0)
+DIFF    = input(3, 0) - EXCLUDE - MASK     # SOI island (also resistor bodies)
+TIN     = input(5, 0) - EXCLUDE - MASK
+TINBLK  = input(5, 1) - EXCLUDE - MASK
+CNT     = input(7, 0) - EXCLUDE - MASK
+ML1     = input(8, 0) - EXCLUDE - MASK
+VIA1    = input(9, 0) - EXCLUDE - MASK
+ML2     = input(10, 0) - EXCLUDE - MASK
+VIA2    = input(11, 0) - EXCLUDE - MASK
+ML3     = input(12, 0) - EXCLUDE - MASK
+PAREA   = input(18, 0) - EXCLUDE - MASK
+NAREA   = input(19, 0) - EXCLUDE - MASK
+NCH     = input(21, 0) - EXCLUDE - MASK    # channel dope, fab mask 13
+PAD     = input(50, 0) - EXCLUDE - MASK
+RES     = input(15, 0) - EXCLUDE - MASK
+CAP     = input(16, 0) - EXCLUDE - MASK
+DIO     = input(17, 0) - EXCLUDE - MASK
+TEXT    = input(13, 0) - EXCLUDE - MASK
+FRAME   = input(14, 0) - EXCLUDE - MASK
+
+# ---- mask derivations (from the legacy conversion deck) --------------------
+# The doping masks are drawn as the *dope* region; the mask shop needs them
+# clipped to the silicon island, biased by 2 um and pulled back from the gate
+# and from the diode guard ring.
+dio2 = DIO.sized(2.0) - (PAREA + NAREA)
+p_dope = (PAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
+n_dope = (NAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
+
+# TiN gate: gate = TiN over the island (excluding capacitor plates); it is
+# returned to the mask shop with the 2 um gate-window bias.
+tin_gate = TIN.interacting(DIFF) - TIN.overlapping(CAP)
+bb = (DIFF + tin_gate).extents
+tin_gate_enlarged = tin_gate.sized(2.0.um) & bb
+# The TiN block layer (5/1) is a design aid for splitting one TiN polygon into
+# two gates; the mask carries the TiN polygon only.
+tin_out = TIN
+
+# ---- fab mask layers -------------------------------------------------------
+p_dope.output(2, 0)                    # P-diff   (P+ source/drain dope)
+n_dope.output(3, 0)                    # N-diff   (N+ source/drain dope)
+DIFF.output(4, 0)                      # SOI      (active)
+tin_out.output(5, 0)                   # TiN-Gate
+CNT.output(6, 0)                       # Contact
+ML1.output(7, 0)                       # M1(Al)
+VIA1.output(8, 0)                      # Via
+ML2.output(9, 0)                       # M2(Al)
+PAD.output(10, 0)                      # PAD opening (no mask in the PDK table)
+VIA2.output(11, 0)                     # Via2   [foundry T.B.D.]
+ML3.output(12, 0)                      # M3(Al) [foundry T.B.D.]
+NCH.output(13, 0)                      # N-ch   (channel dope NMOS)
+FRAME.output(14, 0)
+RES.output(15, 0)
+CAP.output(16, 0)
+DIO.output(17, 0)
+TEXT.output(13, 1)                     # labels kept, datatype 1 so they do not
+                                       # collide with the N-ch mask geometry
+
+puts "icps2023_5_fab_prep: wrote #{output}"

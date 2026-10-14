@@ -1,0 +1,18 @@
+v {xschem version=3.0.0 file_version=1.2 }
+G {type=subcircuit
+format="@name @pinlist @symname l=@l w=@w"
+template="name=C1 symname=cap_min l=25u w=25u"
+}
+V {}
+S {}
+E {}
+L 4 -15 25 15 25 {}
+L 4 -15 35 15 35 {}
+L 4 0 0 0 25 {}
+L 4 0 35 0 60 {}
+B 5 -2 -2 2 2 {name=PLUS dir=in}
+B 5 -2 58 2 62 {name=MINUS dir=in}
+T {PLUS} 5 0 0 0 0.2 0.2 {layer=13}
+T {MINUS} 5 60 0 0 0.2 0.2 {layer=13}
+T {@symname} 20 45 0 0 0.2 0.2 {}
+T {@name} 20 10 0 0 0.2 0.2 {}

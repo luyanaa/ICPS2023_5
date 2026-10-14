@@ -1,0 +1,5 @@
+# ngspice writes BSIM3SOI parameter-check logs next to the invoking directory
+*check.log
+# editor/OS noise
+.DS_Store
+*~

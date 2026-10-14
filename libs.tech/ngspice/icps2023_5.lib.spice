@@ -1,0 +1,101 @@
+* ICPS2023_5 minimal AIST ACPS SOI-CMOS ngspice library
+* One typical-device selector. No process corners or simulator-global options.
+* MOS cards are a stage-1 BSIMSOI v4.4 fit; see README.md and fit/.
+.lib b4soi
+.include models/icps2023_5_b4soi.inc
+
+* Resistor dimensions l,w are metres at the SPICE call site.
+* R_SOI is an unmeasured legacy LVS extraction value, not used by PEX.
+.subckt r_ndiff p n l=10u w=1u
+R1 p n {180*l/w}
+.ends r_ndiff
+.subckt r_pdiff p n l=10u w=1u
+R1 p n {1200*l/w}
+.ends r_pdiff
+.subckt r_soi p n l=10u w=1u
+R1 p n {250e6*l/w}
+.ends r_soi
+.subckt r_tin p n l=10u w=1u
+R1 p n {20*l/w}
+.ends r_tin
+.subckt r_ml1 p n l=10u w=1u
+R1 p n {0.2*l/w}
+.ends r_ml1
+.subckt bridge p n l=40u w=5u
+R1 p n {20*l/w}
+.ends bridge
+.subckt nbridge p n l=40u w=5u
+R1 p n {180*l/w}
+.ends nbridge
+
+* Compatibility passive symbols; these names do not imply extra process layers.
+.subckt res_min p n l=10u w=1u
+R1 p n {180*l/w}
+.ends res_min
+.subckt r_poly p n l=10u w=1u
+R1 p n {180*l/w}
+.ends r_poly
+.subckt hr_poly p n l=10u w=1u
+R1 p n {250e6*l/w}
+.ends hr_poly
+
+* Area capacitors: dimensions are metres. Cox=2.3 fF/um^2 is measured;
+* the 0.115 fF/um^2 TiN/Al value is the legacy LVS assumption, not a PDF value.
+.subckt cap_ndiff p n l=10u w=10u
+C1 p n {2.3e-3*l*w}
+.ends cap_ndiff
+.subckt cap_pdiff p n l=10u w=10u
+C1 p n {2.3e-3*l*w}
+.ends cap_pdiff
+.subckt cap_tin p n l=10u w=10u
+C1 p n {1.15e-4*l*w}
+.ends cap_tin
+.subckt mim_cap p n l=10u w=10u
+C1 p n {1.15e-4*l*w}
+.ends mim_cap
+.subckt cap_min p n l=10u w=10u
+C1 p n {1.15e-4*l*w}
+.ends cap_min
+
+* Measured overlap helpers: 5 fF/um (N) and 6.8 fF/um (P), p.9.
+* The PEX deck does not use these without a validated perimeter rule.
+.subckt cap_ov_n p n l=10u
+C1 p n {5e-9*l}
+.ends cap_ov_n
+.subckt cap_ov_p p n l=10u
+C1 p n {6.8e-9*l}
+.ends cap_ov_p
+
+* PDK p.9 gives 0.086 fF/um^2 diffusion capacitance but no return terminal.
+* Connecting the explicit sub pin to SUB is a model assumption, not measured BOX C.
+.subckt cap_diff_sub diff sub l=10u w=10u
+C1 diff sub {8.6e-5*l*w}
+.ends cap_diff_sub
+
+* Placeholder diode I/V laws; the PDK supplies no diode characterization.
+.model icps_ndio_d D(Is=1e-14 N=1)
+.model icps_pdio_d D(Is=1e-14 N=1)
+.subckt dio_ndio p n l=5u w=5u
+D1 p n icps_ndio_d area={l*w}
+.ends dio_ndio
+.subckt dio_pdio p n l=5u w=5u
+D1 p n icps_pdio_d area={l*w}
+.ends dio_pdio
+
+* ESD clamps use the measured 150/200-ohm diffusion contacts and 0.9-ohm
+* TiN contact. Both wrappers expose the common B4SOI substrate on `SUB`.
+.subckt nmos_esd pad vss sub l=20u w=20u
+RNC pad nd 150
+RNT nd d 0.9
+M1 d vss ns sub nch l={l} w={w}
+RSC ns ns_contact 150
+RST ns_contact vss 0.9
+.ends nmos_esd
+.subckt pmos_esd pad vdd sub l=20u w=20u
+RPC pad pd 200
+RPT pd d 0.9
+M1 d vdd ps sub pch l={l} w={w}
+RSC ps ps_contact 200
+RST ps_contact vdd 0.9
+.ends pmos_esd
+.endl b4soi

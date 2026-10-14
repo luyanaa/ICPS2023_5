@@ -1,0 +1,21 @@
+v {xschem version=3.0.0 file_version=1.2 }
+G {type=subcircuit
+format="@name @pinlist @symname"
+template="name=X1 symname=nmos_esd"
+}
+V {}
+S {}
+E {}
+L 4 0 0 80 0 {}
+L 4 80 0 80 60 {}
+L 4 80 60 0 60 {}
+L 4 0 60 0 0 {}
+L 4 20 20 60 20 {}
+L 4 60 20 40 40 {}
+L 4 40 40 20 20 {}
+B 5 38 -2 42 2 {name=PAD dir=in}
+B 5 38 58 42 62 {name=VSS dir=in}
+T {PAD} 45 0 0 0 0.2 0.2 {layer=13}
+T {VSS} 45 60 0 0 0.2 0.2 {layer=13}
+T {@symname} 90 30 0 0 0.2 0.2 {}
+T {@name} 90 45 0 0 0.2 0.2 {}

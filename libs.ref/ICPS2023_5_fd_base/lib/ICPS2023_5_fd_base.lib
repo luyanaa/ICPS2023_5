@@ -1,0 +1,58 @@
+/* ICPS2023_5_fd_base -- Liberty view of the minimal Fab SOI-CMOS pad ring
+ *
+ * Generated from the GDS by libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb.
+ * area        : macro bounding box in um^2
+ * capacitance : drawn pad-metal (ML1) area x 0.11499999999999999 fF/um^2
+ *               (300 nm TEOS over the SOI stack).
+ *
+ * THIS LIBRARY HAS NO TIMING ARCS. The foundry does not characterise an
+ * I/O or pad cell for this process: the pads are pass-through metal, and
+ * the only documented electrical limit is the absolute maximum rating of
+ * +/-7 V (VDS/VGD/VGS, PDK reference manual). Do not use this file for
+ * timing-driven optimisation; it exists so that physical flows can
+ * instantiate the frame and pads.
+ */
+library (ICPS2023_5_fd_base) {
+  comment : "minimal Fab SOI-CMOS 1600x1600 um frame and 60 um pad ring";
+  delay_model : generic_cmos ;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  current_unit : "1mA";
+  capacitive_load_unit (1, ff);
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1nW";
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 3.3;
+  operating_conditions (typical) {
+    process : 1.0;
+    temperature : 25.0;
+    voltage : 3.3;
+  }
+  default_operating_conditions : typical;
+  voltage_map (VDD, 3.3);
+  voltage_map (VSS, 0.0);
+
+  cell (ICPS2023_5_fd_base) {
+    area : 2560000.0;
+    pad_cell : true;
+    cell_footprint : "ICPS2023_5_fd_base";
+    pin (PAD) {
+      direction : inout;
+      capacitance : 11592.0;   /* 100800.0 um^2 pad metal */
+      max_transition : 0.0;   /* not characterised */
+    }
+  }
+
+  cell (pad_60_m1_tin) {
+    area : 3600.0;
+    pad_cell : true;
+    cell_footprint : "pad_60_m1_tin";
+    pin (PAD) {
+      direction : inout;
+      capacitance : 414.0;   /* 3600.0 um^2 pad metal */
+      max_transition : 0.0;   /* not characterised */
+    }
+  }
+
+}

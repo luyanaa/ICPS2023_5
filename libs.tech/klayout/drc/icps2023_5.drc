@@ -1,0 +1,223 @@
+# =============================================================================
+# ICPS2023_5 DRC -- minimal Fab SOI-CMOS (AIST ACPS), 1-metal
+#
+# Single consolidated rule deck. Supersedes the three legacy decks:
+#   drc.lydrc              (Mineda2022_6 rules, layout/product branch inside)
+#   ICPS2023_5_to_SOI.lydrc (design -> fab layer renumbering, now
+#                            fab_prep/icps2023_5_fab_prep.drc)
+#   area_cut.lydrc          (stale Mineda2022_6 copy, pad on 20/0 -- dropped)
+#
+# Layer numbers are not duplicated here: one input block below is selected
+# with `-rd layer_mode=design|fab`. See doc/layers.md.
+#
+# Usage:
+#   klayout -b -r icps2023_5.drc \
+#           -rd input=layout.gds \
+#           [-rd layer_mode=design|fab]   (default: design)
+#           [-rd report=drc.lyrdb]        (default: <input>_drc.lyrdb)
+#           [-rd strict=true]             (enable document-limit rules that
+#                                          the reference layouts do not meet)
+#           [-rd top=CELLNAME]            (default: top cell of the file)
+#
+# Rule IDs follow the PDK documents (W1/W2/S1/m1..m7/d1 for device layers,
+# W3/S2 for wiring) with the golden deck's rule numbers kept in comments.
+#
+# Copyright 2023 minimalFab Promoting Organization
+# Licensed under the Apache License, Version 2.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Source layout: `source()` aborts on files with more than one top cell
+# (library GDS files do). Pick the cell explicitly, or fail with a list.
+# -----------------------------------------------------------------------------
+if $top && $top.to_s != ""
+  source($input, $top)
+else
+  probe = RBA::Layout::new
+  probe.read($input)
+  if probe.top_cells.size > 1
+    raise "#{$input} has #{probe.top_cells.size} top cells (#{probe.top_cells.map(&:name).join(', ')}): pass -rd top=CELL"
+  end
+  source($input)
+end
+
+layer_mode = ($layer_mode && $layer_mode.to_s != "") ? $layer_mode.to_s : "design"
+STRICT     = $strict.to_s == "true" || $strict.to_s == "1"
+
+# The default report goes to the current directory (absolute path): KLayout
+# resolves relative paths against the input layout's directory, which would
+# otherwise drop report files into the PDK tree.
+report_file = ($report && $report.to_s != "") ? $report :
+  File.expand_path("#{File.basename(source.path).sub(/\.(gds|gdsii|oas|oasis)$/i, '')}_drc.lyrdb")
+report("ICPS2023_5 DRC (#{layer_mode}), #{File.basename(source.path)}", report_file)
+
+# -----------------------------------------------------------------------------
+# Input layers
+# -----------------------------------------------------------------------------
+MASK    = [20, 0]     # DRC/LVS exclusion: geometry under MASK is ignored
+EXCLUDE = [63, 63]    # hard keep-out
+
+if layer_mode == "design"
+  DIFF  = [3, 0]      # SOI island / active
+  TIN   = [5, 0]
+  TINBLK= [5, 1]
+  CNT   = [7, 0]
+  ML1   = [8, 0]
+  VIA1  = [9, 0]
+  ML2   = [10, 0]
+  VIA2  = [11, 0]
+  ML3   = [12, 0]
+  PAREA = [18, 0]     # P+ dope
+  NAREA = [19, 0]     # N+ dope
+  PAD   = [50, 0]
+elsif layer_mode == "fab"
+  DIFF  = [4, 0]      # SOI mask
+  TIN   = [5, 0]      # TiN-Gate mask
+  TINBLK= [5, 1]
+  CNT   = [6, 0]      # Contact mask
+  ML1   = [7, 0]      # M1(Al) mask
+  VIA1  = [8, 0]
+  ML2   = [9, 0]
+  VIA2  = [11, 0]
+  ML3   = [12, 0]
+  PAREA = [2, 0]      # P-diff mask
+  NAREA = [3, 0]      # N-diff mask
+  PAD   = [10, 0]
+else
+  raise "layer_mode must be 'design' or 'fab' (got '#{layer_mode}')"
+end
+RES = [15, 0]
+CAP = [16, 0]
+DIO = [17, 0]
+
+puts "ICPS2023_5 DRC  layer_mode=#{layer_mode}  strict=#{STRICT}  input=#{source.path}"
+
+exc = input(*EXCLUDE)
+msk = input(*MASK)
+def lay(spec, exc, msk)
+  input(spec[0], spec[1]).not(exc) - msk
+end
+
+diff  = lay(DIFF, exc, msk)
+tin   = lay(TIN, exc, msk)
+cnt   = lay(CNT, exc, msk)
+ml1   = lay(ML1, exc, msk)
+via1  = lay(VIA1, exc, msk)
+ml2   = lay(ML2, exc, msk)
+via2  = lay(VIA2, exc, msk)
+ml3   = lay(ML3, exc, msk)
+parea = lay(PAREA, exc, msk)
+narea = lay(NAREA, exc, msk)
+res   = lay(RES, exc, msk)
+cap   = lay(CAP, exc, msk)
+pad   = lay(PAD, exc, msk)
+cnt   = cnt - pad
+
+# -----------------------------------------------------------------------------
+# Derived layers (golden deck definitions)
+# -----------------------------------------------------------------------------
+pdiff = diff & parea - res            # P+ source/drain
+ndiff = diff & narea - res            # N+ source/drain
+
+# TiN gate: TiN interacting with a source/drain, excluding capacitor plates.
+tin_gate = tin.interacting(pdiff) + tin.interacting(ndiff) - cap
+# TiN with the gate region enlarged by 2 um -- the golden deck's `tinA`; used so
+# that the minimum-width rules see gate + local interconnect as one conductor.
+bb = (diff + tin_gate).extents
+tinA = tin + (tin_gate.sized(2.0.um) & bb)
+
+# Contacts: source/drain contacts sit on the island, gate contacts on TiN.
+cnt_sd   = cnt & diff
+cnt_gate = cnt & tin - diff
+# Contacts used as vias between TiN and ML1 (golden: cnt_via)
+cnt_via  = cnt & tin & ml1 - diff
+via1_via = via1 & ml1 & ml2
+
+# =============================================================================
+# 1. Diffusion / SOI island
+# =============================================================================
+puts "Check SOI island"
+r = diff.width(6.0.um);       r.output("DIFF.W3 SOI width < 6 um (golden DIFF-A)")
+r = diff.space(4.0.um);       r.output("DIFF.S1 SOI space < 4 um (golden DIFF-B)")
+
+# m3: SOI must enclose the source/drain dope (PDK ref. manual, device layer)
+r = diff.enclosing(parea, 2.0.um); r.output("DIFF.m3 SOI enclosure of PAREA < 2 um")
+r = diff.enclosing(narea, 2.0.um); r.output("DIFF.m3 SOI enclosure of NAREA < 2 um")
+
+# Dielectric isolation between opposite dope types (golden DIFF-C..H)
+r = parea.enclosing(diff, 2.0.um); r.output("PAREA.C PAREA enclosing SOI < 2 um (golden DIFF-C)")
+r = narea.enclosing(diff, 2.0.um); r.output("NAREA.D NAREA enclosing SOI < 2 um (golden DIFF-D)")
+r = pdiff.separation(ndiff, 4.0.um); r.output("DIFF.E PDiff to NDiff space < 4 um (golden DIFF-E)")
+r = parea & narea;                 r.output("AREA.F PAREA/NAREA butting (golden DIFF-F)")
+r = parea.separation(ndiff, 5.0.um); r.output("AREA.G PAREA to NDiff space < 5 um (golden DIFF-G)")
+r = narea.separation(pdiff, 5.0.um); r.output("AREA.H NAREA to PDiff space < 5 um (golden DIFF-H)")
+r = pdiff.space(5.0.um);           r.output("PDIFF.A PDiff space < 5 um (golden PMOS-A)")
+r = ndiff.space(5.0.um);           r.output("NDIFF.D NDiff space < 5 um (golden NMOS-D)")
+
+# =============================================================================
+# 2. TiN gate / local interconnect
+# =============================================================================
+puts "Check TiN and contacts"
+# W1: TiN gate width (PDK ref. manual). Gate = TiN over the island.
+r = (tin & diff).width(10.0.um);   r.output("TIN.W1 TiN gate width < 10 um")
+# TiN (gate enlarged) minimum width / space (golden TiN-A/B)
+r = tinA.width(6.0.um);            r.output("TIN.W4 TiN width < 6 um (golden TiN-A)")
+r = tinA.space(4.0.um);            r.output("TIN.S3 TiN space < 4 um (golden TiN-B)")
+# TiN wiring limits (PDK ref. manual, wiring layer)
+r = tin.space(6.0.um);             r.output("TIN.S4 TiN space < 6 um")
+r = tin.enclosing(cnt, 2.0.um);    r.output("TIN.C TiN enclosing Cnt < 2 um (golden TiN-C)")
+# m4/m7: the PDK documents ask for 2.5 um enclosure of the gate contact, but the
+# shipped `pcont_min` primitive provides exactly 2.0 um (the golden limit), so
+# the document value is only checked in strict mode. See drc/README.md.
+if STRICT
+  r = tin.enclosing(cnt_gate, 2.5.um); r.output("TIN.m4 TiN enclosure of gate contact < 2.5 um")
+end
+r = tinA.enclosing(pdiff, 4.0.um); r.output("TIN.m2 TiN fringe over PDiff < 4 um (golden TiN-D)")
+r = tinA.enclosing(ndiff, 4.0.um); r.output("TIN.m2 TiN fringe over NDiff < 4 um (golden TiN-E)")
+# m1: TiN/dope overlap (golden PMOS-B / NMOS-E, previously product-only)
+r = (tin & pdiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of PDiff < 2 um (golden PMOS-B)")
+r = (tin & ndiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of NDiff < 2 um (golden NMOS-E)")
+# d1: gate to contact distance (PDK ref. manual, device layer)
+r = (tin & diff).separation(cnt, 8.0.um); r.output("TIN.d1 gate TiN to Cnt distance < 8 um")
+
+# =============================================================================
+# 3. Contacts
+# =============================================================================
+cnt_size = STRICT ? 5.0 : 4.0
+r = cnt.width(cnt_size.um);        r.output("CNT.G Cnt width < #{cnt_size} um (golden CNT-G)")
+r = cnt.space(4.0.um);             r.output("CNT.H Cnt space < 4 um (golden CNT-H)")
+cnt_encl = STRICT ? 4.0 : 2.0
+r = diff.enclosing(cnt_sd, cnt_encl.um);  r.output("CNT.m5 SOI enclosure of S/D Cnt < #{cnt_encl} um (golden CNT-I)")
+r = ml1.enclosing(cnt_sd, cnt_encl.um);   r.output("CNT.m6 ML1 enclosure of S/D Cnt < #{cnt_encl} um")
+if STRICT
+  r = ml1.enclosing(cnt_gate, 2.5.um);    r.output("CNT.m7 ML1 enclosure of gate Cnt < 2.5 um")
+end
+# Contacts that work as TiN-Al vias must be 5 x 5 um (golden CNT-J)
+r = cnt_via.without_perimeter(20.0.um);   r.output("CNT.J TiN-ML1 Cnt not 5x5 um (golden CNT-J)")
+
+# =============================================================================
+# 4. Metal 1 (Al) / via1 / metal 2 / metal 3
+# =============================================================================
+puts "Check Metal, Via1, Metal2, Metal3"
+r = ml1.width(6.0.um);             r.output("ML1.A ML1 width < 6 um (golden ML1-A)")
+r = ml1.space(4.0.um);             r.output("ML1.B ML1 space < 4 um (golden ML1-B)")
+r = ml1.enclosing(cnt, 2.0.um);    r.output("ML1.C ML1 enclosing Cnt < 2 um (golden ML1-C)")
+r = via1.width(4.0.um);            r.output("VIA1.D Via1 width < 4 um (golden VIA1-D)")
+r = via1.space(4.0.um);            r.output("VIA1.E Via1 space < 4 um (golden VIA1-E)")
+r = ml1.enclosing(via1, 2.0.um);   r.output("VIA1.F ML1 enclosing Via1 < 2 um (golden VIA1-F)")
+r = via1_via.without_perimeter(20.0.um); r.output("VIA1.G ML1-ML2 Via not 5x5 um (golden VIA1-G)")
+r = ml2.width(6.0.um);             r.output("ML2.H ML2 width < 6 um (golden ML2-H)")
+r = ml2.space(6.0.um);             r.output("ML2.I ML2 space < 6 um (golden ML2-I)")
+r = ml2.enclosing(via1, 2.0.um);   r.output("ML2.J ML2 enclosing Via1 < 2 um (golden ML2-J)")
+
+# ML2/VIA2/ML3 are not qualified by the foundry (T.B.D. in the reference
+# manual). Rules below are the ML2 rules carried one level up; they are
+# advisory until the foundry releases the mask set.
+r = via2.width(4.0.um);            r.output("VIA2.K [TBD] Via2 width < 4 um")
+r = via2.space(4.0.um);            r.output("VIA2.L [TBD] Via2 space < 4 um")
+r = ml2.enclosing(via2, 2.0.um);   r.output("VIA2.M [TBD] ML2 enclosing Via2 < 2 um")
+r = ml3.width(6.0.um);             r.output("ML3.N [TBD] ML3 width < 6 um")
+r = ml3.space(6.0.um);             r.output("ML3.O [TBD] ML3 space < 6 um")
+r = ml3.enclosing(via2, 2.0.um);   r.output("ML3.P [TBD] ML3 enclosing Via2 < 2 um")
+
+puts "DRC finished"

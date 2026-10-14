@@ -9,7 +9,7 @@
 #   klayout -b -r icps2023_5.lvs \
 #     -rd input=layout.gds -rd schematic=reference.cir \
 #     [-rd top=CELL] [-rd layer_mode=design|fab] \
-#     [-rd report=out.lyrdb] [-rd output=extracted.cir]
+#     [-rd report=out.lyrdb] [-rd output=extracted.cir] [-rd substrate=SUB] [-rd filters=legacy]
 # =============================================================================
 
 # `source` aborts when a GDS has more than one top cell.  Probe first so the
@@ -53,23 +53,28 @@ output_file = ($output && !$output.to_s.empty?) ? $output.to_s : File.expand_pat
 puts "ICPS2023_5 LVS  layer_mode=#{layer_mode}  input=#{$input}  schematic=#{$schematic}"
 puts "ICPS2023_5 LVS  layout_top=#{layout_top}  report=#{report_file}  output=#{output_file}"
 
-# The legacy reader converted four-terminal SPICE MOS statements to the
-# three-terminal MOS classes extracted by this deck.  Keep that behavior here;
-# W and L arrive in SI units from the SPICE reader and are stored in um, as in
-# the legacy MOS4To3ConvertingSpiceReader.
-class MOS4To3ConvertingSpiceReader < RBA::NetlistSpiceReaderDelegate
+# BSIMSOI uses D/G/S/E, with optional P for an external body contact. KLayout's
+# SPICE reader accepts only four MOS nodes, so five-node instances are rewritten
+# as D/G/S/P with a private model alias after E is checked against the declared
+# global substrate (default SUB). Layout has no substrate/BOX geometry, so E is
+# still projected out of comparison. P remains the fourth terminal matched to
+# the extracted body tie.
+class MOS4ToSOIReader < RBA::NetlistSpiceReaderDelegate
   def element(circuit, el, name, model, value, nets, params)
-    if el != "M" || nets.size != 4
-      return super
-    end
-    cls = circuit.netlist.device_class_by_name(model)
+    return super unless el == "M" && nets.size == 4
+
+    body_contact = model.to_s =~ /__P\z/i
+    class_name = body_contact ? model.to_s.sub(/__P\z/i, "4") : model.to_s
+    cls = circuit.netlist.device_class_by_name(class_name)
     unless cls
-      cls = RBA::DeviceClassMOS3Transistor::new
-      cls.name = model
+      cls = body_contact ? RBA::DeviceClassMOS4Transistor::new : RBA::DeviceClassMOS3Transistor::new
+      cls.name = class_name
       circuit.netlist.add(cls)
     end
+
     device = circuit.create_device(cls, name)
-    ["S", "G", "D"].each_with_index do |terminal, index|
+    terminals = body_contact ? ["D", "G", "S", "B"] : ["D", "G", "S"]
+    terminals.each_with_index do |terminal, index|
       device.connect_terminal(terminal, nets[index])
     end
     device.set_parameter("W", (params["W"] || 0.0) * 1e6)
@@ -78,10 +83,66 @@ class MOS4To3ConvertingSpiceReader < RBA::NetlistSpiceReaderDelegate
   end
 end
 
-reader = RBA::NetlistSpiceReader::new(MOS4To3ConvertingSpiceReader::new)
+reader = RBA::NetlistSpiceReader::new(MOS4ToSOIReader::new)
+spice_lines = File.readlines(File.expand_path($schematic.to_s))
+substrate_net = ($substrate && !$substrate.to_s.empty?) ? $substrate.to_s : "SUB"
+substrate_key = substrate_net.downcase
+global_nets = []
+has_mos = false
+spice_lines.each do |line|
+  fields = line.sub(/\$.*\z/, "").split
+  next if fields.empty?
+  if fields[0] =~ /\A\.GLOBAL\z/i
+    global_nets.concat(fields[1..-1] || [])
+  elsif fields[0] =~ /\A[Mm]\S+\z/
+    has_mos = true
+  end
+end
+if has_mos && !global_nets.any? { |net| net.downcase == substrate_key }
+  raise "ICPS2023_5 LVS: declare .GLOBAL #{substrate_net} for the BSIMSOI E substrate terminal (or pass -rd substrate=NET)"
+end
+mos_e = nil
+rewritten = false
+spice_lines.map! do |line|
+  fields = line.sub(/\$.*\z/, "").split
+  next line if fields.empty? || fields[0] !~ /\A[Mm]\S+\z/
+
+  first_parameter = fields.index { |field| field.include?("=") }
+  model_index = first_parameter ? first_parameter - 1 : fields.length - 1
+  terminal_count = model_index - 1
+  next line unless [4, 5].include?(terminal_count)
+
+  substrate = fields[4].to_s.downcase
+  if mos_e && mos_e != substrate
+    raise "ICPS2023_5 LVS: MOS E terminals must use one common substrate net (#{mos_e} and #{substrate})"
+  end
+  unless substrate == substrate_key
+    raise "ICPS2023_5 LVS: MOS E terminal '#{fields[4]}' must connect to .GLOBAL #{substrate_net}"
+  end
+  mos_e = substrate
+  next line unless terminal_count == 5
+
+  rewritten = true
+  tail = fields[(model_index + 1)..-1] || []
+  ([fields[0], fields[1], fields[2], fields[3], fields[5], fields[6] + "__P"] + tail).join(" ") + "\n"
+end
+
+schematic_file = File.expand_path($schematic.to_s)
+temporary_schematic = nil
+if rewritten
+  require "tmpdir"
+  temporary_schematic = File.join(Dir.tmpdir, "icps2023_5_lvs_#{Process.pid}.cir")
+  File.write(temporary_schematic, spice_lines.join)
+  schematic_file = temporary_schematic
+end
+
 # KLayout resolves relative netlist paths against the source layout's directory;
 # resolve against the invoking shell instead so scripts behave predictably.
-schematic(File.expand_path($schematic.to_s), reader)
+begin
+  schematic(schematic_file, reader)
+ensure
+  File.delete(temporary_schematic) if temporary_schematic && File.exist?(temporary_schematic)
+end
 
 # Only create the report database once every input has been read successfully:
 # otherwise an aborted run leaves a stray LVS database in the caller's directory.
@@ -186,10 +247,11 @@ else
   nsd = ndiff - ngate
   bt_nsd = bt_ndiff - bt_ngate
 end
-
-diff_nores = diff_nores - ngate - pgate
 lv_ngate = ngate
 lv_pgate = pgate
+lv_bt_ngate = bt_ngate
+
+diff_nores = diff_nores - ngate - pgate - bt_ngate
 
 diff_in_pwl = diff & pwl
 ptie = diff_in_pwl & parea
@@ -206,13 +268,14 @@ ndiff_c2 = cap & tin & diff & narea
 nres = narea & res & diff
 pres = parea & res & diff
 soi_res = (res & diff) - nres - pres
-diff_nores = diff - nres - pres - soi_res - ngate - pgate - pdiff_c2 - ndiff_c2
+diff_nores = diff - nres - pres - soi_res - ngate - pgate - bt_ngate - pdiff_c2 - ndiff_c2
 rs_layer = soi_res.sized(0.5.um) & (diff - soi_res)
 rn_layer = nres.sized(0.5.um) & (diff - nres)
 rp_layer = pres.sized(0.5.um) & (diff - pres)
 
-# Device extraction -- densities are F/um^2 and sheet values are ohms/square,
-# exactly as specified by the legacy decks.
+# Area capacitances are F/um^2. The PDIFF/NDIFF cells are TiN/diffusion
+# capacitors (PDF p.18) using Cox=2.3 fF/um^2 (PDF p.9); MIM/TiN values
+# remain inherited legacy values pending qualification.
 extract_devices(capacitor("MIMCAP", 0.115e-15), {"P1" => mim_c1, "P2" => mim_c2})
 extract_devices(capacitor("TINCAP", 0.115e-15), {"P1" => tin_c1, "P2" => tin_c2})
 extract_devices(capacitor("PDIFFCAP", 2.3e-15), {"P1" => pdiff_c1, "P2" => pdiff_c2})
@@ -229,7 +292,7 @@ extract_devices(resistor("R_SOI", 250e6), {"R" => soi_res, "C" => rs_layer, "tA"
 
 extract_devices(mos3("PMOS"), {"SD" => psd, "G" => lv_pgate, "tS" => psd, "tD" => psd, "tG" => tin})
 extract_devices(mos3("NMOS"), {"SD" => nsd, "G" => lv_ngate, "tS" => nsd, "tD" => nsd, "tG" => tin})
-extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin, "tW" => pwl})
+extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => lv_bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin, "tW" => pwl})
 
 # Connectivity, copied from the design legacy deck.  ML2/VIA1/VIA2/ML3 remain
 # available options even though only the first metal is foundry-qualified.
@@ -259,6 +322,16 @@ connect(ml1, cnt_d)
 connect(nplus, ncnt)
 connect(ncnt, cnt_d)
 
+# Both extraction modes retain the documented 2 um gate overlap at each end.
+# The BSIMSOI model uses channel L, so remove that 4 um from every extracted
+# MOS device regardless of the design or fab layer numbering.
+netlist.each_circuit do |circuit|
+  circuit.each_device do |device|
+    next unless ["NMOS", "PMOS", "NMOS4"].include?(device.device_class.name)
+    gate_length = device.parameter("L")
+    device.set_parameter("L", gate_length - 4.0) if gate_length && gate_length > 4.0
+  end
+end
 # Write the extracted netlist before comparison, as the old Mineda wrapper did.
 netlist.purge
 target_netlist(output_file, write_spice, "Created by KLayout")
@@ -273,25 +346,23 @@ same_circuits(layout_top, ".TOP")
 align
 same_device_classes("NMOS", "NCH")
 same_device_classes("PMOS", "PCH")
+same_device_classes("NMOS4", "NCH4")
 same_device_classes("MIMCAP", "CAP")
 same_device_classes("TINCAP", "CAP")
 same_device_classes("PDIFFCAP", "CAP")
 same_device_classes("NDIFFCAP", "CAP")
-# The legacy NAND extracted SPICE form contains no pad-array parasitic R/C;
-# these compare-only filters preserve that established match scope without
-# removing the resistor/capacitor extractors above.
-#
-# WARNING: the KLayout compare filters apply to BOTH netlists. They are kept
-# because they reproduce the established legacy match, but they mean that a
-# schematic-only resistor above 500 ohm (or capacitor below 1 pF) would NOT be
-# flagged as a mismatch. Use -rd filters=off to disable them when you are
-# checking a design that contains resistors/capacitors near those values.
-if ($filters && $filters.to_s == "off")
-  puts "ICPS2023_5 LVS  compare filters DISABLED (max_res/min_caps)"
-else
-  puts "ICPS2023_5 LVS  compare filters: max_res=500 ohm, min_caps=1 pF (see lvs/README.md)"
+# Strict comparison is the default. `legacy` retains the pad-array smoke
+# filter for old reference layouts; those cutoffs apply to both netlists.
+filter_mode = ($filters && !$filters.to_s.empty?) ? $filters.to_s : "off"
+unless ["off", "legacy"].include?(filter_mode)
+  raise "filters must be 'off' (strict, default) or 'legacy' (max_res/min_caps)"
+end
+if filter_mode == "legacy"
+  puts "ICPS2023_5 LVS  LEGACY compare filters: max_res=500 ohm, min_caps=1 pF (see lvs/README.md)"
   max_res(500)
   min_caps(1.0e-12)
+else
+  puts "ICPS2023_5 LVS  strict compare (filters disabled)"
 end
 same_device_classes("PRES", "RES")
 same_device_classes("R_SOI", "RES")

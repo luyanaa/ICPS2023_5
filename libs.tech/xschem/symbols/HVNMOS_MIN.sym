@@ -20,10 +20,10 @@ L 4 31 10 31 17 {}
 B 5 38 -32 42 -28 {name=D dir=in}
 B 5 -2 -2 2 2 {name=G dir=in}
 B 5 38 28 42 32 {name=S dir=in}
-B 5 38 -2 42 2 {name=B dir=in}
+B 5 38 -2 42 2 {name=E dir=in}
 T {D} 40 -30 0 0 0.2 0.2 {layer=13}
 T {G} 0 0 0 0 0.2 0.2 {layer=13}
 T {S} 40 30 0 0 0.2 0.2 {layer=13}
-T {B} 40 0 0 0 0.2 0.2 {layer=13}
+T {E} 40 0 0 0 0.2 0.2 {layer=13}
 T {@name} 50 -30 0 0 0.2 0.2 {}
 T {@w\\/@l\\/@m} 20 0 0 0 0.2 0.2 {}

@@ -14,6 +14,10 @@ AGREED_SUBCKTS = Set.new(%w[
   r_poly hr_poly
 ])
 DEVICE_TYPES = Set.new(%w[nmos4 pmos4 subcircuit])
+ESD_SUBCKT_PINS = {
+  'nmos_esd' => %w[PAD VSS SUB],
+  'pmos_esd' => %w[PAD VDD SUB]
+}.freeze
 
 def block(text, tag)
   # Metadata may contain a multiline format string; xschem closes such a
@@ -34,16 +38,20 @@ def attrs(text)
 end
 
 def pins(text)
-  text.scan(/^B\s+5\s+[^\n]*\{name=([^\s}]+)/).flatten.to_set
+  text.scan(/^B\s+5\s+[^\n]*\{name=([^\s}]+)/).flatten
 end
 
-def ngspice_names
+def ngspice_interfaces
   models = Set.new
-  subckts = Set.new
+  subckts = {}
   Dir.glob(File.join(NGSPICE_DIR, '**', '*')).select { |p| File.file?(p) }.each do |path|
     File.foreach(path) do |line|
       models << $1.downcase if line =~ /^\s*\.model\s+([^\s(]+)/i
-      subckts << $1.downcase if line =~ /^\s*\.subckt\s+([^\s]+)/i
+      if (match = line.match(/^\s*\.subckt\s+([^\s]+)\s*(.*)$/i))
+        name = match[1].downcase
+        pins = match[2].split.take_while { |token| !token.include?('=') }
+        subckts[name] = pins.map(&:upcase)
+      end
     end
   end
   [models, subckts]
@@ -52,11 +60,12 @@ end
 errors = []
 files = Dir.glob(File.join(SYMBOL_DIR, '*.sym')).sort
 abort "no symbols found in #{SYMBOL_DIR}" if files.empty?
-models, subckts = ngspice_names
+models, subckts = ngspice_interfaces
 using_agreed = models.empty? || subckts.empty?
 models = AGREED_MODELS if models.empty?
-subckts = AGREED_SUBCKTS if subckts.empty?
-
+if subckts.empty?
+  subckts = AGREED_SUBCKTS.each_with_object({}) { |name, found| found[name] = nil }
+end
 files.each do |path|
   name = File.basename(path, '.sym')
   text = File.read(path)
@@ -72,6 +81,9 @@ files.each do |path|
   next unless DEVICE_TYPES.include?(type)
 
   pad_names = pins(text)
+  if %w[nmos4 pmos4].include?(type) && pad_names != %w[D G S E]
+    errors << "#{name}: MOS pins must be ordered D G S E, got #{pad_names.inspect}"
+  end
   if format&.include?('@pinlist')
     errors << "#{name}: @pinlist has no B 5 pads" if pad_names.empty?
   else
@@ -85,7 +97,14 @@ files.each do |path|
   if %w[nmos4 pmos4].include?(type)
     errors << "#{name}: model #{model.inspect} absent from ngspice models" unless model && models.include?(model.downcase)
   elsif type == 'subcircuit'
-    errors << "#{name}: subcircuit #{subckt.inspect} absent from ngspice library" unless subckt && subckts.include?(subckt.downcase)
+    errors << "#{name}: subcircuit #{subckt.inspect} absent from ngspice library" unless subckt && subckts.key?(subckt.downcase)
+    expected_pins = ESD_SUBCKT_PINS[subckt.to_s.downcase]
+    if expected_pins && pad_names != expected_pins
+      errors << "#{name}: #{subckt} pins must be #{expected_pins.join(' ')}, got #{pad_names.join(' ')}"
+    end
+    if expected_pins && subckts[subckt.to_s.downcase] && pad_names.map(&:upcase) != subckts[subckt.to_s.downcase]
+      errors << "#{name}: xschem pins #{pad_names.join(' ')} disagree with ngspice .subckt pins #{subckts[subckt.to_s.downcase].join(' ')}"
+    end
   end
 end
 

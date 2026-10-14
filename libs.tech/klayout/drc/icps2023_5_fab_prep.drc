@@ -66,14 +66,13 @@ dio2 = DIO.sized(2.0) - (PAREA + NAREA)
 p_dope = (PAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
 n_dope = (NAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
 
-# TiN gate: gate = TiN over the island (excluding capacitor plates); it is
-# returned to the mask shop with the 2 um gate-window bias.
-tin_gate = TIN.interacting(DIFF) - TIN.overlapping(CAP)
+# Exclude the native diffusion-capacitor plate and its 4 um fringe from gate bias.
+tin_gate = TIN.interacting(DIFF) - (TIN & CAP.sized(4.0.um))
 bb = (DIFF + tin_gate).extents
 tin_gate_enlarged = tin_gate.sized(2.0.um) & bb
-# The TiN block layer (5/1) is a design aid for splitting one TiN polygon into
-# two gates; the mask carries the TiN polygon only.
-tin_out = TIN
+# Preserve the legacy gate-window bias and the design-side block geometry in
+# the combined TiN mask; TIN_BLK has no independent fab mask layer.
+tin_out = TIN + tin_gate_enlarged + TINBLK
 
 # ---- fab mask layers -------------------------------------------------------
 p_dope.output(2, 0)                    # P-diff   (P+ source/drain dope)

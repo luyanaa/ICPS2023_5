@@ -56,12 +56,13 @@ ngspice defaults.
 | `RDSW` | 0 | 46250 | effective curve fit; no separate MOS access-resistance data |
 | `XJ` | 50 nm | 50 nm | independent simulation placeholder, not measured |
 
-The process geometry uses `TOX=15 nm` from the PDK PDF and `TSI=95 nm`,
-`TBOX=400 nm` from `libs.tech/klayout/xs/AIST-SOI-CMOS.xs`. `XJ=50 nm` is
+The process geometry uses `TOX=15 nm` from the 2023 PDK PDF. `TSI=95 nm` and
+`TBOX=400 nm` are initial values from the July 2021 `AIST-SOI-CMOS.xs` prior,
+not a validated 2023 production-stack characterization. `XJ=50 nm` is
 independent of `TSI` and satisfies `XJ ≤ TSI`; it is not a PDK measurement.
-`SOIMOD=0` selects the partially depleted model mode. The PDF does not provide
-body/back-gate sweeps, C–V data, temperature sweeps, or geometry sweeps, so the
-fit makes no claims about those dimensions of behavior or silicon calibration.
+`SOIMOD=0` selects the partially depleted model mode. No `SOIMOD=1/2`
+comparison is claimed: the PDF provides no mode-specific body/back-gate,
+C–V, temperature, or geometry sweeps to validate such a comparison.
 
 ### Fit residuals
 

@@ -7,28 +7,30 @@ Repository
   Process          minimal Fab SOI-CMOS, AIST ACPS (gate last, 1 metal)
   Licence          Apache License 2.0 (see LICENSE)
   Upstream         https://github.com/mineda-support/ICPS2023_5
-  Refactor base    git commit 343fb28 ("Update README.md"), branch main
+  Refactor base    git commit 343fb28 (branch main)
 
-Sources of the artefacts in this repository
--------------------------------------------
+Primary process documents
+-------------------------
 libs.ref/doc/PDK_minimalFabSOICMOS.pdf
   "minimal Fab SOI-CMOS PDK", Minimal Fab PDK authors, 31 Oct 2023 (22 pages).
-  Device/process explanation, device characteristics, design manual, SPICE
-  model, PCell and DRC/LVS rule tables. Source of every documented electrical
-  constant used by the ngspice models, the DRC deck and the PEX deck.
+  Source for device geometry, MOSFET table data (p.7), sheet/contact resistance
+  (p.8), gate/diffusion capacitance densities (p.9), output/transfer plots
+  (pp.10-11), and device/PCell layout (pp.16-21). The ngspice fit uses only
+  the p.7 and pp.10-11 device measurements. PDK graph values are digitized and
+  preserved with pixel provenance in libs.tech/ngspice/fit/.
 
 libs.ref/doc/PDK_reference_manual.pdf
   "ミニマルファブ(臨海センター)向け PDK リファレンスマニュアル", 1 Nov 2023
-  (11 pages). Mask layer table, device list, absolute maximum ratings,
-  layout rules, design example.
+  (11 pages). Mask layer table, device list, absolute maximum ratings, layout
+  rules and supplementary electrical data.
 
 libs.ref/ICPS2023_5_fd_base/
   Derived from Samples/Semicon2023/base_contest2023.GDS, top cell
   "base_Rev0.93" (minimal Fab design contest 2023 template). The pre-placed
   device arrays (pmos_array, nmos_array, resistor_array, tin_m1_cap_array)
   were removed; the 1600x1600 um frame and its 28 pads are kept unchanged.
-  Regenerate with tools/make_fd_base.rb; the LEF/Liberty views with
-  tools/make_lef_lib.rb.
+  Regenerate GDS with tools/make_fd_base.rb; generate pad-cell LEF, physical-only
+  Liberty, and 28-port fixed-pin DEF with tools/make_lef_lib.rb.
 
 libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds
   The "ICPS2023_5_Basic" static library of the original KLayout salt package
@@ -36,47 +38,55 @@ libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds
   nsubcont, DCNT, DCNT2, Via, PAD60, PAD100, PAD150). Renamed, contents
   unchanged.
 
-libs.tech/ngspice/models/
-  legacy_*.inc are the foundry SPICE cards as published (BSIM3, LEVEL=8):
-    MF_CMOS20240109.txt  -> ICPS2023Ver1.01, revised 2024-01-09 (newest)
-    MF_CMOS20230922.txt  -> ICPS2023Ver1.0
-    SOI_CMOS             -> wrapper including MF_CMOS20240109
-  icps2023_5_b3soipd.inc / icps2023_5_b3soifd.inc are generated from the
-  newest card by tools/convert_bulk3_to_b3soi.py (BSIM3SOI level 57 / 55).
+libs.tech/ngspice/
+  models/icps2023_5_b4soi.inc is the active stage-1 BSIMSOI v4.4 (ngspice
+  LEVEL=58) fit. VTH0 is anchored to the PDK p.7 table; graph-derived output
+  and transfer curves set the other documented fit parameters. TSI/TBOX are
+  initial values from the dated 2021 AIST cross-section, not a validated
+  2023 production-stack characterization; XJ=50 nm is an explicit
+  unmeasured placeholder with XJ <= TSI. This is not silicon calibration.
+  fit/b4soi_stage1_iv_digitized.csv stores 459 digitized PDK graph points,
+  pixel centroids/support, bias, and page; fit/b4soi_stage1_iv.svg overlays
+  those points with ngspice simulations.
+  models/legacy_*.inc are retained only as the dated foundry bulk-BSIM3 source
+  cards (LEVEL=8); they are not selected by the active library. Generated
+  BSIM3SOI cards and their converter were removed in the B4SOI cutover.
+  The active selector is .lib b4soi in icps2023_5.lib.spice. Passives include
+  separate compatibility approximations; see libs.tech/ngspice/README.md.
 
 libs.tech/klayout/
-  tech.lyt, the layer properties and the legacy decks come from the original
-  salt package ("Technology" grain). The decks were consolidated:
-    drc.lydrc               -> src/icps2023_5.drc      (Mineda2022_6 v0.32 rules)
+  tech.lyt, layer properties and legacy macro assets originate in the original
+  salt package ("Technology" grain). The device and verification decks were
+  consolidated or rewritten:
+    drc.lydrc, ICPS2023_5_to_SOI.lydrc
+                            -> drc/icps2023_5.drc and fab_prep.drc
     lvs.lylvs, lvs_fabrication.lylvs
-                            -> lvs/icps2023_5.lvs      (design and fab modes)
-    ICPS2023_5_to_SOI.lydrc -> drc/icps2023_5_fab_prep.drc
-    area_cut.lydrc          -> dropped (stale Mineda2022_6 copy; its 20/0 "pad"
-                               contradicted the PDK's PAD 50/0)
-  pex/icps2023_5_pex.py is new: the legacy PDK shipped no PEX deck.
-  The PCells (pcells_v0.1.lym) and the utility macros keep their original
-  content; only the document paths inside macros/Documents were updated.
+                            -> lvs/icps2023_5.lvs (design and fab modes)
+    no legacy PEX deck      -> pex/icps2023_5_pex.py (new)
+  The native RBA PCells (pcells_v0.1.lym) no longer load AnagixLoader classes.
+  README files document deck differences, assumptions, and executed results.
 
-libs.tech/xschem/symbols/
-  The legacy Xschem symbol directory, plus the device set of the retired
-  LTspice library (MinedaLIB: CAP_MIN, HR_POLY_MIN, NDIO_MIN, NMOS_ESD_MIN,
-  NMOS_MIN, PDIO_MIN, PMOS_ESD_MIN, PMOS_MIN, RES_MIN, R_POLY_MIN) expressed
-  as Xschem symbols bound to the ngspice models. See libs.tech/xschem/README.md.
+libs.tech/xschem/
+  The legacy Xschem symbol directory plus retired LTspice device symbols
+  (MinedaLIB) expressed as Xschem symbols bound to the PDK ngspice library.
+  MOS pins emit D/G/S/E for the B4SOI model. The stock symbols do not expose
+  its optional fifth P body terminal. See libs.tech/xschem/README.md.
 
 libs.tech/kicad/MinedaSymbols.lib
   Legacy EEschema/KiCad symbol library, migrated unchanged and unmaintained.
 
 libs.tech/klayout/xs/
   Process cross sections (AIST-SOI-CMOS.xs, YSS-SOI-CMOS.xs) and their layer
-  colour maps. Source of the film thicknesses used by the BSIM3SOI models
-  (TSI = 0.095 um, TBOX = 0.4 um) and of the layer stack order.
+  colour maps. AIST-SOI-CMOS.xs is a July 2021 process prior, not a validated
+  complete 2023 production stack; it supplies TSI=0.095 um and TBOX=0.4 um,
+  but it does not supply XJ.
 
 Samples/Semicon2023/
   base_contest2023.GDS  minimal Fab design contest 2023 template (Rev 0.93)
-  NAND/                 NAND gate tutorial sample: schematics (Xschem), layout,
-                        LVS reference netlist and the legacy LVS run artefacts
-                        (lvs_work/). Kept as the regression reference for the
-                        DRC/LVS/PEX decks.
+  NAND/                 NAND tutorial schematics and layout. The migrated
+                        nand_sample_b4soi_reference.cir uses D/G/S/E and a
+                        common substrate net. The old lvs_work/ netlist and
+                        run artefacts are retained as historical provenance.
 
 Not carried over
 ----------------

@@ -1,41 +1,38 @@
 # =============================================================================
-# make_lef_lib.rb -- generate the LEF and Liberty views of
-#                    libs.ref/ICPS2023_5_fd_base/
+# make_lef_lib.rb -- generate pad-cell LEF/Liberty views and fixed frame I/O DEF
+#                    for libs.ref/ICPS2023_5_fd_base/
 #
-# The base library is a metal-only pad ring: geometry but no transistors, so
-# both views are derived directly from the GDS:
-#   * LEF   : macro outlines, pad pins (the ML1 shape of each pad cell) and the
-#             remaining geometry as obstructions, on the PDK's design layers.
-#   * Liberty: one cell per pad macro, area and pin capacitance computed from
-#             the drawn ML1 area and the documented TEOS areal capacitance
-#             (0.115 fF/um^2 = eps_ox/300 nm, PDK reference manual "TiN_cap").
-#             There are NO timing arcs: the foundry does not characterise an
-#             I/O cell for this process, the pads are pass-through metal.
-#             Absolute maximum ratings: VDS/VGD/VGS = +/-7 V (PDK documents).
+# The full-frame GDS is a physical overlay, not a placeable block macro. The
+# DEF exposes its 28 ML1 pad shapes as independent fixed top-level pins; the
+# LEF contains only the reusable 60 um pad-cell macro.
+# Liberty is physical-only: pad capacitance has no qualified return-network
+# model, and no timing or transition data is characterized.
 #
 # Usage:
 #   cd <repo root>
 #   klayout -b -r libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb \
 #           [-rd gds=libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds] \
 #           [-rd lef=libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef] \
-#           [-rd lib=libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib]
+#           [-rd lib=libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib] \
+#           [-rd def=libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def]
 #
 # Copyright 2023 minimalFab Promoting Organization
 # Licensed under the Apache License, Version 2.0
 # =============================================================================
+require "fileutils"
 
 gds_file = ($gds && $gds.to_s != "") ? $gds : "libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds"
 lef_file = ($lef && $lef.to_s != "") ? $lef : "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef"
 lib_file = ($lib && $lib.to_s != "") ? $lib : "libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib"
+def_file = ($def && $def.to_s != "") ? $def : "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def"
 
-TEOS_CAP = 0.115e-15   # F/um^2, 300 nm TEOS between ML1 and lower plates
+FRAME_CELL = "ICPS2023_5_fd_base"
 PIN_LAYER = [8, 0]     # ML1: the pad metal that a bond/beam actually touches
 MACRO_CLASS = {
-  "ICPS2023_5_fd_base" => "BLOCK",
-  "pad_60_m1_tin"      => "PAD",
-  "PAD60"              => "PAD",
-  "PAD100"             => "PAD",
-  "PAD150"             => "PAD",
+  "pad_60_m1_tin" => "PAD",
+  "PAD60"         => "PAD",
+  "PAD100"        => "PAD",
+  "PAD150"        => "PAD",
 }
 # LEF layer names for the design layers that occur in this library.
 LEF_LAYER = {
@@ -87,8 +84,26 @@ def lef_geometry(region, x0, y0, dbu)
   end
   out
 end
+frame_pin_region, frame_bbox = cell_region(gds_file, FRAME_CELL, PIN_LAYER)
+raise "frame cell #{FRAME_CELL} is missing from #{gds_file}" unless frame_bbox
+frame_pins = frame_pin_region.each.map do |poly|
+  raise "frame pad pin is not rectangular" unless poly.is_box?
+  box = poly.bbox
+  expected_size = (60.0 / dbu).round
+  unless box.width == expected_size && box.height == expected_size
+    raise "frame pad pin is #{box.width * dbu} x #{box.height * dbu} um, expected 60 x 60 um"
+  end
+  { x: box.left, y: box.bottom, width: box.width, height: box.height }
+end
+raise "expected 28 separate frame pad pins, found #{frame_pins.size}" unless frame_pins.size == 28
+frame_pins.sort_by! { |pin| [-(2 * pin[:y] + pin[:height]), pin[:x]] }
+frame_pins.each_with_index { |pin, i| pin[:name] = "PAD_%02d" % i }
+
+frame_width = (frame_bbox.width * dbu * ip).round
+frame_height = (frame_bbox.height * dbu * ip).round
 
 macros = []
+
 ly.each_cell do |cell|
   klass = MACRO_CLASS[cell.name] or next
   bb = cell.bbox
@@ -115,13 +130,8 @@ ly.each_cell do |cell|
   end
   pin_rects = pin_region ? lef_geometry(pin_region, x0, y0, dbu) : []
 
-  # pad capacitance estimate from the merged pad-metal area
-  area_um2 = pin_region ? pin_region.area * dbu * dbu : 0.0
-  cap_ff = (area_um2 * TEOS_CAP * 1e15).round(4)
-
   macros << { name: cell.name, klass: klass, w: w, h: h,
-              pins: pin_rects, obs: obs, area: (w * h).round(3),
-              pin_area: area_um2.round(3), cap_ff: cap_ff }
+              pins: pin_rects, obs: obs, area: (w * h).round(3) }
 end
 
 macros.sort_by! { |m| m[:name] }
@@ -129,10 +139,10 @@ raise "no macros found in #{gds_file}" if macros.empty?
 
 # ---------------------------------------------------------------- LEF --------
 lef = []
-lef << "# ICPS2023_5_fd_base -- LEF macro views (generated from the GDS)"
-lef << "# Layer names follow the PDK design layers (see libs.tech/klayout/doc/layers.md)."
-lef << "# Geometry is metal-only pad ring hardware; no LEF tech file is shipped yet"
-lef << "# (that arrives with the LibreLane/OpenROAD bring-up)."
+lef << "# Reusable pad-cell LEF only; the complete frame remains a GDS overlay."
+lef << "# Fixed top-level pins are in libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def."
+lef << "# Layer names follow libs.tech/klayout/doc/layers.md."
+lef << "# A process LEF tech file is not shipped."
 lef << "VERSION 5.7 ;"
 lef << "BUSBITCHARS \"[]\" ;"
 lef << "DIVIDERCHAR \"/\" ;"
@@ -171,22 +181,47 @@ macros.each do |m|
   lef << ""
 end
 File.write(lef_file, lef.join("\n"))
+def_lines = []
+def_lines << "VERSION 5.8 ;"
+def_lines << "DIVIDERCHAR \"/\" ;"
+def_lines << "BUSBITCHARS \"[]\" ;"
+def_lines << "DESIGN #{FRAME_CELL} ;"
+def_lines << "UNITS DISTANCE MICRONS #{ip} ;"
+def_lines << "DIEAREA ( #{(frame_bbox.left * dbu * ip).round} #{(frame_bbox.bottom * dbu * ip).round} )" \
+             " ( #{(frame_bbox.right * dbu * ip).round} #{(frame_bbox.top * dbu * ip).round} ) ;"
+def_lines << ""
+def_lines << "PINS #{frame_pins.size} ;"
+frame_pins.each do |pin|
+  width = (pin[:width] * dbu * ip).round
+  height = (pin[:height] * dbu * ip).round
+  x = (pin[:x] * dbu * ip).round
+  y = (pin[:y] * dbu * ip).round
+  def_lines << "- #{pin[:name]} + NET #{pin[:name]} + DIRECTION INOUT + USE SIGNAL"
+  def_lines << "  + PORT"
+  def_lines << "    + LAYER #{LEF_LAYER[PIN_LAYER]} ( 0 0 ) ( #{width} #{height} )"
+  def_lines << "    + FIXED ( #{x} #{y} ) N ;"
+end
+def_lines << "END PINS"
+def_lines << ""
+def_lines << "NETS #{frame_pins.size} ;"
+frame_pins.each { |pin| def_lines << "- #{pin[:name]} ( PIN #{pin[:name]} ) ;" }
+def_lines << "END NETS"
+def_lines << "END DESIGN"
+FileUtils.mkdir_p(File.dirname(def_file))
+File.write(def_file, def_lines.join("\n"))
+
 
 # ------------------------------------------------------------- Liberty -------
 tl = []
-tl << "/* ICPS2023_5_fd_base -- Liberty view of the minimal Fab SOI-CMOS pad ring"
+tl << "/* ICPS2023_5_fd_base -- physical-only Liberty view of the pad cell"
 tl << " *"
-tl << " * Generated from the GDS by libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb."
-tl << " * area        : macro bounding box in um^2"
-tl << " * capacitance : drawn pad-metal (ML1) area x #{TEOS_CAP * 1e15} fF/um^2"
-tl << " *               (300 nm TEOS over the SOI stack)."
+tl << " * Generated from libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds."
+tl << " * No pad-to-substrate capacitance or timing constraint is characterized."
+tl << " * ML1 and TiN are electrically shorted in the drawn pad; a return-net"
+tl << " * capacitance cannot be inferred from their intervening dielectric."
 tl << " *"
-tl << " * THIS LIBRARY HAS NO TIMING ARCS. The foundry does not characterise an"
-tl << " * I/O or pad cell for this process: the pads are pass-through metal, and"
-tl << " * the only documented electrical limit is the absolute maximum rating of"
-tl << " * +/-7 V (VDS/VGD/VGS, PDK reference manual). Do not use this file for"
-tl << " * timing-driven optimisation; it exists so that physical flows can"
-tl << " * instantiate the frame and pads."
+tl << " * Do not use this library for timing-driven optimization or electrical"
+tl << " * signoff. It carries physical cell and pin identity only."
 tl << " */"
 tl << "library (ICPS2023_5_fd_base) {"
 tl << "  comment : \"minimal Fab SOI-CMOS 1600x1600 um frame and 60 um pad ring\";"
@@ -216,8 +251,6 @@ macros.each do |m|
   tl << "    cell_footprint : \"#{m[:name]}\";"
   tl << "    pin (PAD) {"
   tl << "      direction : inout;"
-  tl << "      capacitance : #{m[:cap_ff].to_s};   /* #{m[:pin_area].to_s} um^2 pad metal */"
-  tl << "      max_transition : 0.0;   /* not characterised */"
   tl << "    }"
   tl << "  }"
   tl << ""
@@ -225,5 +258,6 @@ end
 tl << "}"
 File.write(lib_file, tl.join("\n"))
 
-puts "wrote #{lef_file} and #{lib_file}"
-macros.each { |m| puts "  #{m[:name]}: #{m[:w]} x #{m[:h]} um, #{m[:pins].size} pin rects, #{m[:obs].values.map(&:size).inject(0, :+)} obs rects, cap #{m[:cap_ff]} fF" }
+puts "wrote #{lef_file}, #{lib_file}, and #{def_file}"
+puts "  #{macros.map { |m| m[:name] }.join(', ')}: pad-cell LEF/Liberty"
+puts "  #{frame_pins.size} fixed frame pins: #{frame_pins.first[:name]} through #{frame_pins.last[:name]}"

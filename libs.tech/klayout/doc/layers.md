@@ -54,13 +54,12 @@ draws all layers positive and `icps2023_5_fab_prep.drc` copies them 1:1.
 `ML2`, `VIA1`, `VIA2` and `ML3` are **not qualified** by the foundry. The
 reference manual lists `Via` and `M2(Al)`/`M3(Al)` as `T.B.D.`, and the
 recommended design flow uses M1 only (`M1` layer, minimum width 5 µm, minimum
-space 4 µm, 9 µm line-and-space). They are kept in the layer table, in the
-PDK's layer properties, in the DRC/LVS/PEX decks and in the xtor stack because
-they are drawn by existing `ICPS2023_5_Basic` cells and by `TIN_cap`
-(`ML1`/`ML2` plates) — removing them would break those cells. Rules for them
-are marked `[TBD]` in `drc/icps2023_5.drc` and are derived from the M1 rules
-(mm) or inherited from the Mineda2022_6 rule deck; treat them as a proposal,
-not as foundry sign-off.
+space 4 µm, 9 µm line-and-space). These layers remain in the layer table,
+properties, DRC/LVS decks and xtor stack because existing `ICPS2023_5_Basic`
+cells and `TIN_cap` draw them; PEX intentionally omits them because no
+resistance or capacitance values are qualified. Their DRC rules are marked
+`[TBD]` and are derived from the M1 rules (mm) or inherited from the
+Mineda2022_6 rule deck; treat them as a proposal, not foundry sign-off.
 
 ## Numbering history (why the old files disagreed)
 

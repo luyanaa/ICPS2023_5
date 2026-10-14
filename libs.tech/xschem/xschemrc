@@ -26,5 +26,5 @@ if {[info exists xschem_library_path] && $xschem_library_path ne ""} {
     set xschem_library_path $icps_symbol_dir
 }
 set icps_spice_lib [file join $icps_pdk_dir libs.tech ngspice icps2023_5.lib.spice]
-set spice_netlist_commands "* ICPS2023_5 ngspice models\n.include $icps_spice_lib\n"
+set spice_netlist_commands "* ICPS2023_5 ngspice models\n.lib \"$icps_spice_lib\" b4soi\n"
 # Leave xschem's standard netlist and simulation defaults in place.

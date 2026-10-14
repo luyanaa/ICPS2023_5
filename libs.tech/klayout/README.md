@@ -12,7 +12,7 @@ drc/  icps2023_5.drc          design rule check (design|fab numbering)
       icps2023_5_fab_prep.drc design -> foundry mask numbering
 lvs/  icps2023_5.lvs          layout vs schematic
 pex/  icps2023_5_pex.py       parasitic extraction (R network + lumped C)
-pcells/                       device PCells (require AnagixLoader's MinedaPCell)
+pcells/                       native RBA device PCells (no AnagixLoader)
 macros/                       utility macros from the original package
 xs/                           process cross sections and their colour maps
 doc/layers.md                 canonical layer table + numbering history
@@ -52,10 +52,17 @@ symlinks under `lvs_work/`). Those wrappers are gone: each deck now takes its
 inputs and outputs from the command line, prints a banner, and fails with an
 actionable message instead of writing into the design directory.
 
-The device PCells (`pcells/`) still need AnagixLoader for their base classes
-(`MinedaPCell`, `MinedaNch_SOI`, ...); they are the only remaining dependency on
-that package. The scripts under `macros/` are KLayout GUI macros and were kept
-as-is (only the document paths in `macros/Documents/` were updated).
+`pcells/pcells_v0.1.lym` declares the nine active device cells directly with
+KLayout's RBA PCell API. It runs in batch mode without AnagixLoader, the
+`MinedaPCell` base classes, or the `ICPS2023_5_Basic` library.
+
+The nine default PCells and five optional variants were batch-generated and
+pass the default design-mode DRC with zero markers. Optional variants cover
+Nch body ties, p-substrate contacts, two fingers, Pch n-substrate contacts, and
+an N-well P-diffusion resistor. The two-finger Nch variant has a continuous
+TiN gate bus below the SOI island; the gate-to-source/drain-contact spacing
+rule still passes. The utility scripts under `macros/` remain GUI macros; only
+document paths inside `macros/Documents/` were updated.
 
 ## Layer numbering
 

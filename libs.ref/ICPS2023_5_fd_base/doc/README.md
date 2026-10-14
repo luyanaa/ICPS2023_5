@@ -1,17 +1,18 @@
 # ICPS2023_5_fd_base — frame and pad ring
 
 Physical-only library: the chip frame and the 28 wire-bond pads of the minimal
-Fab SOI-CMOS process. There are no transistors, no logic and no characterised
-I/O cell — the pads are pass-through metal (ML1 over TiN over the SOI stack),
-which is why the Liberty view carries geometry and capacitance only.
+Fab SOI-CMOS process. There are no transistors, logic, or characterized I/O
+cells. The GDS is a physical overlay; use the fixed top-level I/O ports in DEF
+instead of placing the full 1600 µm frame as a blocking macro.
 
 ## Contents
 
 | View | File | Notes |
 |------|------|-------|
-| GDSII | `gds/ICPS2023_5_fd_base.gds` | top cell `ICPS2023_5_fd_base`, 1600 × 1600 µm |
-| LEF | `lef/ICPS2023_5_fd_base.lef` | macro outlines, pad pins (ML1), obstructions |
-| Liberty | `lib/ICPS2023_5_fd_base.lib` | area and pin capacitance, no timing arcs |
+| GDSII | `gds/ICPS2023_5_fd_base.gds` | unchanged 1600 × 1600 µm frame and 28 pad overlay |
+| LEF | `lef/ICPS2023_5_fd_base.lef` | reusable 60 × 60 µm pad-cell macro only |
+| DEF | `def/ICPS2023_5_fd_base.def` | 28 independent fixed `PAD_00`–`PAD_27` ML1 top-level pins |
+| Liberty | `lib/ICPS2023_5_fd_base.lib` | physical pin identity only; no pad capacitance or timing constraint |
 
 Cells in the GDS:
 
@@ -34,29 +35,38 @@ frame were kept unchanged**.
 ```bash
 cd ~/Documents/librelane && nix-shell --run 'cd <repo> && \
   klayout -b -r libs.ref/ICPS2023_5_fd_base/tools/make_fd_base.rb && \
-  klayout -b -r libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb'
+  klayout -b -r libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb && \
+  python3 libs.ref/ICPS2023_5_fd_base/tools/test_pad_views.py'
 ```
 
 `make_fd_base.rb` asserts that exactly 28 pads are present before writing.
-`make_lef_lib.rb` derives both views from the GDS: pins are the merged ML1
-geometry of each cell, everything else becomes an obstruction, `area` is the
-macro bounding box and the pin capacitance is the drawn pad-metal area times the
-documented 0.115 fF/µm² (300 nm TEOS).
+`make_lef_lib.rb` asserts 28 separate 60 × 60 µm ML1 shapes, keeps the frame
+GDS unchanged, emits a pad-cell-only LEF and a DEF with one fixed top-level pin
+per physical pad, and emits Liberty without unqualified pad capacitance or
+timing constraints.
+The generic `PAD_XX` names are assigned top-to-bottom, left-to-right within each
+row. Map them to design nets in the floorplan; the DEF pins use the original
+GDS coordinate origin.
 
 ## Limits
 
 * No timing, no drive strength, no ESD rating: the foundry does not characterise
   an I/O cell for this process. The only documented limit is the absolute
   maximum rating of ±7 V (VDS/VGD/VGS).
-* The LEF references layer names from the PDK design layer table
-  (`libs.tech/klayout/doc/layers.md`). A LEF tech file for the process will
-  arrive with the LibreLane bring-up; until then the macro LEF cannot be read
-  standalone by a router.
+* The LEF references layer names from `libs.tech/klayout/doc/layers.md`; no
+  process tech LEF, site, or track definition is shipped, so the LEF is not
+  independently routable.
+* `AIST-SOI-CMOS.xs` v0.2 is a 2021 visualization prior (TBOX 400 nm, TiN
+  50 nm, first TEOS 250 nm, ML1 300 nm), not a confirmed 2023 production stack.
+  The PDK's TiN-cap density of 0.115 fF/µm² corresponds to about 300 nm oxide;
+  its difference from the XS 250 nm TEOS value is unresolved.
 * The frame ring is a drawing, not a seal ring with documented widths.
 
 ## Use as a design frame
 
-Start a design by instantiating `ICPS2023_5_fd_base` and placing the circuit in
-the core area; the pads are the only connections to the outside world. Run
-`libs.tech/klayout/drc/icps2023_5.drc` on the assembled layout (the frame itself
-is DRC-clean).
+Use `gds/ICPS2023_5_fd_base.gds` as a physical overlay at its original origin;
+do not instantiate the full-frame BLOCK in the standard-cell placement database.
+Use `def/ICPS2023_5_fd_base.def` for the 28 independent fixed I/O ports
+(`PAD_00`–`PAD_27`), assign design nets to them, and floorplan the central core
+separately. The DEF contains no standard-cell rows or PDN plan. Run
+`libs.tech/klayout/drc/icps2023_5.drc` on the assembled layout.

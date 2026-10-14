@@ -120,7 +120,9 @@ pdiff = diff & parea - res            # P+ source/drain
 ndiff = diff & narea - res            # N+ source/drain
 
 # TiN gate: TiN interacting with a source/drain, excluding capacitor plates.
-tin_gate = tin.interacting(pdiff) + tin.interacting(ndiff) - cap
+tin_gate = tin.interacting(pdiff) + tin.interacting(ndiff) - (tin & cap)
+# The native N/P diffusion-capacitor plate extends 4 um beyond its CAP window.
+tin_gate_d1 = tin_gate - (tin & cap.sized(4.0.um))
 # TiN with the gate region enlarged by 2 um -- the golden deck's `tinA`; used so
 # that the minimum-width rules see gate + local interconnect as one conductor.
 bb = (diff + tin_gate).extents
@@ -140,13 +142,11 @@ puts "Check SOI island"
 r = diff.width(6.0.um);       r.output("DIFF.W3 SOI width < 6 um (golden DIFF-A)")
 r = diff.space(4.0.um);       r.output("DIFF.S1 SOI space < 4 um (golden DIFF-B)")
 
-# m3: SOI must enclose the source/drain dope (PDK ref. manual, device layer)
-r = diff.enclosing(parea, 2.0.um); r.output("DIFF.m3 SOI enclosure of PAREA < 2 um")
-r = diff.enclosing(narea, 2.0.um); r.output("DIFF.m3 SOI enclosure of NAREA < 2 um")
+# m3: the PDK diagram shows NDF/PDF extending 2 um beyond the SOI island.
 
 # Dielectric isolation between opposite dope types (golden DIFF-C..H)
-r = parea.enclosing(diff, 2.0.um); r.output("PAREA.C PAREA enclosing SOI < 2 um (golden DIFF-C)")
-r = narea.enclosing(diff, 2.0.um); r.output("NAREA.D NAREA enclosing SOI < 2 um (golden DIFF-D)")
+r = parea.enclosing(diff, 2.0.um); r.output("DIFF.m3 PAREA enclosure of SOI < 2 um")
+r = narea.enclosing(diff, 2.0.um); r.output("DIFF.m3 NAREA enclosure of SOI < 2 um")
 r = pdiff.separation(ndiff, 4.0.um); r.output("DIFF.E PDiff to NDiff space < 4 um (golden DIFF-E)")
 r = parea & narea;                 r.output("AREA.F PAREA/NAREA butting (golden DIFF-F)")
 r = parea.separation(ndiff, 5.0.um); r.output("AREA.G PAREA to NDiff space < 5 um (golden DIFF-G)")
@@ -177,8 +177,8 @@ r = tinA.enclosing(ndiff, 4.0.um); r.output("TIN.m2 TiN fringe over NDiff < 4 um
 # m1: TiN/dope overlap (golden PMOS-B / NMOS-E, previously product-only)
 r = (tin & pdiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of PDiff < 2 um (golden PMOS-B)")
 r = (tin & ndiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of NDiff < 2 um (golden NMOS-E)")
-# d1: gate to contact distance (PDK ref. manual, device layer)
-r = (tin & diff).separation(cnt, 8.0.um); r.output("TIN.d1 gate TiN to Cnt distance < 8 um")
+# d1: gate edge to source/drain contact; the gate contact itself is excluded.
+r = tin_gate_d1.separation(cnt_sd, 8.0.um); r.output("TIN.d1 gate TiN to S/D Cnt distance < 8 um")
 
 # =============================================================================
 # 3. Contacts

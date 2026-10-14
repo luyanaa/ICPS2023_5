@@ -15,7 +15,9 @@ L 4 60 40 40 20 {}
 L 4 40 20 20 40 {}
 B 5 38 -2 42 2 {name=PAD dir=in}
 B 5 38 58 42 62 {name=VDD dir=in}
+B 5 78 28 82 32 {name=SUB dir=in}
 T {PAD} 45 0 0 0 0.2 0.2 {layer=13}
 T {VDD} 45 60 0 0 0.2 0.2 {layer=13}
-T {@symname} 90 30 0 0 0.2 0.2 {}
-T {@name} 90 45 0 0 0.2 0.2 {}
+T {SUB} 85 30 0 0 0.2 0.2 {layer=13}
+T {@symname} 110 30 0 0 0.2 0.2 {}
+T {@name} 110 45 0 0 0.2 0.2 {}

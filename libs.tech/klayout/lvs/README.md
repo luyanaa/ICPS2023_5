@@ -14,7 +14,8 @@ klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
   -rd input=layout.gds \
   -rd schematic=reference.cir \
   [-rd top=CELL] [-rd layer_mode=design|fab] \
-  [-rd report=out.lyrdb] [-rd output=extracted.cir]
+  [-rd report=out.lyrdb] [-rd output=extracted.cir] \
+  [-rd substrate=NET] [-rd filters=legacy]
 ```
 
 `layer_mode` defaults to `design`. If omitted, `report` defaults to
@@ -23,11 +24,21 @@ with multiple top cells must be invoked with `-rd top=CELL`; the deck reports
 the available top-cell names when this is missing. `schematic` is required and
 must point to a readable SPICE-format netlist.
 
-The deck reads four-terminal schematic `M` devices with a small
-`RBA::NetlistSpiceReaderDelegate`: it keeps source, gate, and drain, converts
-`W`/`L` from SI units to micrometres, and thereby compares against the extracted
-three-terminal `mos3` devices. The extracted `NMOS4` remains a four-terminal
-body-tie device and uses the design `NCH`/fab `N_CH` path as terminal `W`.
+The B4SOI SPICE reader preserves `Mname D G S E model ...` terminal order.
+The deck requires every `E` terminal to use the declared global substrate;
+default is `.GLOBAL SUB`, overridable with `-rd substrate=NET`. `E` is still
+projected out of layout comparison because this PDK has no matching
+substrate/BOX geometry, so this checks the schematic substrate contract, not a
+physical backside contact or layout-to-E connection. A five-terminal
+`D G S E P` device is rewritten so `P` maps to the extracted `NMOS4` body tie.
+Design and fab extractions both reduce measured `L` by 4 µm, removing the
+PDF-documented 2 µm overlap at each end so the compared parameter is channel
+length.
+
+The shipped NAND's B4SOI reference is
+`Samples/Semicon2023/NAND/nand_sample_b4soi_reference.cir`; the legacy
+`lvs_work/nand_sample_reference.cir.txt` uses the older fourth-terminal body
+convention and records `L=10`; the B4SOI reference uses design-channel `L=6`.
 
 ## Extracted devices
 
@@ -38,12 +49,17 @@ body-tie device and uses the design `NCH`/fab `N_CH` path as terminal `W`.
 | `NMOS4` | body-tied nMOS (`pwl`/NCH terminal) | `L`, `W` geometry |
 | `NRES` | N+ diffusion resistor | 180 ohm/sq |
 | `PRES` | P+ diffusion resistor | 1.2 kohm/sq |
-| `R_SOI` | undoped SOI resistor | 250 Mohm/sq |
-| `MIMCAP` | MIM capacitor | 0.115 fF/um² |
-| `TINCAP` | TiN capacitor | 0.115 fF/um² |
-| `PDIFFCAP` | P-diff capacitor | 2.3 fF/um² |
-| `NDIFFCAP` | N-diff capacitor | 2.3 fF/um² |
+| `R_SOI` | undoped SOI resistor | 250 Mohm/sq (legacy, unqualified) |
+| `MIMCAP` | MIM capacitor | 0.115 fF/um² (legacy, unqualified) |
+| `TINCAP` | TiN/Al capacitor | 0.115 fF/um² (legacy, unqualified) |
+| `PDIFFCAP` | TiN/P-diffusion capacitor | 2.3 fF/um² (Cox) |
+| `NDIFFCAP` | TiN/N-diffusion capacitor | 2.3 fF/um² (Cox) |
 | `D` | diode | diode extractor |
+
+The PDIFF/NDIFF geometry is the TiN/diffusion capacitor shown on PDK p.18 and
+uses the measured 2.3 fF/um² gate-oxide Cox from p.9. The PDFs do not qualify
+the listed `R_SOI`, MIMCAP, or TiN/Al-capacitance values; `R_SOI` and MIM/TIN
+extraction remain legacy compatibility entries.
 
 The connectivity stack is TiN, contact, ML1, VIA1, ML2, and body-tie path,
 with the legacy capacitor, resistor, and diode connections retained. `MASK`
@@ -66,11 +82,34 @@ capacitor classes. Device combination is enabled on both layout and schematic
 netlists. The run prints `MATCH (mismatches=0)` or `NO MATCH`; detailed
 cross-reference/mismatch information is written to the `.lyrdb` report.
 
-For pad-array smoke layouts, the deck applies the legacy compare filters
-`max_res(500)` and `min_caps(1e-12)`: very-high-value parasitic resistors and
-sub-picofarad extraction fragments are omitted from the *comparison*. The
-extractors and class definitions remain present, and no geometry/device rule is
-removed by these filters.
+This deck uses strict comparison by default: `max_res` and `min_caps` are
+disabled so small capacitors and high-value resistors remain in scope. For
+legacy pad-array smoke layouts only, pass `-rd filters=legacy` to apply
+`max_res(500)` and `min_caps(1e-12)` to both netlists. That compatibility mode
+can hide schematic-only resistors above 500 Ω or capacitors below 1 pF; it is
+not device signoff.
+
+## Differences from the original LVS decks
+
+The upstream [design LVS](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/lvs/lvs.lylvs)
+and [fabrication LVS](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/lvs/lvs_fabrication.lylvs)
+are separate wrapper-driven decks. This consolidated deck selects design or
+fab layers explicitly and removes the Anagix/MinedaCommon, spreadsheet, and
+symlink runtime. It retains the original extraction/connectivity rules, with
+the following behavior changes:
+
+* The old MOS reader maps `S/G/D` against SPICE node order `D/G/S`, swapping
+  drain and source. This reader preserves `D/G/S` and adds B4SOI `E` validation
+  plus optional external-body `P` mapping to `NMOS4`.
+* Both design and fab modes subtract 4 µm from extracted `L`, removing the
+  PDF-documented 2 µm TiN overlap at each channel end and comparing channel
+  length.
+* Body-tied NCH gate geometry is removed from both `diff_nores` calculations,
+  preventing the tied gate region from also being extracted as source/drain.
+
+Use `-rd filters=legacy` only for the established pad-array compatibility
+comparison. Strict mode remains a preliminary LVS check, not complete SOI
+signoff: the layout has no substrate/BOX geometry or backgate extraction.
 
 ## Layer modes
 
@@ -82,3 +121,11 @@ NCH 21/0, plus RES/CAP/DIO 15/0–17/0.
 TIN_GATE 5/0, CONTACT 6/0, M1_AL 7/0, VIA1 8/0, M2_AL 9/0, VIA2 11/0,
 M3_AL 12/0, and N_CH 13/0. RES/CAP/DIO remain 15/0–17/0. ML2/VIA1/VIA2/ML3
 are retained as options because the foundry qualification is still T.B.D.
+
+## Regression checks
+
+Run `python3 libs.tech/klayout/lvs/test_lvs_contract.py` inside the KLayout
+environment. It verifies the NAND reference matches in design and fab modes
+with explicit legacy filters; strict default comparison exposes the unmodelled
+pad-array parasitics. It also checks that a wrong common `E`, heterogeneous `E`
+nets, or a missing `.GLOBAL SUB` declaration fail before layout comparison.

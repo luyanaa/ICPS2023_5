@@ -1,10 +1,12 @@
 # ICPS2023_5 xschem library
 
 This directory contains the xschem symbols for the ICPS2023_5 minimal-fab
-SOI-CMOS process.  The process uses 4-terminal MOS devices with a minimum
-design gate length of 6 um and a minimum SOI width of 13 um.  The MOS symbol
-templates intentionally start at `w=20u l=10u`, matching the PCell defaults;
-edit `w`, `l`, `as`, `ps`, `ad`, `pd`, and `m` on an instance as needed.
+process. The process uses four-terminal B4SOI MOS devices with a minimum design
+gate length of 6 µm and minimum SOI width of 13 µm. The stock symbols emit pins
+in D, G, S, E order. The Nch symbol's `w=20u l=10u` defaults match its native
+PCell; the Pch symbol's `l=10u` matches, but its `w=20u` default differs from
+the native Pch PCell default `w=40u`. Both symbol defaults are outside the PDF
+IV fit point `W=24u L=6u`.
 
 ## Setup
 
@@ -24,18 +26,18 @@ that layout too.  The startup file adds `libs.tech/xschem/symbols` to
 adds:
 
 ```spice
-.include $PDK_ROOT/ICPS2023_5/libs.tech/ngspice/icps2023_5.lib.spice
+.lib "$PDK_ROOT/ICPS2023_5/libs.tech/ngspice/icps2023_5.lib.spice" b4soi
 ```
 
-The include file is supplied by the ngspice model package; a testbench should
-not include files from outside this PDK.
+This selects the fitted BSIMSOI v4 model section; do not use `.include` for
+the selector library.
 
 ## Devices
 
 | Symbol | Netlist model/subcircuit | Pins | Defaults |
 | --- | --- | --- | --- |
-| `nch`, `NMOS_MIN` | MOS model `nch` | D, G, S, B | `w=20u l=10u`, areas/perimeters 0, `m=1` |
-| `pch`, `PMOS_MIN` | MOS model `pch` | D, G, S, B | `w=20u l=10u`, areas/perimeters 0, `m=1` |
+| `nch`, `NMOS_MIN` | MOS model `nch` | D, G, S, E | `w=20u l=10u`, areas/perimeters 0, `m=1` |
+| `pch`, `PMOS_MIN` | MOS model `pch` | D, G, S, E | `w=20u l=10u`, areas/perimeters 0, `m=1` |
 | `Bridge` | `bridge` | PLUS, MINUS | `l=25u w=10u` |
 | `NBridge` | `nbridge` | PLUS, MINUS | `l=25u w=10u` |
 | `NDiff_cap` | `cap_ndiff` | PLUS, MINUS | `l=25u w=25u` |
@@ -45,8 +47,8 @@ not include files from outside this PDK.
 | `R_pdiff` | `r_pdiff` | PLUS, MINUS | `l=40u w=10u` |
 | `ndio` | `dio_ndio` | PLUS, MINUS | `l=25u w=25u` |
 | `pdio` | `dio_pdio` | PLUS, MINUS | `l=25u w=25u` |
-| `nmos_esd` | `nmos_esd` | PAD, VSS | no geometry parameters |
-| `pmos_esd` | `pmos_esd` | PAD, VDD | no geometry parameters |
+| `nmos_esd` | `nmos_esd` | PAD, VSS, SUB | no geometry parameters |
+| `pmos_esd` | `pmos_esd` | PAD, VDD, SUB | no geometry parameters |
 | `cap_min` | `cap_min` | PLUS, MINUS | `l=25u w=25u` |
 | `res_min` | `res_min` | PLUS, MINUS | `l=40u w=10u` |
 | `r_poly` | `r_poly` | PLUS, MINUS | `l=40u w=10u` |
@@ -68,8 +70,15 @@ instances.  `HVNMOS_MIN` and `HVPMOS_MIN` remain available as aliases of the
 MOS symbols emit the native ngspice line
 
 ```spice
-M... D G S B nch w=... l=... as=... ps=... ad=... pd=... m=...
+M1... D G S E nch w=... l=... as=... ps=... ad=... pd=... m=...
 ```
+
+The fourth pin is B4SOI `E`, the common external substrate terminal; it is not
+a bulk-body `B` pin. The B4SOI model also accepts an optional fifth `P` body
+terminal in a direct five-node `M` card. The stock symbols are four-pin and do
+not expose `P`; keep `E` on the common substrate net.
+The ESD wrappers expose `SUB` as their final pin and connect it to the internal
+B4SOI `E` terminal; tie both wrappers to the same intended substrate net.
 
 Two-terminal symbols emit `X... PLUS MINUS <subcircuit> ...`.  `PLUS` and
 `MINUS` are electrical pin names, not polarity restrictions; wire either pin
@@ -85,9 +94,9 @@ netlist formats.
 
 ## Compatibility notes
 
-* `NMOS_MIN` and `PMOS_MIN` changed from `w=5u l=0.18u` defaults to
-  `w=20u l=10u` and now emit all four MOS pins plus area/perimeter parameters.
-  This is required by the ICPS2023_5 process (L >= 6 um).
+* `NMOS_MIN` and `PMOS_MIN` retain `w=20u l=10u` defaults and emit four MOS
+  pins plus area/perimeter parameters. The former fourth pin `B` is now B4SOI
+  `E` (external substrate), not a bulk-body connection.
 * `HVNMOS_MIN` and `HVPMOS_MIN` no longer reference `n6.0`/`p6.0` or
   submicron geometry.  They use the qualified `nch`/`pch` models and ordinary
   process defaults because the PDK does not provide those foreign models.
@@ -97,3 +106,10 @@ netlist formats.
   types.  They now point at the PDK subcircuits listed above.  Existing
   schematics continue to resolve by filename; only their emitted line type
   changed.
+
+## Regression check
+
+Run `ruby libs.tech/xschem/tools/validate_symbols.rb` from the repository root.
+It checks symbol structure, device/subcircuit names against the ngspice library,
+and ordered xschem pins against the actual ESD `.subckt` interfaces; it does not
+require the xschem executable.

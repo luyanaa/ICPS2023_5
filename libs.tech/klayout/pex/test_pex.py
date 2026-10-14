@@ -3,6 +3,7 @@
 
 import json
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,84 @@ def capacitance_elements(netlist):
             elements.append((fields[1], fields[2], float(fields[3])))
     return elements
 
+
+def capacitance_to_substrate_at_port(netlist, logical):
+    ports = set(physical_ports(netlist, logical))
+    return sum(
+        value
+        for a, b, value in capacitance_elements(netlist)
+        if (a in ports and b == "SUB") or (b in ports and a == "SUB")
+    )
+
+def dc_ir_voltage_drop(netlist, cell_name, source, sink, current_a):
+    ngspice = shutil.which("ngspice")
+    if ngspice is None:
+        raise RuntimeError("ngspice is required for the DC IR regression")
+    physical = {
+        item["logical"]: item["physical"]
+        for item in port_mappings(netlist)
+    }
+    if source not in physical or sink not in physical:
+        raise AssertionError("DC IR endpoints are missing from PORT_MAP")
+    subckt_name = cell_name + "_pex"
+    subckt = next(
+        (
+            line.split()[2:]
+            for line in netlist.splitlines()
+            if line.upper().startswith(".SUBCKT " + subckt_name.upper() + " ")
+        ),
+        None,
+    )
+    if subckt is None:
+        raise AssertionError("PEX subcircuit is missing: " + subckt_name)
+    instance_nodes = []
+    for port in subckt:
+        if port == physical[source] or port == "SUB":
+            instance_nodes.append("0")
+        elif port == physical[sink]:
+            instance_nodes.append("DRN")
+        else:
+            raise AssertionError("unexpected DC IR subcircuit port: " + port)
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        work = Path(tempdir)
+        pex_path = work / "parasitics.spice"
+        deck_path = work / "dc_ir.spice"
+        pex_path.write_text(netlist, encoding="utf-8")
+        deck_path.write_text(
+            '.include "%s"\n'
+            "Iload 0 DRN %.12g\n"
+            "XPEX %s %s\n"
+            ".control\n"
+            "op\n"
+            "print v(DRN)\n"
+            "quit\n"
+            ".endc\n"
+            ".end\n"
+            % (
+                pex_path,
+                current_a,
+                " ".join(instance_nodes),
+                subckt_name,
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [ngspice, "-b", str(deck_path)],
+            text=True,
+            capture_output=True,
+        )
+        output = result.stdout + "\n" + result.stderr
+        if result.returncode:
+            raise AssertionError("ngspice DC IR run failed:\n" + output)
+        match = re.search(
+            r"(?im)^\s*v\(drn\)\s*=\s*"
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)",
+            output,
+        )
+        if match is None:
+            raise AssertionError("ngspice DC IR voltage is missing:\n" + output)
+        return float(match.group(1))
 
 def mapped_port(netlist, name):
     matches = physical_ports(netlist, name)
@@ -217,6 +296,35 @@ class PexRegressionTests(unittest.TestCase):
                 self.assertIsNotNone(measured, spice + "\n" + self.last_pex_log)
                 self.assertAlmostEqual(measured, expected, delta=expected * 0.01)
 
+    @unittest.skipUnless(shutil.which("ngspice"), "ngspice is required for DC IR")
+    def test_tin_ml1_contact_dc_ir_drop(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("TIN_ML1_DC_IR")
+            add_box(layout, cell, (5, 0), 0, 45, 100, 55)
+            add_box(layout, cell, (8, 0), 47, 0, 53, 100)
+            add_box(layout, cell, (7, 0), 47.5, 47.5, 52.5, 52.5)
+            add_text(layout, cell, (13, 0), "SRC", 0, 50)
+            add_text(layout, cell, (13, 0), "DRN", 50, 100)
+            spice = self.extract(layout, cell, tempdir)
+
+            expected_resistance = 5 * 20.0 + 0.9 + (50.0 / 6.0) * 0.20
+            measured_resistance = equivalent_resistance(spice, "SRC", "DRN")
+            self.assertAlmostEqual(
+                measured_resistance,
+                expected_resistance,
+                delta=expected_resistance * 0.01,
+            )
+            current = 1e-3
+            measured_drop = dc_ir_voltage_drop(
+                spice, cell.name, "SRC", "DRN", current
+            )
+            expected_drop = expected_resistance * current
+            self.assertAlmostEqual(
+                measured_drop,
+                expected_drop,
+                delta=expected_drop * 0.01,
+            )
+
     def test_duplicate_text_labels_export_distinct_physical_ports(self):
         with tempfile.TemporaryDirectory() as tempdir:
             layout, cell = self.make_layout("DUPLICATE_LABELS")
@@ -264,7 +372,7 @@ class PexRegressionTests(unittest.TestCase):
             self.assertNotEqual(mappings[0]["physical"], "SUB")
             self.assertEqual(header[2:], [mappings[0]["physical"], "SUB"])
 
-    def test_mos_access_resistance_and_capacitance_are_not_reextracted(self):
+    def test_mos_channel_is_not_replaced_with_a_pex_short(self):
         with tempfile.TemporaryDirectory() as tempdir:
             layout, cell = self.make_layout("MOS_ACCESS_OWNER")
             add_box(layout, cell, (3, 0), 0, 0, 100, 10)
@@ -275,11 +383,75 @@ class PexRegressionTests(unittest.TestCase):
                 add_box(layout, cell, (7, 0), x - 2.5, 2.5, x + 2.5, 7.5)
                 add_text(layout, cell, (13, 0), label, x, 5)
 
-            spice = self.extract(layout, cell, tempdir, capacitance=True)
+            spice = self.extract(layout, cell, tempdir)
             self.assertIsNone(equivalent_resistance(spice, "DRAIN", "SOURCE"))
-            self.assertFalse(
-                any(line.startswith("C") for line in spice.splitlines()), spice
-            )
+
+
+    def test_mos_access_exclusion_preserves_long_n_and_p_diffusion_wires(self):
+        cases = [
+            ("NPLUS", (19, 0), 180.0),
+            ("PPLUS", (18, 0), 1200.0),
+        ]
+        for name, implant, sheet_resistance in cases:
+            for length in (100, 300):
+                with self.subTest(conductor=name, length=length), tempfile.TemporaryDirectory() as tempdir:
+                    layout, cell = self.make_layout("%s_%dUM" % (name, length))
+                    wire_start = 13.1
+                    wire_end = wire_start + length
+                    add_box(layout, cell, (3, 0), -7, 0, wire_end, 10)
+                    add_box(layout, cell, implant, -7, 0, wire_end, 10)
+                    add_box(layout, cell, (5, 0), 0, 0, 6, 10)
+                    for left, right in ((-7, -2), (8, 13)):
+                        add_box(layout, cell, (8, 0), left, 2.5, right, 7.5)
+                        add_box(layout, cell, (7, 0), left, 2.5, right, 7.5)
+                    add_text(layout, cell, (13, 0), "MOS_PIN", 10.5, 5)
+                    add_text(layout, cell, (13, 0), "WIRE_START", wire_start, 5)
+                    add_text(layout, cell, (13, 0), "WIRE_END", wire_end, 5)
+
+                    spice = self.extract(layout, cell, tempdir)
+                    measured = equivalent_resistance(spice, "WIRE_START", "WIRE_END")
+                    terminal_resistance = equivalent_resistance(spice, "MOS_PIN", "WIRE_END")
+                    expected = sheet_resistance * length / 10
+                    self.assertIsNotNone(measured, spice + "\n" + self.last_pex_log)
+                    self.assertAlmostEqual(measured, expected, delta=expected * 0.01)
+                    self.assertIsNotNone(terminal_resistance, spice + "\n" + self.last_pex_log)
+                    self.assertAlmostEqual(
+                        terminal_resistance, expected, delta=expected * 0.01
+                    )
+                    access_layer = "NAREA" if implant == (19, 0) else "PAREA"
+                    self.assertIn(
+                        "MOS access %s: gates=1 bounded=1 unbounded=0 ambiguous=0 contacts=2"
+                        % access_layer,
+                        self.last_pex_log,
+                    )
+                    self.assertEqual(
+                        self.last_pex_log.count("area_removed=70.000000 um2"),
+                        2,
+                        self.last_pex_log,
+                    )
+                    self.assertIn(
+                        "area_remaining=0.000000 um2 components_before=1 components_after=0",
+                        self.last_pex_log,
+                    )
+                    self.assertIn(
+                        "area_remaining=%.6f um2 components_before=1 components_after=1"
+                        % (length * 10 + 1),
+                        self.last_pex_log,
+                    )
+                    mapped_pin = [
+                        item for item in port_mappings(spice)
+                        if item["logical"] == "MOS_PIN"
+                    ]
+                    mapped_wire = [
+                        item for item in port_mappings(spice)
+                        if item["logical"] == "WIRE_START"
+                    ]
+                    self.assertEqual(len(mapped_pin), 1, spice)
+                    self.assertEqual(mapped_pin[0]["layer"], "ML1")
+                    self.assertEqual(mapped_pin[0]["x_um"], 10.5)
+                    self.assertEqual(len(mapped_wire), 1, spice)
+                    self.assertEqual(mapped_wire[0]["layer"], access_layer)
+                    self.assertEqual(mapped_wire[0]["x_um"], wire_start)
 
     def test_lvs_owns_marked_resistor_body(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -315,18 +487,20 @@ class PexRegressionTests(unittest.TestCase):
             )
 
     def test_lvs_owns_explicit_capacitance_windows(self):
-        cases = [(False, 0.0), (True, 8.6e-15)]
+        cases = [(False, 0.0), (True, 12.9e-15)]
         for explicit_cap, expected_substrate in cases:
             with self.subTest(explicit_cap=explicit_cap), tempfile.TemporaryDirectory() as tempdir:
                 layout, cell = self.make_layout("CAP_WINDOW_%s" % explicit_cap)
-                add_box(layout, cell, (3, 0), 0, 0, 20, 10)
-                add_box(layout, cell, (19, 0), 0, 0, 20, 10)
-                add_box(layout, cell, (5, 0), -10, 0, 10, 10)
+                add_box(layout, cell, (3, 0), -5, 0, 20, 10)
+                add_box(layout, cell, (19, 0), -5, 0, 20, 10)
+                add_box(layout, cell, (5, 0), 0, 0, 10, 20)
                 if explicit_cap:
                     add_box(layout, cell, (16, 0), 0, 0, 10, 10)
-                add_box(layout, cell, (8, 0), 12, 0, 18, 50)
-                add_box(layout, cell, (7, 0), 12.5, 2.5, 17.5, 7.5)
-                add_text(layout, cell, (13, 0), "GATE", -5, 5)
+                add_box(layout, cell, (8, 0), -5, 2.5, 0, 7.5)
+                add_box(layout, cell, (7, 0), -5, 2.5, 0, 7.5)
+                add_box(layout, cell, (8, 0), 13, 0, 22, 100)
+                add_box(layout, cell, (7, 0), 15, 2.5, 20, 7.5)
+                add_text(layout, cell, (13, 0), "GATE", 5, 15)
                 add_text(layout, cell, (13, 0), "PLATE", 15, 50)
                 spice = self.extract(layout, cell, tempdir, capacitance=True)
                 capacitors = capacitance_elements(spice)
@@ -361,7 +535,7 @@ class PexRegressionTests(unittest.TestCase):
                             )
 
 
-    def test_passive_diffusion_capacitance_is_distributed_over_network_nodes(self):
+    def test_passive_diffusion_capacitance_conserves_area_and_resistance(self):
         with tempfile.TemporaryDirectory() as tempdir:
             layout, cell = self.make_layout("DISTRIBUTED_DIFF_CAP")
             add_box(layout, cell, (3, 0), 0, 0, 100, 10)
@@ -378,9 +552,6 @@ class PexRegressionTests(unittest.TestCase):
             total = sum(value for _a, _b, value in capacitors)
             expected = 0.086e-15 * 1000.0
             self.assertAlmostEqual(total, expected, delta=expected * 1e-6)
-            share = total / len(capacitors)
-            for _a, _b, value in capacitors:
-                self.assertAlmostEqual(value, share, delta=expected * 1e-6)
 
             capacitance_nodes = {
                 b if a == "SUB" else a for a, b, _value in capacitors
@@ -395,6 +566,33 @@ class PexRegressionTests(unittest.TestCase):
                 1800.0,
                 delta=18.0,
             )
+
+    def test_diffusion_capacitance_tracks_asymmetric_area_location(self):
+        def extract_with_branch(side):
+            with tempfile.TemporaryDirectory() as tempdir:
+                layout, cell = self.make_layout("DIFF_CAP_BRANCH_%s" % side)
+                add_box(layout, cell, (3, 0), 0, 0, 100, 10)
+                add_box(layout, cell, (19, 0), 0, 0, 100, 10)
+                branch_x = 0 if side == "left" else 90
+                add_box(layout, cell, (3, 0), branch_x, 10, branch_x + 10, 50)
+                add_box(layout, cell, (19, 0), branch_x, 10, branch_x + 10, 50)
+                add_text(layout, cell, (13, 0), "LEFT", 0, 5)
+                add_text(layout, cell, (13, 0), "RIGHT", 100, 5)
+
+                spice = self.extract(layout, cell, tempdir, capacitance=True)
+                capacitors = capacitance_elements(spice)
+                total = sum(value for _a, _b, value in capacitors)
+                expected = 0.086e-15 * 1400.0
+                self.assertAlmostEqual(total, expected, delta=expected * 1e-6)
+                return (
+                    capacitance_to_substrate_at_port(spice, "LEFT"),
+                    capacitance_to_substrate_at_port(spice, "RIGHT"),
+                )
+
+        left_branch = extract_with_branch("left")
+        right_branch = extract_with_branch("right")
+        self.assertGreater(left_branch[0], right_branch[0], (left_branch, right_branch))
+        self.assertGreater(right_branch[1], left_branch[1], (left_branch, right_branch))
 
     def test_unqualified_interconnect_coupling_is_not_emitted(self):
         with tempfile.TemporaryDirectory() as tempdir:

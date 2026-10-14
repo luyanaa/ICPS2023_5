@@ -1,0 +1,55 @@
+name: ICPS2023_5 verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pdk-regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Verify pinned toolchain and PDK regressions
+        run: |
+          nix develop --no-write-lock-file .#default --command bash -euo pipefail -c '
+            test "$(python3 -c "import sys; print(sys.version.split()[0])")" = "3.13.9"
+            klayout -v | grep -F "KLayout 0.30.7"
+            ngspice --version | grep -F "ngspice-44"
+            python3 -c "import klayout.db"
+            ruby --version | grep -F "ruby 3.3.10"
+
+            python3 libs.tech/klayout/test_process_profiles.py
+            python3 libs.tech/klayout/lvs/test_lvs_contract.py
+            python3 libs.tech/klayout/pcells/test_native_pcells.py
+            python3 libs.tech/klayout/pcells/test_1m_golden.py
+            python3 libs.tech/klayout/pex/test_pex.py
+            python3 libs.ref/ICPS2023_5_fd_base/tools/test_pad_views.py
+            python3 libs.tech/ngspice/tools/test_b4soi_stage1_iv.py
+            ruby libs.tech/xschem/tools/validate_symbols.rb
+          '
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.15"
+          cache: pip
+          cache-dependency-path: requirements-fem.txt
+
+      - name: Install pinned FEM dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-fem.txt
+
+      - name: Verify FEM regressions
+        run: python libs.tech/klayout/pex/test_fieldsolve_box.py
+
+      # LibreLane/OpenROAD validation is intentionally deferred until cell
+      # characterization and the standard-cell library are complete.

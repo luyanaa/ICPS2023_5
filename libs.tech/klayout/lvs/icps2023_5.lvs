@@ -171,6 +171,7 @@ if layer_mode == "design"
   PAREA_LAYER = [18, 0]
   NAREA_LAYER = [19, 0]
   PWL_LAYER = [21, 0]
+  TEXT_LAYER = [13, 0]
 else
   DIFF_LAYER = [4, 0]
   TIN_LAYER = [5, 0]
@@ -184,6 +185,7 @@ else
   PAREA_LAYER = [2, 0]
   NAREA_LAYER = [3, 0]
   PWL_LAYER = [13, 0]
+  TEXT_LAYER = [13, 1]
 end
 RES_LAYER = [15, 0]
 CAP_LAYER = [16, 0]
@@ -210,6 +212,7 @@ dio = lvs_layer(DIO_LAYER, exclude, mask)
 parea = lvs_layer(PAREA_LAYER, exclude, mask)
 narea = lvs_layer(NAREA_LAYER, exclude, mask)
 pwl = lvs_layer(PWL_LAYER, exclude, mask)
+text_labels = labels(*TEXT_LAYER)
 
 # Special empty layer retained from the legacy deck for substrate/bulk hooks.
 bulk = polygon_layer
@@ -307,6 +310,7 @@ connect(nsd, cnt)
 connect(bt_nsd, cnt)
 connect(tin, cnt)
 connect(cnt, ml1)
+connect(ml1, text_labels)  # attaches logical top-level labels for extraction/assembly
 connect(ml1, via1)
 connect(via1, ml2)
 connect(diff_nores, cnt)
@@ -354,14 +358,15 @@ netlist.each_circuit do |circuit|
     device.set_parameter("L", channel_length)
   end
 end
-# Write the extracted netlist before comparison, as the old Mineda wrapper did.
+# Preserve logical top-level pin names in the extracted SPICE so the PEX
+# assembler can bind PORT_MAP entries without guessing internal node numbers.
 netlist.purge
+netlist.make_top_level_pins
 target_netlist(output_file, write_spice, "Created by KLayout")
 
 # Comparison settings formerly loaded from nand_sample_lvs_settings.rb.  The
 # extracted top is paired with the SPICE reader's .TOP circuit; device-class
 # equivalences and 3% relative tolerances are explicit and gem-free.
-netlist.make_top_level_pins
 netlist.flatten_circuit("Nch*")
 netlist.flatten_circuit("Pch*")
 same_circuits(layout_top, ".TOP")

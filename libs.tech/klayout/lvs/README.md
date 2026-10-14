@@ -93,6 +93,13 @@ capacitor classes. Device combination is enabled on both layout and schematic
 netlists. The run prints `MATCH (mismatches=0)` or `NO MATCH`; detailed
 cross-reference/mismatch information is written to the `.lyrdb` report.
 
+Before writing the extracted SPICE, the deck calls `netlist.make_top_level_pins`.
+TEXT labels on ML1 are connected in the extraction graph, so the output keeps
+named top-level terminals as formal nodes and adds `* net <node> <label>`
+comments. The post-layout assembler uses these comments to associate LVS
+logical pin names with PEX `PORT_MAP` anchors; it rejects missing or
+non-one-to-one pin metadata rather than inferring a mapping from node order.
+
 This deck uses strict comparison by default: `max_res` and `min_caps` are
 disabled so small capacitors and high-value resistors remain in scope. For
 legacy pad-array smoke layouts only, pass `-rd filters=legacy` to apply

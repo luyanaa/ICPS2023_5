@@ -23,19 +23,19 @@
 #
 # Ownership: LVS owns MOS devices, RES bodies, CAP devices, and diode I/V.
 # PEX owns TiN/ML1 wiring and eligible passive/diode diffusion access. MOS
-# terminal access is excluded from additive PEX because fitted B4SOI RDSW
-# cannot be separated from physical access resistance. RES-marker contacts
-# are also excluded; neither model supplies independent contact characterization
-# at those device pins.
+# source/drain access through the outer edge of the nearest CNT cut is excluded
+# locally because fitted B4SOI RDSW cannot be separated from physical access.
+# Diffusion beyond that cut remains PEX-owned. RES-marker contacts are also
+# excluded; neither model supplies independent contact characterization there.
 #
 # The reference manual p.3 marks Via, M2(Al), Via and M3(Al) T.B.D.; they are
 # therefore omitted rather than assigned an inferred resistance/capacitance.
 # The un-doped SOI film has no direct sheet-resistance value in either source
 # PDF, so it is not silently assigned the legacy LVS R_SOI value.
-# Model limits (read the README): eligible passive-diffusion C is split evenly
-# over the located resistance-network nodes in each electrical component; it
-# is not local-area distributed RC. No qualified interconnect-coupling value
-# is emitted.
+# Model limits (read the README): eligible passive-diffusion C is assigned
+# by bounded Euclidean Voronoi area to located nodes on the same diffusion
+# layer. Total area capacitance is conserved; this remains nodal lumping, not
+# continuous distributed RC. No qualified interconnect coupling is emitted.
 #
 # Usage (inside the LibreLane nix-shell, which provides this KLayout):
 #   python3 libs.tech/klayout/pex/icps2023_5_pex.py \
@@ -107,6 +107,10 @@ CUT_LAYERS = {
     "CNT_PAREA": (1002, 0),
 }
 
+# The CNT remains MOS-owned; the extra one-DBU overlap only locates ideal
+# graph anchors on external diffusion and ML1, without assigning contact R.
+MOS_TERMINAL_TIE_EXTENSION_DBU = 1
+
 # The PDK reports each contact resistance for a 5 x 5 um contact. KLayout's
 # via model takes area resistance (ohm*um^2), so R_A = R_5x5 * 25 um^2;
 # actual R scales inversely with the extracted contact area.
@@ -163,6 +167,290 @@ def region_polygons(region):
         out.append(poly)
     return out
 
+def voronoi_area_weights(region, node_points):
+    """Partition region area among located nodes using bounded Euclidean cells."""
+    if region.is_empty() or not node_points:
+        return {}
+
+    sites = {}
+    for object_id, point in node_points:
+        sites.setdefault((point.x, point.y), []).append(object_id)
+    bounds = region.bbox()
+    locations = sorted(sites)
+
+    def clip_half_plane(vertices, site, other):
+        nx = 2.0 * (other[0] - site[0])
+        ny = 2.0 * (other[1] - site[1])
+        limit = other[0] ** 2 + other[1] ** 2 - site[0] ** 2 - site[1] ** 2
+        clipped = []
+        for start, end in zip(vertices, vertices[1:] + vertices[:1]):
+            start_value = nx * start[0] + ny * start[1] - limit
+            end_value = nx * end[0] + ny * end[1] - limit
+            start_inside = start_value <= 0.0
+            end_inside = end_value <= 0.0
+            if start_inside and end_inside:
+                clipped.append(end)
+            elif start_inside != end_inside:
+                fraction = start_value / (start_value - end_value)
+                intersection = (
+                    start[0] + fraction * (end[0] - start[0]),
+                    start[1] + fraction * (end[1] - start[1]),
+                )
+                clipped.append(intersection)
+                if end_inside:
+                    clipped.append(end)
+        return clipped
+
+    raw_area_by_site = {}
+    if len(locations) == 1:
+        raw_area_by_site[locations[0]] = region.area()
+    else:
+        rectangle = [
+            (bounds.left, bounds.bottom),
+            (bounds.right, bounds.bottom),
+            (bounds.right, bounds.top),
+            (bounds.left, bounds.top),
+        ]
+        for site in locations:
+            vertices = rectangle
+            for other in locations:
+                if other != site:
+                    vertices = clip_half_plane(vertices, site, other)
+                    if len(vertices) < 3:
+                        break
+            points = []
+            for x, y in vertices:
+                point = (int(round(x)), int(round(y)))
+                if not points or point != points[-1]:
+                    points.append(point)
+            if len(points) > 1 and points[0] == points[-1]:
+                points.pop()
+            if len(set(points)) < 3:
+                raw_area_by_site[site] = 0
+                continue
+            cell = pya.Region(
+                pya.Polygon([pya.Point(x, y) for x, y in points])
+            )
+            raw_area_by_site[site] = (region & cell).area()
+
+    positive_sites = [
+        (site, raw_area)
+        for site, raw_area in sorted(raw_area_by_site.items())
+        if raw_area > 0
+    ]
+    raw_total = sum(raw_area for _site, raw_area in positive_sites)
+    if raw_total <= 0:
+        raise RuntimeError("failed to partition eligible diffusion area among PEX nodes")
+
+    region_area = region.area()
+    entries = [
+        (object_id, raw_area / len(sites[site]))
+        for site, raw_area in positive_sites
+        for object_id in sorted(sites[site])
+    ]
+    weights = {}
+    assigned_area = 0.0
+    for index, (object_id, raw_area) in enumerate(entries):
+        area = (
+            region_area - assigned_area
+            if index == len(entries) - 1
+            else region_area * raw_area / raw_total
+        )
+        weights[object_id] = area
+        assigned_area += area
+    return weights
+
+
+def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, layer_name):
+    """Remove MOS-owned access while retaining a zero-ohm terminal boundary."""
+    gate_polygons = region_polygons(gate_region)
+    active_polygons = region_polygons(active_region)
+    active_components = [pya.Region(poly) for poly in active_polygons]
+    contacts = []
+    for poly in contact_region.each():
+        cut_region = pya.Region(poly)
+        component_ids = tuple(
+            index
+            for index, component in enumerate(active_components)
+            if not (cut_region & component).is_empty()
+        )
+        if component_ids:
+            contacts.append((poly, component_ids))
+
+    access_region = pya.Region()
+    mos_contact_region = pya.Region()
+    bounded = 0
+    ambiguous = 0
+    associated_contacts = 0
+    terminal_records = []
+    for gate in gate_polygons:
+        gate_box = gate.bbox()
+        gate_halo = pya.Region(gate).sized(1)
+        local_component_ids = {
+            index
+            for index, component in enumerate(active_components)
+            if not (component & gate_halo).is_empty()
+        }
+        if not local_component_ids:
+            continue
+
+        local_active = pya.Region()
+        for index in local_component_ids:
+            local_active.insert(active_polygons[index])
+        local_contacts = [
+            poly
+            for poly, component_ids in contacts
+            if not local_component_ids.isdisjoint(component_ids)
+        ]
+        associated_contacts += len(local_contacts)
+
+        options = []
+        for axis in ("x", "y"):
+            negative = []
+            positive = []
+            for contact in local_contacts:
+                contact_box = contact.bbox()
+                if axis == "x":
+                    overlap = min(gate_box.top, contact_box.top) - max(
+                        gate_box.bottom, contact_box.bottom
+                    )
+                    if overlap <= 0:
+                        continue
+                    if contact_box.right <= gate_box.left:
+                        negative.append((gate_box.left - contact_box.right, contact))
+                    elif contact_box.left >= gate_box.right:
+                        positive.append((contact_box.left - gate_box.right, contact))
+                else:
+                    overlap = min(gate_box.right, contact_box.right) - max(
+                        gate_box.left, contact_box.left
+                    )
+                    if overlap <= 0:
+                        continue
+                    if contact_box.top <= gate_box.bottom:
+                        negative.append((gate_box.bottom - contact_box.top, contact))
+                    elif contact_box.bottom >= gate_box.top:
+                        positive.append((contact_box.bottom - gate_box.top, contact))
+
+            if negative and positive:
+                near_negative = min(negative, key=lambda item: item[0])
+                near_positive = min(positive, key=lambda item: item[0])
+                options.append(
+                    (
+                        near_negative[0] + near_positive[0],
+                        axis,
+                        near_negative[1],
+                        near_positive[1],
+                    )
+                )
+
+        if not options:
+            continue
+        options.sort(key=lambda item: item[0])
+        if len(options) > 1 and options[0][0] == options[1][0]:
+            ambiguous += 1
+            continue
+
+        _gap, axis, negative_contact, positive_contact = options[0]
+        negative_box = negative_contact.bbox()
+        positive_box = positive_contact.bbox()
+        corridor = pya.Region()
+        if axis == "x":
+            if negative_box.left < gate_box.left:
+                corridor.insert(
+                    pya.Box(
+                        negative_box.left,
+                        gate_box.bottom,
+                        gate_box.left,
+                        gate_box.top,
+                    )
+                )
+            if positive_box.right > gate_box.right:
+                corridor.insert(
+                    pya.Box(
+                        gate_box.right,
+                        gate_box.bottom,
+                        positive_box.right,
+                        gate_box.top,
+                    )
+                )
+        else:
+            if negative_box.bottom < gate_box.bottom:
+                corridor.insert(
+                    pya.Box(
+                        gate_box.left,
+                        negative_box.bottom,
+                        gate_box.right,
+                        gate_box.bottom,
+                    )
+                )
+            if positive_box.top > gate_box.top:
+                corridor.insert(
+                    pya.Box(
+                        gate_box.left,
+                        gate_box.top,
+                        gate_box.right,
+                        positive_box.top,
+                    )
+                )
+        mos_contact_region.insert(negative_contact)
+        mos_contact_region.insert(positive_contact)
+        active_box = local_active.bbox()
+        gate_center = pya.Point(
+            (gate_box.left + gate_box.right) // 2,
+            (gate_box.bottom + gate_box.top) // 2,
+        )
+        terminal_records.append(
+            {
+                "axis": axis,
+                "device_x": gate_center.x,
+                "device_y": (active_box.bottom + active_box.top) // 2,
+                "gate_center": gate_center,
+                "negative_contact": negative_contact,
+                "positive_contact": positive_contact,
+            }
+        )
+        for poly in region_polygons(corridor & local_active):
+            access_region.insert(poly)
+        bounded += 1
+
+    access_region = access_region & active_region
+    print(
+        "MOS access %s: gates=%d bounded=%d unbounded=%d ambiguous=%d contacts=%d"
+        % (
+            layer_name,
+            len(gate_polygons),
+            bounded,
+            len(gate_polygons) - bounded - ambiguous,
+            ambiguous,
+            associated_contacts,
+        )
+    )
+    print(
+        "MOS terminal contact cuts %s: selected=%d"
+        % (layer_name, len(region_polygons(mos_contact_region)))
+    )
+    remaining = active_region - access_region
+    for index, poly in enumerate(region_polygons(active_region), 1):
+        component = pya.Region(poly)
+        removed = component & access_region
+        if removed.is_empty():
+            continue
+        component_remaining = component - access_region
+        print(
+            "MOS access %s component=%d area_before=%.6f um2 "
+            "area_removed=%.6f um2 area_remaining=%.6f um2 "
+            "components_before=1 components_after=%d"
+            % (
+                layer_name,
+                index,
+                component.area() * dbu * dbu,
+                removed.area() * dbu * dbu,
+                component_remaining.area() * dbu * dbu,
+                len(region_polygons(component_remaining)),
+            )
+        )
+    return remaining, mos_contact_region, terminal_records
+
 
 def main():
     ap = argparse.ArgumentParser(description="ICPS2023_5 KLayout PEX")
@@ -218,25 +506,45 @@ def main():
         sys.exit("ICPS2023_5 PEX %s: %s" % (reason, ", ".join(unsupported)))
 
     # Geometry ownership --------------------------------------------------
-    # DIFF clips doped regions to SOI. MOS terminal access is omitted from additive
-    # PEX because the fitted RDSW is inseparable from physical access; RES bodies
-    # are omitted because LVS already owns their sheet resistance.
+    # MOS owns each gate-to-contact diffusion corridor, including the CNT cut;
+    # PEX owns diffusion beyond the outer edge of that terminal contact. This
+    # keeps fitted RDSW/access out of the additive network without discarding
+    # an entire connected external diffusion wire.
     diff = region("DIFF")
     tin = region("TIN")
     ml1 = region("ML1")
     cap = region("CAP")
     res = region("RES")
     dio = region("DIO")
+    raw_contacts = region("CNT")
     mos_gate = (tin & diff) - cap
     raw_narea = region("NAREA") & diff
     raw_parea = region("PAREA") & diff
-    narea = raw_narea - mos_gate
-    parea = raw_parea - mos_gate
-    mos_halo = mos_gate.sized(1)
-    mos_access = {
-        "NAREA": narea.interacting(mos_halo),
-        "PAREA": parea.interacting(mos_halo),
-    }
+    narea, mos_n_contacts, n_mos_devices = carve_mos_terminal_access(
+        mos_gate, raw_narea - mos_gate, raw_contacts, layout.dbu, "NAREA"
+    )
+    parea, mos_p_contacts, p_mos_devices = carve_mos_terminal_access(
+        mos_gate, raw_parea - mos_gate, raw_contacts, layout.dbu, "PAREA"
+    )
+    mos_devices = []
+    for polarity, bottom, records in (
+        ("NMOS", "NAREA", n_mos_devices),
+        ("PMOS", "PAREA", p_mos_devices),
+    ):
+        for record in records:
+            record["polarity"] = polarity
+            record["bottom"] = bottom
+            record["device"] = "%s@%.6f,%.6f" % (
+                polarity,
+                record["device_x"] * layout.dbu,
+                record["device_y"] * layout.dbu,
+            )
+            mos_devices.append(record)
+    mos_devices.sort(key=lambda record: record["device"])
+    if len({record["device"] for record in mos_devices}) != len(mos_devices):
+        sys.exit("duplicate MOS device geometry keys in PEX terminal map")
+    for index, record in enumerate(mos_devices, 1):
+        record["gate_port"] = "MOS_GATE_%04d" % index
     res_active = {
         "NAREA": raw_narea & res,
         "PAREA": raw_parea & res,
@@ -249,8 +557,12 @@ def main():
         "NAREA": raw_narea & dio,
         "PAREA": raw_parea & dio,
     }
-    narea = narea - mos_access["NAREA"] - res_active["NAREA"]
-    parea = parea - mos_access["PAREA"] - res_active["PAREA"]
+    narea = narea - res_active["NAREA"]
+    parea = parea - res_active["PAREA"]
+    mos_terminal_contacts = pya.Region()
+    for terminal_contacts in (mos_n_contacts, mos_p_contacts):
+        for poly in terminal_contacts.each():
+            mos_terminal_contacts.insert(poly)
     # Design TEXT is 13/0. Fab prep preserves labels as 13/1 so they remain
     # distinct from the N-channel mask on 13/0.
     labels = []
@@ -264,9 +576,10 @@ def main():
                     t = sh.text
                     labels.append((t.string, it.trans() * t.position()))
                 it.next()
-    # N/P diffusion remains PEX-owned only outside MOS access and explicit
-    # RES bodies. DIO access remains PEX-owned because the diode model has no
-    # characterized series resistance.
+    # N/P diffusion outside locally bounded MOS terminal corridors and explicit
+    # RES bodies remains PEX-owned. Ambiguous/unbounded gate geometry is left
+    # untouched; DIO access remains PEX-owned because diode series resistance
+    # is not characterized.
     conductor_region = {
         "TIN": tin,
         "ML1": ml1,
@@ -274,10 +587,11 @@ def main():
         "PAREA": parea,
     }
 
-    raw_contacts = region("CNT")
     via_regions = {cut: pya.Region() for cut, _bottom, _top, _res in VIAS}
-    for poly in region_polygons(raw_contacts):
+    for poly in raw_contacts.each():
         cut_poly = pya.Region(poly)
+        if not (cut_poly & mos_terminal_contacts).is_empty():
+            continue
         for cut, bottom, top, _res in VIAS:
             contact = cut_poly & conductor_region[bottom] & conductor_region[top]
             if contact.is_empty():
@@ -285,6 +599,47 @@ def main():
             for contact_poly in region_polygons(contact):
                 via_regions[cut].insert(contact_poly)
             break
+
+    mos_terminal_ties = []
+    mos_tie_counts = {"NAREA": 0, "PAREA": 0}
+    for bottom, terminal_contacts in (
+        ("NAREA", mos_n_contacts),
+        ("PAREA", mos_p_contacts),
+    ):
+        for poly in terminal_contacts.each():
+            expanded_cut = pya.Region(poly).sized(
+                MOS_TERMINAL_TIE_EXTENSION_DBU
+            )
+            bottom_anchors = region_polygons(
+                expanded_cut & conductor_region[bottom]
+            )
+            top_anchors = region_polygons(
+                expanded_cut & conductor_region["ML1"]
+            )
+            if not bottom_anchors and not top_anchors:
+                sys.exit("MOS terminal contact has no available conductor anchor")
+            mos_terminal_ties.append(
+                {
+                    "bottom": bottom,
+                    "contact": poly,
+                    "bottom_anchors": bottom_anchors,
+                    "top_anchors": top_anchors,
+                }
+            )
+            mos_tie_counts[bottom] += 1
+    mos_terminal_ties.sort(
+        key=lambda tie: (
+            tie["bottom"],
+            tie["contact"].bbox().left,
+            tie["contact"].bbox().bottom,
+            tie["contact"].bbox().right,
+            tie["contact"].bbox().top,
+        )
+    )
+    print(
+        "MOS terminal ideal ties: NAREA=%d PAREA=%d"
+        % (mos_tie_counts["NAREA"], mos_tie_counts["PAREA"])
+    )
 
     # A physical text terminal is a (label, conductor, anchor) tuple. Keep
     # separate anchors separate even when their logical label is identical.
@@ -331,8 +686,49 @@ def main():
         return box.left, box.bottom, box.right, box.top
 
     for cut, bottom, _top, _r in VIAS:
-        for index, poly in enumerate(sorted(region_polygons(via_regions[cut]), key=polygon_key), 1):
-            add_port("C_%s_%04d" % (bottom, index), bottom, poly_centroid(poly))
+        for index, poly in enumerate(
+            sorted(region_polygons(via_regions[cut]), key=polygon_key), 1
+        ):
+            add_port(
+                "C_%s_%04d" % (bottom, index),
+                bottom,
+                poly_centroid(poly),
+            )
+    mos_tie_port_groups = []
+    mos_tie_terminal_ports = {}
+    mos_tie_ids = {}
+    for tie_index, tie in enumerate(mos_terminal_ties, 1):
+        bottom = tie["bottom"]
+        group = []
+        bottom_ports = []
+        for side, layer_name, anchors in (
+            ("BOTTOM", bottom, tie["bottom_anchors"]),
+            ("TOP", "ML1", tie["top_anchors"]),
+        ):
+            for anchor_index, anchor in enumerate(anchors, 1):
+                name = "MOS_TIE_%s_%04d_%s_%04d" % (
+                    bottom,
+                    tie_index,
+                    side,
+                    anchor_index,
+                )
+                add_port(name, layer_name, poly_centroid(anchor))
+                group.append(name)
+                if side == "BOTTOM":
+                    bottom_ports.append(name)
+        if not group:
+            sys.exit("MOS terminal tie has no physical conductor anchor")
+        tie_id = "MOS_TIE_%s_%04d" % (bottom, tie_index)
+        contact_key = (bottom, polygon_key(tie["contact"]))
+        if contact_key in mos_tie_ids:
+            sys.exit("duplicate MOS contact ownership for %s" % (contact_key,))
+        mos_tie_ids[contact_key] = tie_id
+        mos_tie_terminal_ports[tie_id] = bottom_ports[0] if bottom_ports else group[0]
+        mos_tie_port_groups.append(group)
+    for record in mos_devices:
+        if not contains_point(tin, record["gate_center"]):
+            sys.exit("MOS gate center is outside TIN for %s" % record["device"])
+        add_port(record["gate_port"], "TIN", record["gate_center"])
     for record in physical_labels:
         add_port(record["physical"], record["layer"], record["point"])
 
@@ -370,6 +766,7 @@ def main():
     net.simplify()
 
     node_name = {}
+    port_node = {}
     for node in net.each_node():
         if str(node.type()) == "VertexPort":
             lid, idx = node.layer(), node.port_index()
@@ -377,11 +774,106 @@ def main():
             if nname is None:
                 pt = dbox_to_point(node.location(), layout.dbu)
                 nname = "x_%d_%d_%d_%d" % (lid, idx, pt.x, pt.y)
+            else:
+                port_node[nname] = node.object_id()
         else:
             nname = "n%d" % node.object_id()
         node_name[node.object_id()] = nname
 
-    elements = list(net.each_element())
+    ideal_parent = {object_id: object_id for object_id in node_name}
+
+    def ideal_find(object_id):
+        while ideal_parent[object_id] != object_id:
+            ideal_parent[object_id] = ideal_parent[ideal_parent[object_id]]
+            object_id = ideal_parent[object_id]
+        return object_id
+
+    def ideal_union(left, right):
+        left_root = ideal_find(left)
+        right_root = ideal_find(right)
+        if left_root != right_root:
+            ideal_parent[right_root] = left_root
+
+    for group in mos_tie_port_groups:
+        missing = [name for name in group if name not in port_node]
+        if missing:
+            sys.exit("MOS terminal tie ports missing from R network: %s" % missing)
+        object_ids = [port_node[name] for name in group]
+        for object_id in object_ids[1:]:
+            ideal_union(object_ids[0], object_id)
+    all_elements = list(net.each_element())
+    zero_resistor_count = 0
+    for element in all_elements:
+        if element.resistance() == 0.0:
+            ideal_union(
+                element.a().object_id(),
+                element.b().object_id(),
+            )
+            zero_resistor_count += 1
+
+    canonical_names = {}
+    for object_id, name in node_name.items():
+        root = ideal_find(object_id)
+        priority = 0 if name.startswith("PORT") else 1 if name.startswith("C_") else 2
+        candidate = (priority, name)
+        if root not in canonical_names or candidate < canonical_names[root]:
+            canonical_names[root] = candidate
+    for object_id in node_name:
+        node_name[object_id] = canonical_names[ideal_find(object_id)][1]
+    for record in physical_labels:
+        object_id = port_node.get(record["physical"])
+        if object_id is None:
+            sys.exit(
+                "physical terminal missing from R network: %s" % record["physical"]
+            )
+        record["physical"] = node_name[object_id]
+
+    def mapped_port_node(port_name):
+        object_id = port_node.get(port_name)
+        if object_id is None:
+            sys.exit("MOS_MAP port missing from R network: %s" % port_name)
+        return node_name[object_id]
+
+    mos_map_records = []
+    mapped_contact_ids = set()
+    for record in mos_devices:
+        bottom = record["bottom"]
+        source_key = (bottom, polygon_key(record["negative_contact"]))
+        drain_key = (bottom, polygon_key(record["positive_contact"]))
+        source_contact = mos_tie_ids.get(source_key)
+        drain_contact = mos_tie_ids.get(drain_key)
+        if source_contact is None or drain_contact is None:
+            sys.exit("MOS terminal contact is missing a PEX tie for %s" % record["device"])
+        mapped_contact_ids.update((source_contact, drain_contact))
+        mos_map_records.append(
+            {
+                "device": record["device"],
+                "polarity": record["polarity"],
+                "axis": record["axis"],
+                "drain_side": "positive",
+                "drain": mapped_port_node(mos_tie_terminal_ports[drain_contact]),
+                "drain_contact": drain_contact,
+                "gate": mapped_port_node(record["gate_port"]),
+                "gate_x_um": round(record["gate_center"].x * layout.dbu, 6),
+                "gate_y_um": round(record["gate_center"].y * layout.dbu, 6),
+                "source_side": "negative",
+                "source": mapped_port_node(mos_tie_terminal_ports[source_contact]),
+                "source_contact": source_contact,
+                "e": "SUB",
+                "x_um": round(record["device_x"] * layout.dbu, 6),
+                "y_um": round(record["device_y"] * layout.dbu, 6),
+            }
+        )
+    unowned_contacts = set(mos_tie_ids.values()) - mapped_contact_ids
+    if unowned_contacts:
+        sys.exit("MOS terminal ties have no MOS_MAP owner: %s" % sorted(unowned_contacts))
+
+
+    elements = [element for element in all_elements if element.resistance() != 0.0]
+    print(
+        "MOS terminal graph contractions: %d ties, %d zero-ohm edges"
+        % (len(mos_tie_port_groups), zero_resistor_count)
+    )
     print("R network: %d nodes, %d resistors" % (net.num_nodes(), len(elements)))
 
     # ------------------------------------------------------------ C extract
@@ -390,7 +882,6 @@ def main():
         # 1. conductor components per layer. CAP/RES/DIO device regions are
         #    excluded from this assumed substrate-capacitance area below.
         comps = {}          # layer name -> list of (key, polygon)
-        comp_area = {}
         comp_of_cell = {}   # grid index: (layer, cx, cy) -> [key, ...]
         CELL = 10000        # 10 um grid in database units
 
@@ -403,12 +894,6 @@ def main():
             for i, poly in enumerate(region_polygons(rgn)):
                 key = (lname, i)
                 comps[lname].append((key, poly))
-                eligible = substrate_eligible.get(lname)
-                if eligible is None:
-                    area = 0.0
-                else:
-                    area = (pya.Region(poly) & eligible).area() * layout.dbu * layout.dbu
-                comp_area[key] = area
                 b = poly.bbox()
                 for cx in range(b.left // CELL, b.right // CELL + 1):
                     for cy in range(b.bottom // CELL, b.top // CELL + 1):
@@ -423,7 +908,11 @@ def main():
 
         # 2. merge components that meet through a cut layer (they are the same
         #    electrical node)
-        parent = {k: k for k in comp_area}
+        parent = {
+            key: key
+            for layer_components in comps.values()
+            for key, _poly in layer_components
+        }
 
         def find(k):
             while parent[k] != k:
@@ -445,10 +934,24 @@ def main():
                 kt = component_at(top, pt)
                 if kb is not None and kt is not None:
                     union(kb, kt)
+        for tie in mos_terminal_ties:
+            bottom = tie["bottom"]
+            tie_components = []
+            for lname, anchors in (
+                (bottom, tie["bottom_anchors"]),
+                ("ML1", tie["top_anchors"]),
+            ):
+                for anchor in anchors:
+                    key = component_at(lname, poly_centroid(anchor))
+                    if key is not None:
+                        tie_components.append(key)
+            if tie_components:
+                for key in tie_components[1:]:
+                    union(tie_components[0], key)
 
-        # 3. map every located R-network node to the merged component it
-        #    occupies. Internal nodes and explicit vertex ports both receive C.
-        component_nodes = {}
+        # 3. Map located R-network nodes to their merged conductor component.
+        component_layer_nodes = {}
+        component_node_points = {}
         conductor_by_id = {
             layer_id(spec): name for name, spec in layers.items() if name in comps
         }
@@ -458,34 +961,70 @@ def main():
             lname = conductor_by_id.get(node.layer())
             if lname is None:
                 continue
-            key = component_at(lname, dbox_to_point(node.location(), layout.dbu))
+            point = dbox_to_point(node.location(), layout.dbu)
+            key = component_at(lname, point)
             if key is None:
                 continue
             root = find(key)
-            component_nodes.setdefault(root, set()).add(node.object_id())
+            object_id = node.object_id()
+            component_layer_nodes.setdefault((root, lname), set()).add(object_id)
+            component_node_points[object_id] = point
 
-        substrate_cap = {}
-        for key, area in comp_area.items():
-            cpa = CAP_TO_SUB.get(key[0])
-            if cpa:
-                root = find(key)
-                substrate_cap[root] = substrate_cap.get(root, 0.0) + area * cpa
+        # 4. Keep each qualified diffusion-area region with its conductor layer.
+        substrate_regions = {}
+        for lname, layer_components in comps.items():
+            cpa = CAP_TO_SUB.get(lname)
+            eligible = substrate_eligible.get(lname)
+            if cpa is None or eligible is None:
+                continue
+            for key, poly in layer_components:
+                cap_region = pya.Region(poly) & eligible
+                if cap_region.is_empty():
+                    continue
+                region_key = (find(key), lname)
+                target = substrate_regions.setdefault(region_key, pya.Region())
+                for cap_poly in cap_region.each():
+                    target.insert(cap_poly)
 
-        # 4. Preserve total density*area and split it evenly across the
-        #    resistance-network nodes in the merged passive-diffusion component.
+        # 5. Preserve density*area while assigning each area element to its
+        #    nearest located node on the same diffusion layer.
         cap_node_count = 0
-        for root in sorted(substrate_cap):
-            capacitance = substrate_cap[root]
-            node_ids = sorted(
-                component_nodes.get(root, ()),
-                key=lambda object_id: node_name[object_id],
-            )
+        for region_key in sorted(substrate_regions):
+            lname = region_key[1]
+            region = substrate_regions[region_key]
+            capacitance = region.area() * layout.dbu * layout.dbu * CAP_TO_SUB[lname]
+            node_ids = component_layer_nodes.get(region_key, ())
             if capacitance <= 0.0 or not node_ids:
                 continue
-            share = capacitance / len(node_ids)
-            cap_node_count += len(node_ids)
-            for object_id in node_ids:
-                caps.append((node_name[object_id], "SUB", share))
+            node_points = [
+                (object_id, component_node_points[object_id])
+                for object_id in node_ids
+            ]
+            area_weights = voronoi_area_weights(region, node_points)
+            weight_by_node = {}
+            for object_id, area in area_weights.items():
+                name = node_name[object_id]
+                weight_by_node[name] = weight_by_node.get(name, 0.0) + area
+            total_weight = sum(weight_by_node.values())
+            if total_weight <= 0.0:
+                raise RuntimeError(
+                    "no located R-network node owns eligible %s capacitance" % lname
+                )
+            entries = sorted(
+                (name, weight)
+                for name, weight in weight_by_node.items()
+                if weight > 0.0
+            )
+            assigned = 0.0
+            for index, (name, weight) in enumerate(entries):
+                share = (
+                    capacitance - assigned
+                    if index == len(entries) - 1
+                    else capacitance * weight / total_weight
+                )
+                caps.append((name, "SUB", share))
+                assigned += share
+                cap_node_count += 1
         print(
             "capacitors: %d (%d R-network nodes carry eligible capacitance)"
             % (len(caps), cap_node_count)
@@ -497,7 +1036,13 @@ def main():
         f.write("* layout: %s  top cell: %s  layer_mode: %s\n" % (args.input, cell.name, args.layer_mode))
         f.write("* process profile: %s\n" % profile_name)
         f.write("* R model: KLayout RNetExtractor, square counting, per-conductor\n")
-        f.write("* C model: equal node shares of eligible passive diffusion density to assumed global SUB\n")
+        f.write("* C model: diffusion-area Voronoi shares to located same-layer nodes; return assumed SUB\n")
+        f.write(
+            "* MOS terminal CNT access is omitted from additive PEX; "
+            "RDSW versus physical access is uncharacterized\n"
+        )
+        f.write("* MOS terminal ties are ideal graph contractions; contact R is excluded\n")
+        f.write("* MOS terminal mapping binds LVS D/G/S to physical PEX nodes\n")
         for record in physical_labels:
             mapping = {
                 "physical": record["physical"],
@@ -508,7 +1053,11 @@ def main():
             }
             f.write("* PORT_MAP %s\n" %
                     json.dumps(mapping, sort_keys=True, separators=(",", ":")))
-        subckt_ports = [record["physical"] for record in physical_labels] + ["SUB"]
+        for mapping in mos_map_records:
+            f.write("* MOS_MAP %s\n" %
+                    json.dumps(mapping, sort_keys=True, separators=(",", ":")))
+        subckt_ports = list(dict.fromkeys(record["physical"] for record in physical_labels))
+        subckt_ports.append("SUB")
         f.write(".SUBCKT %s_pex %s\n" % (cell.name, " ".join(subckt_ports)))
         if not physical_labels:
             f.write("* no TEXT-labelled physical terminals found\n")

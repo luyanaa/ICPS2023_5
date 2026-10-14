@@ -1,0 +1,98 @@
+{
+  "measurements_sha256": "a2e13f591495705c49785f27471e85e44b602a701fcb79a8eaa01f72ad9876bd",
+  "curve_count": 12,
+  "sample_count": 459,
+  "sweep_step_V": 0.001,
+  "metric_absolute_tolerance": {
+    "relative_rms_percent": 0.1,
+    "log10_current_rms_decades": 0.01
+  },
+  "models": {
+    "nch": {
+      "LEVEL": 58,
+      "SOIMOD": 0,
+      "MOBMOD": 1,
+      "CAPMOD": 2,
+      "TNOM": 25,
+      "TOX": 1.5e-8,
+      "TOXM": 1.5e-8,
+      "TSI": 9.5e-8,
+      "TBOX": 4e-7,
+      "XJ": 5e-8,
+      "VTH0": 0.25,
+      "U0": 670,
+      "NFACTOR": 1.38,
+      "K1": 0.125,
+      "K2": 0,
+      "RDSW": 0
+    },
+    "pch": {
+      "LEVEL": 58,
+      "SOIMOD": 0,
+      "MOBMOD": 1,
+      "CAPMOD": 2,
+      "TNOM": 25,
+      "TOX": 1.5e-8,
+      "TOXM": 1.5e-8,
+      "TSI": 9.5e-8,
+      "TBOX": 4e-7,
+      "XJ": 5e-8,
+      "VTH0": -0.71,
+      "U0": 268.75,
+      "NFACTOR": 1.67,
+      "K1": 0.14375,
+      "K2": 0,
+      "RDSW": 46250
+    }
+  },
+  "curves": {
+    "n_out_vg15": {
+      "samples": 45,
+      "relative_rms_percent": 26.346259799593994
+    },
+    "n_out_vg2": {
+      "samples": 43,
+      "relative_rms_percent": 2.845277334936982
+    },
+    "n_out_vg25": {
+      "samples": 44,
+      "relative_rms_percent": 6.787466132427053
+    },
+    "n_out_vg3": {
+      "samples": 41,
+      "relative_rms_percent": 9.819038044817944
+    },
+    "n_transfer_blue": {
+      "samples": 32,
+      "log10_current_rms_decades": 0.2521567388291934
+    },
+    "n_transfer_orange": {
+      "samples": 29,
+      "log10_current_rms_decades": 0.40720958582958194
+    },
+    "p_out_vg15": {
+      "samples": 43,
+      "relative_rms_percent": 17.22221414801547
+    },
+    "p_out_vg2": {
+      "samples": 43,
+      "relative_rms_percent": 3.428944941015552
+    },
+    "p_out_vg25": {
+      "samples": 43,
+      "relative_rms_percent": 3.901143596809585
+    },
+    "p_out_vg3": {
+      "samples": 42,
+      "relative_rms_percent": 8.38132510617613
+    },
+    "p_transfer_blue": {
+      "samples": 27,
+      "log10_current_rms_decades": 0.735505690687867
+    },
+    "p_transfer_orange": {
+      "samples": 27,
+      "log10_current_rms_decades": 0.884623687098186
+    }
+  }
+}

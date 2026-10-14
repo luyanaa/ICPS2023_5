@@ -9,6 +9,16 @@ Repository
   Upstream         https://github.com/mineda-support/ICPS2023_5
   Refactor base    git commit 343fb28 (branch main)
 
+Verification toolchain
+----------------------
+flake.nix / flake.lock pins fossi-foundation/nix-eda 6.11.0 and its Nixpkgs
+  input; exact revisions and content hashes are recorded in the lock. The root
+  development shell intentionally excludes LibreLane/OpenROAD.
+requirements-fem.txt pins NumPy 2.2.6, SciPy 1.14.1, and scikit-fem 11.0.0 for
+  the research-only FEM regression. `.github/workflows/ci.yml` runs the
+  non-LibreLane verification suites; LibreLane validation remains deferred
+  until cell characterization.
+
 Primary process documents
 -------------------------
 libs.ref/doc/PDK_minimalFabSOICMOS.pdf
@@ -29,8 +39,10 @@ libs.ref/ICPS2023_5_fd_base/
   "base_Rev0.93" (minimal Fab design contest 2023 template). The pre-placed
   device arrays (pmos_array, nmos_array, resistor_array, tin_m1_cap_array)
   were removed; the 1600x1600 um frame and its 28 pads are kept unchanged.
-  Regenerate GDS with tools/make_fd_base.rb; generate pad-cell LEF, physical-only
-  Liberty, and 28-port fixed-pin DEF with tools/make_lef_lib.rb.
+  Regenerate GDS with tools/make_fd_base.rb; generate canonical pad-cell LEF,
+  physical-only Liberty, and 28-port fixed-pin DEF with tools/make_lef_lib.rb.
+  That generator also emits separate LibreLane `M1`-alias LEF/DEF views with
+  the same physical pin geometry; the canonical views remain on `ML1`.
 
 libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds
   The "ICPS2023_5_Basic" static library of the original KLayout salt package
@@ -65,6 +77,15 @@ libs.tech/klayout/
     no legacy PEX deck      -> pex/icps2023_5_pex.py (new)
   The native RBA PCells (pcells_v0.1.lym) no longer load AnagixLoader classes.
   README files document deck differences, assumptions, and executed results.
+
+libs.tech/librelane/
+  Experimental router overlay based on the user-directed layer topology and
+  dimensions, not process-qualified measurements or IHP process data. POLY,
+  submicron TiN, 5 Ω/sq TiN, and synthetic via geometry are explicitly
+  unqualified placeholders mapped to isolated engineering layer IDs. `M1`
+  aliases the existing `ML1` 8/0 layer. The overlay defines no site or standard
+  cells and is not fabrication/signoff collateral; see its README for the
+  physical conflicts and remaining integration gates.
 
 libs.tech/xschem/
   The legacy Xschem symbol directory plus retired LTspice device symbols

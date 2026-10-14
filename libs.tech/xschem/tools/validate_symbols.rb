@@ -45,7 +45,7 @@ def ngspice_interfaces
   models = Set.new
   subckts = {}
   Dir.glob(File.join(NGSPICE_DIR, '**', '*')).select { |p| File.file?(p) }.each do |path|
-    File.foreach(path) do |line|
+    File.foreach(path, encoding: Encoding::BINARY) do |line|
       models << $1.downcase if line =~ /^\s*\.model\s+([^\s(]+)/i
       if (match = line.match(/^\s*\.subckt\s+([^\s]+)\s*(.*)$/i))
         name = match[1].downcase

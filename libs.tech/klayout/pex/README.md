@@ -8,10 +8,10 @@ extraction.
 ## Usage
 
 ```bash
-cd ~/Documents/librelane && nix-shell --run \
-  'python3 libs.tech/klayout/pex/icps2023_5_pex.py \
-      --input <layout.gds> [--top CELL] [--output <parasitics.spice>] \
-      [--layer-mode design|fab] [--no-capacitance] [--process-profile NAME]'
+nix develop --command python3 \
+  libs.tech/klayout/pex/icps2023_5_pex.py \
+  --input <layout.gds> [--top CELL] [--output <parasitics.spice>] \
+  [--layer-mode design|fab] [--no-capacitance] [--process-profile NAME]
 ```
 
 Defaults: `--output <input>_pex.spice` and `--layer-mode design`. Profile
@@ -60,12 +60,13 @@ Values below are direct measurements from `PDK_minimalFabSOICMOS.pdf`, p.8,
 | Al–TiN contact (`CNT`) | 0.9 Ω | minimalFab p.8, Contact Resistance; reference p.4 `RCALT` |
 
 The GDS has one untyped `CNT` mask for all three contact classes. Before
-extraction the script partitions each cut into internal via layers using the
-common cut/bottom/top geometry. If a cut overlaps both TiN and an implant mask,
-the TiN–ML1 assignment wins; this geometric priority avoids turning a gate
-contact into a diffusion short. This is an extraction convention, not a
-separate foundry layer or a measured classification rule. N+ and P+ contact
-resistances remain distinct.
+extraction the script partitions non-MOS cuts into internal via layers using
+the common cut/bottom/top geometry. If a cut overlaps both TiN and an implant
+mask, the TiN–ML1 assignment wins; this geometric priority avoids turning a
+gate contact into a diffusion short. This is an extraction convention, not a
+separate foundry layer or measured classification rule. MOS source/drain cuts
+are excluded from these resistive vias and are handled as ideal graph ties
+between the ML1 terminal and remaining external diffusion.
 
 The PDF contact values are for 5 × 5 µm contacts. KLayout's
 [`RExtractorTechVia`](https://www.klayout.de/doc-qt5/code/class_RExtractorTechVia.html)
@@ -82,19 +83,29 @@ device netlist:
 
 | Geometry/term | Owner | PEX behavior and limit |
 |---|---|---|
-| MOS channel and intrinsic charge | BSIMSOI device model | No duplicate MOS element or gate/channel C. PEX also suppresses N/P diffusion polygons touching `TIN ∩ DIFF` outside `CAP`, plus their N/P contacts. B4SOI `RDSW` is an effective fit with no separate access-resistance data; MOS terminal access is therefore omitted from additive PEX, not claimed as characterized by either model. |
+| MOS channel and intrinsic charge | BSIMSOI device model | No duplicate MOS element or gate/channel C. PEX clips each bounded gate-to-terminal diffusion corridor through the outer edge of its nearest opposing CNT cut, then contracts the ML1 and external-diffusion anchors into one ideal network node. The MOS-owned CNT contact/access resistance is not added; connected diffusion beyond the cut remains PEX-owned. B4SOI `RDSW` is an effective fit with no separate access-resistance data, so this avoids double-counting an unseparated term. |
 | `RES ∩ DIFF` resistor body | LVS `NRES`/`PRES` device | PEX removes the marked N/P body from sheet-R and diffusion-C extraction. Contacts whose lower conductor is wholly within the marker are omitted too; the resistor model has no independently measured terminal-contact term. |
 | Explicit `CAP ∩ TIN ∩ DIFF` | LVS `NDIFFCAP`/`PDIFFCAP` device | PEX emits no duplicate 2.3 fF/µm² Cox. Plate wiring resistance and qualified CNT contacts remain PEX-owned outside MOS/RES exclusions. |
 | `DIO` diode primitive | LVS diode I/V model | The shipped diode model specifies `Is` and `N`, not series R or junction C. PEX owns measured N/P diffusion and CNT access resistance in DIO geometry; it emits no diode capacitance because the MOSFET diffusion density is not a diode C–V characterization. |
-| Other N/P diffusion | PEX | PEX owns the measured sheet/contact resistance. It may emit the reported diffusion density only outside MOS-access, `RES`, `CAP`, and `DIO` regions, mapped to assumed global `SUB` as described below. |
+| Other N/P diffusion | PEX | PEX owns measured sheet/contact resistance. It may emit reported diffusion density only outside bounded MOS terminal corridors, `RES`, `CAP`, and `DIO` regions, mapped to assumed global `SUB` as described below. |
 | TiN, ML1, and TiN-to-ML1 CNT | PEX | PEX owns sheet and contact resistance; these terms are not represented by the LVS device primitives. |
 
-MOS-access suppression is geometric: the extractor removes each N/P polygon
-that interacts with a one-database-unit halo around the remaining
-`TIN ∩ DIFF` region. This avoids emitting a second access path around the
-effective `RDSW` fit; it is not a foundry device classifier. MOS and marked-RES
-terminal access not covered by an independent model remains uncharacterized and
-is deliberately absent from additive PEX.
+MOS-access suppression is local geometry, not whole-component selection. For
+each gate, the extractor pairs the nearest overlapping CNT cuts on opposite
+sides along the uniquely best axis, then removes N/P diffusion from the gate
+edge through the outer edge of each cut. Connected diffusion beyond those cuts
+remains PEX-owned. The selected MOS CNT contact is omitted from the resistive
+via model; the extractor contracts its ML1 and external-diffusion anchor nodes
+as an ideal connection, with no epsilon or measured contact resistance. If no
+opposing pair exists or the axis is ambiguous, that gate is left uncarved and
+the log reports it; this favors preserving external interconnect over silently
+deleting a component. The geometry is not a foundry device classifier.
+
+If the local carve leaves no external-diffusion sliver at a selected contact,
+the MOS terminal maps to that contact's surviving ML1 anchor. A selected cut
+with neither an external-diffusion nor an ML1 anchor is rejected.
+RDSW/access remains provisional and is not independently characterized by the
+supplied data.
 
 ### Capacitance
 
@@ -151,15 +162,19 @@ numeric value for it, and M2 is marked T.B.D.
 
 ### Terminals and output
 
-Every cut assigned to a qualified conductor pair becomes an internal port at
-the common via footprint. In `design` mode, `TEXT` (13/0) labels are read. Fab
-prep preserves them on 13/1 so they do not collide with the N-channel mask on
-13/0; `--layer-mode fab` reads that layer.
+Every non-MOS cut assigned to a qualified conductor pair becomes an internal
+port at the common via footprint. Bounded MOS source/drain cuts instead create
+internal anchors on the ML1 terminal and remaining external diffusion. The
+extractor joins those anchors and removes exact zero-ohm graph edges before
+writing SPICE; it does not add MOS-terminal CNT resistance. In `design` mode,
+`TEXT` (13/0) labels are read. Fab prep preserves them on 13/1 so they do not
+collide with the N-channel mask on 13/0; `--layer-mode fab` reads that layer.
 
-Each distinct `(logical label, conductor layer, x, y)` text anchor becomes a
-physical formal port named `PORT0001`, `PORT0002`, etc. IDs are deterministic
-for a fixed set of anchors. The `.SUBCKT <top>_pex` header lists every physical
-port followed by the global `SUB` return. A SPICE comment for each terminal
+Each distinct `(logical label, conductor layer, x, y)` text anchor initially
+receives a deterministic name (`PORT0001`, `PORT0002`, etc.). After network
+extraction, anchors joined by an ideal physical connection share one physical
+token. The `.SUBCKT <top>_pex` header lists each unique physical token once,
+followed by the global `SUB` return. A SPICE comment for each logical terminal
 contains JSON:
 
 ```text
@@ -167,13 +182,31 @@ contains JSON:
 .SUBCKT CELL_pex PORT0001 PORT0002 SUB
 ```
 
-Repeated logical labels at different physical anchors remain distinct PEX
-ports; exact duplicate label/layer/coordinate records are deduplicated. The
-mapping is metadata, not an electrical short: the caller's wrapper/assembler
-must use each `physical` port and apply logical connectivity from its source
-netlist. Do not blindly bind repeated logical labels to one node if the
-physical separation is meant to remain represented. No automatic LVS-to-PEX
-netlist merge is provided.
+Repeated logical labels at different physical anchors remain distinct unless
+the extracted network physically contracts them to one node. Exact duplicate
+label/layer/coordinate records are deduplicated. Identical `physical` values in
+`PORT_MAP` denote one extracted electrical node; distinct values remain
+separate for the caller's wrapper/assembler to connect according to its source
+netlist. No automatic LVS-to-PEX netlist merge is provided.
+
+For each mapped MOS, PEX also writes one `* MOS_MAP` JSON record containing
+the geometry key/polarity, terminal axis and side convention, physical D/G/S
+nodes, separate source/drain CNT IDs, gate-center coordinates, and `E:"SUB"`.
+For the supported native R0 cells, `axis:"x"` maps the positive-x diffusion
+terminal to D and negative-x to S; the gate anchor is the TiN-side physical
+node. These records describe physical anchors, not another MOS element and not
+a replacement for LVS comparison. Missing terminal contacts or unowned MOS
+ties abort extraction.
+
+`libs.tech/ngspice/tools/assemble_postlayout.py` consumes the LVS named-pin
+comments, `PORT_MAP`, `MOS_MAP`, and PEX R/C elements. It aliases only each
+top-level logical pin's unique ML1 anchor, preserves finite gate/drain/source
+resistance paths, and assigns LVS D/G/S terminals to their mapped physical
+nodes. Its graph checks reject disconnected terminals on one LVS net, merged
+distinct LVS nets, duplicate contact claims to distinct physical nodes, and
+floating PEX components. The assembler accepts only the documented R0
+MOS-only inverter/NAND extraction contract; it rejects unsupported device
+classes and MOS orientations instead of guessing D/S order.
 
 `SUB` is always a separate global model reference. A physical text label named
 `SUB` is exported as a `PORT####` with `"logical":"SUB"`; it is not silently
@@ -227,6 +260,16 @@ thicknesses changes the 10 um result by less than 0.001%. This checks
 numerical stability for this coupon only; the remaining mesh refinement error
 is not a process-model uncertainty estimate.
 
+The FEM tests check the wide-strip parallel-plate limit, mesh refinement,
+geometric scaling, a two-dielectric series-capacitor reference, matrix
+passivity/charge conservation, and permittivity sensitivity. The checked-in
+[`interconnect_cap_reference.json`](interconnect_cap_reference.json) stores a
+synthetic three-electrode geometry and its numerical matrix for regression;
+neither the materials nor the matrix are 2023 process data. PEX ownership is
+separate: `test_unqualified_interconnect_coupling_is_not_emitted` asserts that
+unsupported interconnect coupling is omitted, and the FEM matrix is not an
+extraction coefficient.
+
 Reproduce the homogeneous coupon and its tests with:
 
 ```sh
@@ -253,17 +296,22 @@ bounded, hand-built geometries instead of claiming full-chip extraction.
 
 ## Limits (read before trusting a number)
 
-* Eligible passive-diffusion capacitance is split equally over the located
-  resistance-network nodes in each merged electrical component. The geometry
-  total is conserved; the equal node weighting is an explicit lumping rule,
-  not local-area capacitance or a full distributed-RC solution. It emits no
-  MOS intrinsic C, explicit CAP Cox, DIO C, fringing, or interconnect coupling.
-  The research-only BOX coupon above supplies no PEX coefficient.
-* MOS source/drain access and diffusion contacts adjacent to `TIN ∩ DIFF` are
-  omitted from additive PEX because the fitted `RDSW` cannot be separated from
-  physical access resistance. Marked `RES` bodies and wholly enclosed terminal
-  contacts are also omitted because LVS owns the resistor body. Their
-  terminal-contact contributions are not independently characterized.
+* Eligible passive-diffusion area is partitioned into bounded Euclidean
+  Voronoi cells around located resistance-network nodes on the same diffusion
+  layer. Each cell's geometric area receives the reported density, preserving
+  the component total while avoiding an equal split across all electrical
+  layers/nodes. This remains node-lumped capacitance, not continuous distributed
+  RC. It emits no MOS intrinsic C, explicit CAP Cox, DIO C, fringing, or
+  interconnect coupling. The research-only BOX coupon above supplies no PEX
+  coefficient.
+* MOS source/drain access from each gate edge through the outer edge of its
+  nearest terminal CNT cut is omitted from additive PEX because fitted `RDSW`
+  cannot be separated from physical access. Connected diffusion beyond the cut
+  remains PEX-owned and is joined to the MOS terminal by an ideal graph
+  contraction; MOS CNT contact resistance is not independently added. Marked
+  `RES` bodies and wholly enclosed terminal contacts are also omitted because
+  LVS owns the resistor body and their terminal-contact contributions are not
+  independently characterized.
 * `PORT_MAP` JSON rows preserve each physical text anchor and its logical
   label. Duplicate logical labels are not merged inside the PEX subcircuit.
   The global `SUB` model reference remains separate from any physical text
@@ -281,10 +329,18 @@ bounded, hand-built geometries instead of claiming full-chip extraction.
 ## Regression checks
 
 Run `python3 libs.tech/klayout/pex/test_pex.py` inside the KLayout/LibreLane
-Nix shell. The 12 fixtures verify analytic N/P/TiN/ML1 sheet resistance, typed
-contact resistance, MOS/RES/CAP/DIO ownership, duplicate-label and physical-SUB
-port mappings, equal node-level passive-diffusion C with conserved total,
+Nix development shell. The 15 tests verify analytic N/P/TiN/ML1 sheet
+resistance, typed contact resistance, an ngspice 1 mA DC IR path through TiN,
+ML1, and an Al–TiN contact, 100/300 µm N+/P+ diffusion-to-terminal
+connectivity and R□L/W, MOS/RES/CAP/DIO ownership, duplicate-label and
+physical-SUB port mappings, area-conserving spatial diffusion capacitance,
 omission of unqualified interconnect coupling, mask/exclude behavior, and
 fab-prep label preservation. They do not claim characterized MOS-access or
 resistor-terminal contact resistance, BOX return, fringe, coupling, or MOS C–V
 signoff.
+
+The DC IR stimulus checks an extracted five-square TiN segment (100 Ω), the
+modeled 0.9 Ω, 5 µm × 5 µm Al–TiN contact, and 50/6 ML1 squares (1.67 Ω):
+the 1 mA expected drop is 102.57 mV. It checks the modeled resistive network,
+not a current-density or temperature limit. The source PDFs provide no qualified
+EM/current-density or thermal limits, so none are inferred here.

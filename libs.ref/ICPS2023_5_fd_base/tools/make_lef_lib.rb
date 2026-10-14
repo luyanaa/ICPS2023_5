@@ -8,13 +8,17 @@
 # Liberty is physical-only: pad capacitance has no qualified return-network
 # model, and no timing or transition data is characterized.
 #
+# Optional LibreLane alias views map physical ML1 to the router name M1.
+# They do not change the canonical PDK LEF/DEF names or GDS.
 # Usage:
 #   cd <repo root>
 #   klayout -b -r libs.ref/ICPS2023_5_fd_base/tools/make_lef_lib.rb \
 #           [-rd gds=libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds] \
 #           [-rd lef=libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef] \
 #           [-rd lib=libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib] \
-#           [-rd def=libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def]
+#           [-rd def=libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def] \
+#           [-rd librelane_lef=libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base_librelane.lef] \
+#           [-rd librelane_def=libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base_librelane.def]
 #
 # Copyright 2023 minimalFab Promoting Organization
 # Licensed under the Apache License, Version 2.0
@@ -25,6 +29,8 @@ gds_file = ($gds && $gds.to_s != "") ? $gds : "libs.ref/ICPS2023_5_fd_base/gds/I
 lef_file = ($lef && $lef.to_s != "") ? $lef : "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef"
 lib_file = ($lib && $lib.to_s != "") ? $lib : "libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib"
 def_file = ($def && $def.to_s != "") ? $def : "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def"
+librelane_lef_file = ($librelane_lef && $librelane_lef.to_s != "") ? $librelane_lef : "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base_librelane.lef"
+librelane_def_file = ($librelane_def && $librelane_def.to_s != "") ? $librelane_def : "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base_librelane.def"
 
 FRAME_CELL = "ICPS2023_5_fd_base"
 PIN_LAYER = [8, 0]     # ML1: the pad metal that a bond/beam actually touches
@@ -209,6 +215,19 @@ def_lines << "END NETS"
 def_lines << "END DESIGN"
 FileUtils.mkdir_p(File.dirname(def_file))
 File.write(def_file, def_lines.join("\n"))
+librelane_lef = lef.map { |line| line.gsub(/\bML1\b/, "M1") }
+librelane_lef[0] = "# LibreLane alias view: M1 uses physical design layer ML1 (GDS 8/0)."
+librelane_lef[1] = "# Geometry matches the canonical pad LEF; only the router layer name differs."
+librelane_lef[2] = "# Fixed top-level pins are in the LibreLane-compatible DEF view."
+librelane_lef[3] = "# This is not a process technology LEF."
+FileUtils.mkdir_p(File.dirname(librelane_lef_file))
+File.write(librelane_lef_file, librelane_lef.join("\n"))
+
+librelane_def = def_lines.map { |line| line.gsub(/\bML1\b/, "M1") }
+librelane_def.unshift("# LibreLane alias view: M1 maps to physical design layer ML1 (GDS 8/0).")
+FileUtils.mkdir_p(File.dirname(librelane_def_file))
+File.write(librelane_def_file, librelane_def.join("\n"))
+
 
 
 # ------------------------------------------------------------- Liberty -------
@@ -259,5 +278,6 @@ tl << "}"
 File.write(lib_file, tl.join("\n"))
 
 puts "wrote #{lef_file}, #{lib_file}, and #{def_file}"
+puts "wrote #{librelane_lef_file} and #{librelane_def_file} (ML1-to-M1 LibreLane aliases)"
 puts "  #{macros.map { |m| m[:name] }.join(', ')}: pad-cell LEF/Liberty"
 puts "  #{frame_pins.size} fixed frame pins: #{frame_pins.first[:name]} through #{frame_pins.last[:name]}"

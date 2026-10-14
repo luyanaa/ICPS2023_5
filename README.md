@@ -13,8 +13,9 @@ ICPS2023_5/
 │   ├── klayout/    tech.lyt, layer properties, DRC / LVS / PEX decks, PCells, macros, cross sections
 │   ├── ngspice/    BSIMSOI v4.4 (LEVEL=58) fit, device subcircuits and fit data
 │   ├── xschem/     symbol library + xschemrc
+│   ├── librelane/  experimental 1M technology overlay + physical-only pad config; no SCL/site yet
 │   ├── kicad/      legacy EEschema symbol library (unmaintained)
-│   └── librelane/  (placeholder - no standard cell library yet)
+│   └── ...
 ├── libs.ref/
 │   ├── ICPS2023_5_fd_base/   frame overlay + pad views: gds/, lef/, def/, lib/
 │   ├── ICPS2023_5_fd_pr/     contacts, vias and pad primitives: gds/
@@ -23,6 +24,12 @@ ICPS2023_5/
 ├── grain.xml       KLayout (salt) package descriptor
 └── SOURCES         provenance of every artefact in this repository
 ```
+
+The LibreLane overlay is user-authorized experimental collateral only. It does
+not qualify POLY-Si or the specified narrow TiN routes, does not override the
+canonical DRC/LVS/PEX layers, and cannot run full PnR until standard-cell views,
+a real placement site, and process-qualified physical data exist. See
+`libs.tech/librelane/README.md`.
 
 ## Documentation
 
@@ -33,7 +40,9 @@ ICPS2023_5/
 * `libs.tech/klayout/doc/layers.md` — the canonical layer table (design and
   fab numbering) and the history of the numbering mess this PDK used to have.
 * `libs.tech/ngspice/README.md`, `libs.tech/xschem/README.md`,
-  `libs.tech/klayout/{drc,lvs,pex}/README.md` — how to run each tool flow.
+  `libs.tech/klayout/{drc,lvs,pex}/README.md`, and
+  `libs.tech/librelane/README.md` — how to run each tool flow and the boundaries
+  of the experimental LibreLane overlay.
 * PDK user manual (Dropbox, maintained by the foundry):
   <https://www.dropbox.com/scl/fi/84uzdzux0urhsd05mfxmb/ICPS2023_5-PDK-Users-Manual-v1.05.paper?rlkey=04jeibh2hrzlrlx4x9h5ghp4s&dl=0>
 
@@ -90,8 +99,11 @@ its existing exclusion behavior.
 ## Flows
 
 All KLayout decks are plain, headless DRC/LVS DSL — no external Ruby gems, no
-`MinedaCommon` runtime. KLayout and LibreLane come from the LibreLane nix shell
-(`~/Documents/librelane`); ngspice is used directly.
+`MinedaCommon` runtime. The root Nix flake pins the non-LibreLane verification
+toolchain (Nix-EDA 6.11.0; KLayout 0.30.7, Python 3.13.9, ngspice 44, and Ruby
+3.3.10); enter it with `nix develop`. CI runs the non-LibreLane regressions.
+The experimental LibreLane overlay is excluded from CI pending cell
+characterization.
 
 ```bash
 # DRC (design numbering; add -rd layer_mode=fab for foundry-numbered data)
@@ -110,8 +122,9 @@ klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
         -rd process_profile=icps2023_5_1m
 
 # parasitic extraction (R network + lumped C)
-nix-shell ~/Documents/librelane --run \
-  'cd "$PDK_ROOT/ICPS2023_5" && python3 libs.tech/klayout/pex/icps2023_5_pex.py --input design.gds --top CELL --process-profile icps2023_5_1m'
+nix develop --command python3 \
+  libs.tech/klayout/pex/icps2023_5_pex.py \
+  --input design.gds --top CELL --process-profile icps2023_5_1m
 ```
 
 SPICE:
@@ -152,12 +165,13 @@ source `libs.tech/xschem/xschemrc`).
 | LVS `nand_sample_b4soi_reference.cir` compatibility smoke | MATCH, 0 mismatches with `filters=legacy` and explicit experimental profile in design and fab modes |
 | LVS strict compare on NAND reference | NO MATCH under explicit experimental process profile; unmodelled pad-array parasitics remain in scope |
 | PEX on shipped NAND GDS | Rejected in either profile for unmasked upper-metal geometry; no extraction output |
-| PEX regression fixtures | 12 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, and unqualified-coupling omission |
+| PEX regression fixtures | 15 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, and unqualified-coupling omission |
 | Layered FEM matrix fixtures | `libs.tech/klayout/pex/test_fieldsolve_box.py` checks matrix symmetry, passivity, charge conservation, material sensitivity, and layer-boundary validation; test permittivities are synthetic |
 | Pad LEF/DEF consistency | 28 fixed independent DEF pins match the frame GDS; LEF/Liberty remain physical-only |
 | ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
 | ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
 | xschem symbol validator | 45 symbols validated; ESD pin order checked against ngspice `.subckt` definitions |
+| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD is excluded pending cell characterization |
 
 ## Known limits
 
@@ -168,9 +182,10 @@ source `libs.tech/xschem/xschemrc`).
   fit covers only L=6 µm, W=24 µm at 25 °C and does not characterize body,
   back-gate, C–V, temperature, or geometry scaling. See
   `libs.tech/ngspice/README.md` and `libs.tech/ngspice/fit/`.
-* **No automated CI.** The repository has no workflow configuration; PEX, LVS,
-  pad-view, and xschem-contract checks are documented local commands, not PR
-  gates.
+* **Automated CI.** `.github/workflows/ci.yml` runs the non-LibreLane
+  verification suites with versions pinned by `flake.lock` and
+  `requirements-fem.txt`. LibreLane/OpenROAD is deliberately excluded until
+  cell characterization completes.
 * **ML2 / VIA2 / ML3 are not qualified.** The reference manual marks them
   T.B.D. Experimental DRC and fab prep permit only VIA1/ML2; VIA2/ML3 are
   rejected because their connectivity and mask handling are undefined. PEX
@@ -184,11 +199,11 @@ source `libs.tech/xschem/xschemrc`).
   behavior; even strict LVS cannot check layout substrate/backgate connectivity
   because this PDK has no substrate/BOX geometry. See
   `libs.tech/klayout/lvs/README.md`.
-* **PEX limits.** Routine PEX distributes each connected component's existing
-  qualified diffusion capacitance evenly over its resistance-network nodes;
-  it does not consume field-solver results or model layout-driven fringing,
-  sidewall capacitance, or full distributed RC. Research-only FEM studies include
-  neither qualifies the 2023 stack or provides PEX coefficients. The layered
+* **PEX limits.** Routine PEX allocates reported diffusion capacitance by
+  bounded Voronoi area to resistance-network nodes on the same diffusion
+  layer; it does not consume field-solver results or model layout-driven fringing,
+  sidewall capacitance, or full distributed RC. Research-only FEM studies
+  neither qualify the 2023 stack nor provide PEX coefficients. The layered
   solver has no embedded 2023 stack or dielectric constants. MOS channel
   geometry is excluded from interconnect PEX; intrinsic channel charge remains
   with the BSIMSOI device model. The PDK does not identify the return conductor
@@ -218,3 +233,4 @@ source `libs.tech/xschem/xschemrc`).
 \* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.<br>
 \* See the License for the specific language governing permissions and<br>
 \* limitations under the License<br>
+

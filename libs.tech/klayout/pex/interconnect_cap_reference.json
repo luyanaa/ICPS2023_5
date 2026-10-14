@@ -1,0 +1,24 @@
+{
+  "status": "Synthetic reference only; not an ICPS2023_5 material stack, extraction coefficient, or PEX calibration.",
+  "units": {
+    "length": "um",
+    "relative_permittivity": "dimensionless",
+    "matrix": "fF/um"
+  },
+  "layers": [
+    ["synthetic_lower_dielectric", 0.15, 3.2],
+    ["synthetic_upper_dielectric", 0.25, 4.1]
+  ],
+  "electrodes": [
+    ["lower_trace", 0.0, -0.35, 0.5],
+    ["middle_trace", 0.15, 0.0, 0.5],
+    ["upper_trace", 0.4, 0.35, 0.5]
+  ],
+  "max_step_um": 0.1,
+  "margin_layer_thicknesses": 4.0,
+  "matrix_ff_per_um": [
+    [0.0837470269, -0.082165136, -0.00158189086],
+    [-0.082165136, 0.152980037, -0.0708149014],
+    [-0.00158189086, -0.0708149014, 0.0723967922]
+  ]
+}

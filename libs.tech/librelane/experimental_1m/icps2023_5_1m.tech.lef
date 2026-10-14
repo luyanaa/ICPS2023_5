@@ -1,0 +1,93 @@
+# ICPS2023_5 experimental 1M routing stack for LibreLane/OpenROAD only.
+# POLY and narrow TiN dimensions/R values are user-directed hypotheses, not
+# foundry-qualified geometry. See libs.tech/librelane/README.md.
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.001 ;
+
+# LEF routing level 1. Experimental POLY-Si horizontal jumper.
+LAYER POLY
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.32 ;
+  WIDTH 0.12 ;
+  SPACING 0.20 ;
+  RESISTANCE RPERSQ 25.0 ;
+END POLY
+
+# LEF routing level 2. User-directed vertical local connector.
+LAYER TIN
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.28 ;
+  WIDTH 0.14 ;
+  SPACING 0.14 ;
+  RESISTANCE RPERSQ 5.0 ;
+END TIN
+
+# LEF routing level 3. M1 is the router alias for physical design layer ML1 8/0.
+# Width/space use the checked-in ICPS2023_5 DRC values; direction and pitch are
+# experimental choices, with pitch = 6 um width + 4 um space.
+LAYER M1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 10.0 ;
+  WIDTH 6.0 ;
+  SPACING 4.0 ;
+  RESISTANCE RPERSQ 0.20 ;
+END M1
+
+# Existing pad macro obstruction layer. This is the physical PDK CNT, not any
+# of the small experimental via cuts below.
+LAYER CNT
+  TYPE CUT ;
+END CNT
+
+# Engineering-only cut layers. Their GDS assignments are local to this overlay.
+LAYER VIA_POLY_TIN_CUT
+  TYPE CUT ;
+END VIA_POLY_TIN_CUT
+LAYER VIA_TIN_M1_CUT
+  TYPE CUT ;
+END VIA_TIN_M1_CUT
+LAYER VIA_POLY_M1_CUT
+  TYPE CUT ;
+END VIA_POLY_M1_CUT
+
+# Experimental POLY<->TiN via; cut is 0.08 x 0.08 um. Landing enclosures are
+# assumptions: 0.12 um POLY and 0.14 um TiN squares.
+VIA VIA_POLY_TIN DEFAULT
+  LAYER POLY ;
+    RECT -0.06 -0.06 0.06 0.06 ;
+  LAYER VIA_POLY_TIN_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER TIN ;
+    RECT -0.07 -0.07 0.07 0.07 ;
+END VIA_POLY_TIN
+
+# Experimental TiN<->M1 via. The 0.08 um cut is not the physical CNT 5 x 5 um
+# via; the 6 um M1 landing only follows the current DRC width minimum.
+VIA VIA_TIN_M1 DEFAULT
+  LAYER TIN ;
+    RECT -0.07 -0.07 0.07 0.07 ;
+  LAYER VIA_TIN_M1_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER M1 ;
+    RECT -3.0 -3.0 3.0 3.0 ;
+END VIA_TIN_M1
+
+# Experimental POLY<->M1 direct via; cut/landing geometry is not process data.
+VIA VIA_POLY_M1 DEFAULT
+  LAYER POLY ;
+    RECT -0.06 -0.06 0.06 0.06 ;
+  LAYER VIA_POLY_M1_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER M1 ;
+    RECT -3.0 -3.0 3.0 3.0 ;
+END VIA_POLY_M1
+
+END LIBRARY

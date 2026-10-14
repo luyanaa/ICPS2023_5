@@ -12,11 +12,12 @@ ROOT = Path(__file__).resolve().parents[3]
 GDS = ROOT / "libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds"
 LEF = ROOT / "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base.lef"
 DEF = ROOT / "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base.def"
+LIBRELANE_LEF = ROOT / "libs.ref/ICPS2023_5_fd_base/lef/ICPS2023_5_fd_base_librelane.lef"
+LIBRELANE_DEF = ROOT / "libs.ref/ICPS2023_5_fd_base/def/ICPS2023_5_fd_base_librelane.def"
 LIB = ROOT / "libs.ref/ICPS2023_5_fd_base/lib/ICPS2023_5_fd_base.lib"
 PAD_MAP = ROOT / "libs.ref/ICPS2023_5_fd_base/doc/pad_map.csv"
 
-
-def def_pin_records(text):
+def def_pin_records(text, layer="ML1"):
     records = {}
     pin_section = re.search(r"(?ms)^PINS \d+ ;(.*?)^END PINS$", text)
     if not pin_section:
@@ -27,7 +28,7 @@ def def_pin_records(text):
             r"\+ NET (\S+) \+ DIRECTION INOUT \+ USE SIGNAL", body
         )
         shape = re.search(
-            r"\+ LAYER ML1 \( 0 0 \) \( (\d+) (\d+) \)", body
+            r"\+ LAYER %s \( 0 0 \) \( (\d+) (\d+) \)" % re.escape(layer), body
         )
         fixed = re.search(r"\+ FIXED \( (-?\d+) (-?\d+) \) N", body)
         if not (header and shape and fixed):
@@ -177,6 +178,26 @@ class PadViewsTests(unittest.TestCase):
             else:
                 self.fail("pad center is not on a source GDS edge: %s" % def_pin)
             self.assertEqual(row["array_side"], array_side)
+
+    def test_librelane_alias_keeps_fixed_pad_geometry(self):
+        canonical = def_pin_records(DEF.read_text(), "ML1")
+        librelane = def_pin_records(LIBRELANE_DEF.read_text(), "M1")
+        self.assertEqual(librelane, canonical)
+        self.assertEqual(set(librelane), {"PAD_%02d" % i for i in range(28)})
+
+        def pin_geometry(path):
+            match = re.search(
+                r"(?ms)^  PIN PAD\s+DIRECTION INOUT ;\s+USE ANALOG ;\s+PORT"
+                r"\s+LAYER (\S+) ;\s+RECT ([^;]+) ;",
+                path.read_text(),
+            )
+            self.assertIsNotNone(match)
+            return match.groups()
+
+        canonical_pin = pin_geometry(LEF)
+        librelane_pin = pin_geometry(LIBRELANE_LEF)
+        self.assertEqual(canonical_pin, ("ML1", "0.0 0.0 60.0 60.0"))
+        self.assertEqual(librelane_pin, ("M1", canonical_pin[1]))
 
     def test_lef_and_liberty_are_physical_only_views(self):
         lef = LEF.read_text()

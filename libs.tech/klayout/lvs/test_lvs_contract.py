@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration checks for strict LVS using the experimental contest samples."""
+"""Strict LVS contract checks; the hand-drawn fixture is logic-only, not a DRC golden."""
 
 import shutil
 import subprocess
@@ -44,7 +44,8 @@ def run_lvs(tempdir, schematic, filters=None, input_layout=LAYOUT, layer_mode=No
     return subprocess.run(command, text=True, capture_output=True)
 
 
-def prepare_strict_device_layout(path):
+def prepare_logic_only_strict_lvs_layout(path):
+    """Build the under-minimum hand-drawn LVS fixture; it is not 1M DRC-clean."""
     import klayout.db as pya
 
     layout = pya.Layout()
@@ -62,7 +63,7 @@ def prepare_strict_device_layout(path):
         )
         cell.shapes(layout.layer(*layer)).insert(pya.Text(name, pya.Trans(point)))
 
-    # N+ MOS: 10 um drawn TiN gate, 10 um width; default 2 um/end gives L=6.
+    # Logic-only N+ MOS: 10 um width is below the native 13 um minimum.
     add_box((3, 0), 0, 0, 30, 10)
     add_box((19, 0), 0, 0, 30, 10)
     add_box((5, 0), 10, -2, 20, 12)
@@ -72,7 +73,7 @@ def prepare_strict_device_layout(path):
         add_text((8, 0), name, x, 5)
     add_text((5, 0), "MOS_GATE", 15, 11)
 
-    # 16 um x 10 um N+ resistor at 180 ohm/sq.
+    # Logic-only 16 um x 10 um N+ resistor; native PCell length minimum is 25 um.
     add_box((3, 0), 36, 0, 64, 10)
     add_box((19, 0), 36, 0, 64, 10)
     add_box((15, 0), 42, 0, 58, 10)
@@ -95,8 +96,8 @@ def prepare_strict_device_layout(path):
     return path
 
 
-def write_strict_device_reference(path, gate_net="MOS_GATE", width="10U"):
-    reference = """* Explicit strict reference for the hand-built geometry fixture.
+def write_logic_only_lvs_reference(path, gate_net="MOS_GATE", width="10U"):
+    reference = """* LVS reference for the logic-only, under-minimum hand-built fixture.
 .GLOBAL SUB
 .SUBCKT NchStrictReference MOS_DRAIN MOS_GATE MOS_SOURCE RES_LEFT RES_RIGHT CAP_TOP CAP_BOTTOM
 M1 MOS_DRAIN %(gate_net)s MOS_SOURCE SUB NCH L=6U W=%(width)s
@@ -178,12 +179,12 @@ class LvsContractTests(unittest.TestCase):
             result = run_lvs(tempdir, REFERENCE)
             self.assertIn("ICPS2023_5 LVS NO MATCH", result.stdout + result.stderr)
 
-    def test_strict_device_fixture_matches_explicit_mos_resistor_capacitor(self):
+    def test_logic_only_fixture_matches_explicit_mos_resistor_capacitor(self):
         with tempfile.TemporaryDirectory() as tempdir:
             tempdir = Path(tempdir)
-            layout = prepare_strict_device_layout(tempdir / "strict_devices.gds")
+            layout = prepare_logic_only_strict_lvs_layout(tempdir / "strict_devices.gds")
             schematic = tempdir / "strict_devices.cir"
-            write_strict_device_reference(schematic)
+            write_logic_only_lvs_reference(schematic)
 
             result = run_lvs(tempdir, schematic, input_layout=layout)
 
@@ -198,30 +199,30 @@ class LvsContractTests(unittest.TestCase):
             self.assertIn("ICPS2023_5 LVS MATCH (mismatches=0)", details)
             self.assertIn("gate_overlap_um=2.0 per end", result.stdout)
 
-    def test_strict_device_fixture_rejects_wrong_mos_terminal(self):
+    def test_logic_only_fixture_rejects_wrong_mos_terminal(self):
         with tempfile.TemporaryDirectory() as tempdir:
             tempdir = Path(tempdir)
-            layout = prepare_strict_device_layout(tempdir / "strict_devices.gds")
+            layout = prepare_logic_only_strict_lvs_layout(tempdir / "strict_devices.gds")
             schematic = tempdir / "wrong_terminal.cir"
-            write_strict_device_reference(schematic, gate_net="MOS_DRAIN")
+            write_logic_only_lvs_reference(schematic, gate_net="MOS_DRAIN")
 
             result = run_lvs(tempdir, schematic, input_layout=layout)
 
             self.assertIn("ICPS2023_5 LVS NO MATCH", result.stdout + result.stderr)
 
-    def test_strict_device_fixture_rejects_wrong_dimensions_and_overlap(self):
+    def test_logic_only_fixture_rejects_wrong_dimensions_and_overlap(self):
         with tempfile.TemporaryDirectory() as tempdir:
             tempdir = Path(tempdir)
-            layout = prepare_strict_device_layout(tempdir / "strict_devices.gds")
+            layout = prepare_logic_only_strict_lvs_layout(tempdir / "strict_devices.gds")
             schematic = tempdir / "wrong_width.cir"
-            write_strict_device_reference(schematic, width="12U")
+            write_logic_only_lvs_reference(schematic, width="12U")
             wrong_width = run_lvs(tempdir, schematic, input_layout=layout)
             self.assertIn(
                 "ICPS2023_5 LVS NO MATCH",
                 wrong_width.stdout + wrong_width.stderr,
             )
 
-            write_strict_device_reference(schematic)
+            write_logic_only_lvs_reference(schematic)
             wrong_overlap = run_lvs(
                 tempdir,
                 schematic,

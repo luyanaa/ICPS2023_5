@@ -97,6 +97,18 @@ and the default profile's upper-metal exclusion. The original Anagix PCell
 generator is absent; these native geometry baselines do not claim legacy
 equivalence.
 
+`python3 pcells/test_1m_golden.py` generates temporary GDS from native PCells:
+minimum 13 um NMOS/PMOS, inverter, NAND2, N+/TiN bridges, and 3-/5-stage ring
+oscillator cores. NAND2 and each ring stage expose separate local supply pins
+for parent-level `VDD`/`VSS` binding; no cross-layer route is assumed. The test runs default 1M DRC,
+strict LVS, and 1M PEX for each design, checks for zero DRC markers and no
+unqualified upper-metal geometry, and validates the emitted physical-terminal
+`PORT_MAP`.
+
+`lvs/test_lvs_contract.py` also has a hand-drawn strict-LVS contract fixture.
+It is explicitly logic-only: its 10 um MOS width and 16 um resistor length are
+below the native PCell minima, so it is not a 1M DRC-clean golden layout.
+
 ## Layer numbering
 
 See `doc/layers.md`. In short: design numbering is canonical for everything in

@@ -1,5 +1,11 @@
-# ngspice writes BSIM3SOI parameter-check logs next to the invoking directory
+# ngspice writes BSIMSOI parameter-check logs next to the invoking directory (e.g. b4soiv1check.log)
 *check.log
 # editor/OS noise
 .DS_Store
 *~
+
+# KLayout DRC/LVS reports
+*.lyrdb
+
+# deepwork session state
+.slim/deepwork/

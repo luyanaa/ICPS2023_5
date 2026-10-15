@@ -1,8 +1,9 @@
 # ICPS2023_5 LibreLane technology configuration.
 # This is an experimental routing overlay, not a qualified process setup.
-# Deliberately do not choose a default STD_CELL_LIBRARY: no ICPS standard-cell
-# library/configuration exists yet. LibreLane still requires the future SCL
-# through --scl and libs.tech/librelane/<SCL>/config.tcl before a flow can load.
+# No qualified SCL default exists. `--scl ICPS2023_5_gen_sc` can load the
+# partial view inventory, but it leaves required timing/site/physical inputs
+# unset and cannot start a flow. See README.md for the post-characterization
+# integration order and the full set of missing contracts.
 
 set ::env(DEF_UNITS_PER_MICRON) 1000
 set ::env(PRIMARY_GDSII_STREAMOUT_TOOL) "klayout"

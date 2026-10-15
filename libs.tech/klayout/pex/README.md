@@ -96,10 +96,15 @@ sides along the uniquely best axis, then removes N/P diffusion from the gate
 edge through the outer edge of each cut. Connected diffusion beyond those cuts
 remains PEX-owned. The selected MOS CNT contact is omitted from the resistive
 via model; the extractor contracts its ML1 and external-diffusion anchor nodes
-as an ideal connection, with no epsilon or measured contact resistance. If no
-opposing pair exists or the axis is ambiguous, that gate is left uncarved and
-the log reports it; this favors preserving external interconnect over silently
-deleting a component. The geometry is not a foundry device classifier.
+as an ideal connection, with no epsilon or measured contact resistance. Missing
+opposing contacts, tied nearest-contact choices, ambiguous axes, and corridors
+that cross another gate abort extraction. A gate with no nearby NAREA or PAREA
+component is reported as orphaned and aborts extraction; a gate associated only
+with the opposite polarity is not miscounted as orphaned for the current layer.
+`MOS_ACCESS_RESULT` JSON records the layer, gate bounds, failure reason, and
+bounded/ambiguous/unbounded/orphaned counts; a failed layout emits no new
+parasitic netlist. This is a geometric ownership check, not a foundry device
+classifier.
 
 If the local carve leaves no external-diffusion sliver at a selected contact,
 the MOS terminal maps to that contact's surviving ML1 anchor. A selected cut

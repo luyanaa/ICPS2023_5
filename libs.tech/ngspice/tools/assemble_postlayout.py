@@ -30,10 +30,21 @@ def require(condition, message):
         raise AssemblyError(message)
 
 
+def _logical_spice_lines(path):
+    """Join SPICE continuation lines before parsing named subcircuits."""
+    logical = []
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        if raw.lstrip().startswith("+") and logical:
+            logical[-1] += " " + raw.lstrip()[1:].strip()
+        else:
+            logical.append(raw)
+    return logical
+
+
 def read_reference(path, top, substrate_net):
     pins = None
     global_nets = set()
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+    for raw in _logical_spice_lines(path):
         line = raw.strip()
         if not line or line.startswith("*"):
             continue
@@ -55,8 +66,10 @@ def read_reference(path, top, substrate_net):
     return pins
 
 
+
+
 def read_lvs(path, top, reference_pins):
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = _logical_spice_lines(path)
     header_nodes = None
     net_names = {}
     devices = []

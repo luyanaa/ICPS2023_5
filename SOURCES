@@ -15,9 +15,13 @@ flake.nix / flake.lock pins fossi-foundation/nix-eda 6.11.0 and its Nixpkgs
   input; exact revisions and content hashes are recorded in the lock. The root
   development shell intentionally excludes LibreLane/OpenROAD.
 requirements-fem.txt pins NumPy 2.2.6, SciPy 1.14.1, and scikit-fem 11.0.0 for
-  the research-only FEM regression. `.github/workflows/ci.yml` runs the
-  non-LibreLane verification suites; LibreLane validation remains deferred
-  until cell characterization.
+non-LibreLane verification suites; LibreLane validation remains deferred until
+cell characterization. Native KLayout DRC/LVS/PEX and ngspice assembly remain
+the process verification path. After characterization, LibreLane closure is
+the first integration task, ordered by availability of characterized
+Liberty/corners, a qualified cell-layer alias/site, synthesis utility cells,
+and sourced PDN/RC/CTS data; `MAGIC_PDK_SETUP` is needed only if Magic steps
+are enabled.
 
 Primary process documents
 -------------------------
@@ -78,15 +82,27 @@ libs.tech/klayout/
   The native RBA PCells (pcells_v0.1.lym) no longer load AnagixLoader classes.
   README files document deck differences, assumptions, and executed results.
 
+libs.tech/stdcell/
+  Experimental native-1M MOS cell specifications, physical geometry/mapping,
+  and verification tools. `alu4.v` is the scalar 4-bit ALU RTL; `alu.py`
+  builds its canonical physical-mapped netlist from manifest-accepted cells.
+  `export_views.py` emits structural Verilog/black boxes but refuses Liberty;
+  `core_router.py` is a flat ML1 routing-evidence sandbox, not a qualified
+  placement site, timing library, or LibreLane/OpenDB flow.
+
 libs.tech/librelane/
   Experimental router overlay based on the user-directed layer topology and
   dimensions, not process-qualified measurements or IHP process data. POLY,
   submicron TiN, 5 Ω/sq TiN, and synthetic via geometry are explicitly
   unqualified placeholders mapped to isolated engineering layer IDs. `M1`
-  aliases the existing `ML1` 8/0 layer. The overlay defines no site or standard
-  cells and is not fabrication/signoff collateral; see its README for the
-  physical conflicts and remaining integration gates.
-
+  aliases the existing `ML1` 8/0 layer. The per-SCL
+  `ICPS2023_5_gen_sc/config.tcl` lists only the accepted cell LEF/GDS/SPICE
+  views; it does not supply Liberty, a qualified site, timing, or physical
+  flow values, and its canonical ML1 cell LEFs do not match the overlay's M1
+  alias without a derived view. No usable LibreLane SCL or place-and-route
+  flow is claimed. Following cell characterization, LibreLane closure is the
+  first integration task; its dependency order is documented in the directory
+  README.
 libs.tech/xschem/
   The legacy Xschem symbol directory plus retired LTspice device symbols
   (MinedaLIB) expressed as Xschem symbols bound to the PDK ngspice library.

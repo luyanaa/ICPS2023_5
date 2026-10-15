@@ -170,6 +170,51 @@ def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, sl
     return arcs
 
 
+def sequential_state(spec, postlayout, output_dir, *, load_ff=10.0):
+    """Exercise transparency/capture and hold without adding internal state loads."""
+    state = spec.get("sequential")
+    if not state or state["kind"] not in {"latch", "flip_flop"}:
+        raise CharacterizationError("capture/hold requires a latch or flip-flop")
+    data, clock, output = state["data"], state["clock"], state["q"]
+    deck = _header(spec, postlayout)
+    deck += [
+        "VCLK %s 0 PWL(0 0 .9u 0 1u 3 2u 3 2.1u 0 3u 0 3.1u 3 "
+        "4u 3 4.1u 0 5u 0 5.1u 3 6u 3 6.1u 0 7u 0)" % clock,
+        "CLOAD %s 0 %.12gf" % (output, load_ff)]
+    if state["kind"] == "latch":
+        deck.append("VD %s 0 PWL(0 3 1.3u 3 1.4u 0 2.3u 0 2.4u 3 "
+                    "3.3u 3 3.4u 0 4.3u 0 4.4u 3 7u 3)" % data)
+        samples = (("transparent_high", 1.2, 1), ("transparent_low", 1.8, 0),
+                   ("hold_low", 2.8, 0), ("reopen_high", 3.2, 1),
+                   ("track_low", 3.8, 0), ("second_hold", 4.8, 0),
+                   ("recapture_high", 5.8, 1))
+    else:
+        deck.append("VD %s 0 PWL(0 3 1.3u 3 1.4u 0 3.3u 0 3.4u 3 7u 3)" % data)
+        samples = (("capture_high", 1.2, 1), ("hold_high", 2.8, 1),
+                   ("capture_low", 3.2, 0), ("hold_low", 4.8, 0),
+                   ("recapture_high", 5.8, 1))
+    deck += [".tran 1n 7u"]
+    deck += [".measure tran %s FIND v(%s) AT=%.12gu" % (label, output, time)
+             for label, time, _ in samples]
+    deck.append(".end")
+    measured = _measurements(_run(deck, output_dir))
+    records = []
+    for label, time, expected in samples:
+        voltage = measured.get(label)
+        if voltage is None or not (voltage >= .9*VDD if expected else voltage <= .1*VDD):
+            raise CharacterizationError("%s state %s: %s V expected %d" %
+                                        (spec["name"], label, voltage, expected))
+        records.append({"state": label, "time_us": time, "expected": expected,
+                        "voltage_v": voltage})
+    result = {"name": spec["name"], "kind": state["kind"], "samples": records,
+              "load_ff": load_ff, "voltage_v": VDD, "temperature_c": 25,
+              "model_sha256": sha256(MODEL_CARD), "logic_levels_passed": True,
+              "calibration": "model_based_unqualified_geometry_scaling_and_wire_coupling",
+              "scope": "capture_hold_only; setup_hold_and_clock_timing_uncharacterized"}
+    (Path(output_dir) / "state.json").write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def characterize_cell(spec, postlayout, output_dir, evaluate):
     output_dir = Path(output_dir)
     truth = truth_table(spec, postlayout, output_dir / "truth", evaluate)

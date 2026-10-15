@@ -1,10 +1,11 @@
 # ICPS2023_5 LibreLane technology bring-up
 
 This directory contains an **experimental router overlay**, not a complete or
-foundry-qualified LibreLane PDK. The 28-pad frame is physical-only; there is no
-standard-cell library, placement site, characterized timing library, antenna
-repair cell/model, or qualified OpenRCX/capacitance model. A full placement and
-routing run is therefore not yet available.
+foundry-qualified LibreLane PDK. The 28-pad frame is physical-only; the partial
+`ICPS2023_5_gen_sc` package has accepted GDS/LEF/SPICE views but is not a usable
+SCL. There is no qualified placement site, characterized timing library,
+antenna repair cell/model, or OpenRCX/capacitance model. A full placement and
+routing run is therefore unavailable.
 
 The organization follows the IHP Open-PDK pattern (`libs.tech/librelane/config.tcl`,
 per-library `config.tcl`, and library-owned tracks) only. No IHP process values
@@ -61,13 +62,51 @@ exist yet.
 
 ## LibreLane integration
 
-`config.tcl` provides the technology-level defaults and chooses the existing
-physical-only pad library `ICPS2023_5_fd_base`. It deliberately does **not** set
-a default `STD_CELL_LIBRARY`: LibreLane requires a real SCL config and views.
-Add the future SCL at `libs.tech/librelane/<SCL>/config.tcl` and matching
-`libs.ref/<SCL>/{lef,gds,lib,verilog,spice,cdl}` views before loading a complete
-flow config. The current root config is therefore not a claim that the PDK is
-ready for place-and-route.
+`config.tcl` provides experimental technology-level defaults and selects the
+existing physical-only pad library `ICPS2023_5_fd_base`. It deliberately does
+**not** set a default `STD_CELL_LIBRARY`.
+
+`ICPS2023_5_gen_sc/config.tcl` follows the per-library organization used by
+icsprout55-pdk but copies no process values. It lists only the accepted local
+LEF/GDS/SPICE views and their VDD/VSS pins. It intentionally leaves timing
+corners/Liberty, `PLACE_SITE`, drive/tie/buffer cells, and qualified PDN/RC/CTS
+data unset. The cell LEFs use canonical `ML1`, while the experimental router
+technology LEF uses the `M1` alias; no SCL alias LEFs are published.
+
+An isolated Classic configuration used for validation can substitute out
+Magic-dependent and selected signoff steps. This substitution is not part of
+the checked-in SCL view inventory, does not make the SCL runnable, and does not
+replace verification. `MAGIC_PDK_SETUP` is therefore not a prerequisite for
+that Magic-free configuration check; it remains required before enabling any
+flow that invokes Magic.
+
+The project's process verification path remains independent of Magic: native
+KLayout DRC (`libs.tech/klayout/drc/icps2023_5.drc`), native KLayout LVS
+(`libs.tech/klayout/lvs/icps2023_5.lvs`), native PEX
+(`libs.tech/klayout/pex/icps2023_5_pex.py`), and the ngspice post-layout
+assembler are run by the stdcell verification helpers. A future LibreLane
+integration may wrap these checks with a custom step, but it must preserve
+their explicit 1M profile, strict settings, named-pin contracts, and
+fail-closed behavior; substituting a checker away is not verification.
+
+LibreLane 3.0.11 was tested with `--scl ICPS2023_5_gen_sc` and an isolated
+Classic config that removed Magic-dependent and selected KLayout/signoff
+steps. PDK validation still stops before synthesis or physical design because
+`DEFAULT_CORNER`, `STA_CORNERS`, `LIB`, `PLACE_SITE`, synthesis utility cells,
+and PDN/RC/CTS inputs are unset. No floorplan, placement, or routing ran. The
+config in this directory remains an accepted-view inventory, not a runnable
+place-and-route flow.
+
+After cell characterization is complete, LibreLane closure is the first
+integration task. Work in dependency order: (1) produce characterized Liberty
+and justified default/STA corners, plus a consistent `ML1`/`M1` standard-cell
+LEF alias; (2) establish the cell site/row and qualified synthesis drive, tie,
+and buffer cells; (3) add sourced PDN geometry, RC/RCX data, CTS buffers and
+settings; (4) add a valid `MAGIC_PDK_SETUP` only if Magic steps are enabled,
+then rerun PDK validation and exercise the ALU through synthesis, floorplan,
+placement, and routing. Do not fill any of these contracts with values copied
+from another PDK or guessed from the experimental overlay. Keep LibreLane out
+of CI until the complete path passes with those inputs.
 
 `ICPS2023_5_fd_base/config.tcl` supplies the pad LEF/GDS. The frame generator
 keeps canonical ML1 LEF/DEF intact and emits separate LibreLane alias views

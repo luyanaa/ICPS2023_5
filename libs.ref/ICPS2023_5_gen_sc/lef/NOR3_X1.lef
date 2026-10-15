@@ -1,0 +1,72 @@
+VERSION 5.8 ;
+MACRO NOR3_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 148 BY 160 ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER ML1 ;
+        RECT 102.5 100 115.5 113 ;
+        RECT 102.5 44 115.5 57 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER ML1 ;
+        RECT 67.5 100 80.5 113 ;
+        RECT 67.5 44 80.5 57 ;
+    END
+  END B
+  PIN C
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER ML1 ;
+        RECT 32.5 100 45.5 113 ;
+        RECT 32.5 44 45.5 57 ;
+    END
+  END C
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER ML1 ;
+        RECT 120 76.5 133 89.5 ;
+        RECT 50 20.5 63 33.5 ;
+        RECT 120 20.5 133 33.5 ;
+    END
+  END Y
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER ML1 ;
+        RECT 15 76.5 28 89.5 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER ML1 ;
+        RECT 15 20.5 28 33.5 ;
+        RECT 85 20.5 98 33.5 ;
+    END
+  END VSS
+  OBS
+    LAYER ML1 ;
+      RECT 18.5 10 24.5 30 ;
+      RECT 18.5 10 94.5 16 ;
+      RECT 50 76.5 63 89.5 ;
+      RECT 53.5 24 59.5 72 ;
+      RECT 53.5 66 129.5 72 ;
+      RECT 85 76.5 98 89.5 ;
+      RECT 88.5 10 94.5 30 ;
+      RECT 123.5 24 129.5 86 ;
+      RECT 123.5 66 129.5 86 ;
+  END
+END NOR3_X1

@@ -261,8 +261,11 @@ def voronoi_area_weights(region, node_points):
     return weights
 
 
-def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, layer_name):
-    """Remove MOS-owned access while retaining a zero-ohm terminal boundary."""
+def carve_mos_terminal_access(
+    gate_region, active_region, contact_region, dbu, layer_name,
+    other_active_region=None,
+):
+    """Carve uniquely bounded MOS access; report every unresolved terminal pair."""
     gate_polygons = region_polygons(gate_region)
     active_polygons = region_polygons(active_region)
     active_components = [pya.Region(poly) for poly in active_polygons]
@@ -281,10 +284,15 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
     mos_contact_region = pya.Region()
     bounded = 0
     ambiguous = 0
+    orphaned = 0
+    considered = 0
+    failures = []
     associated_contacts = 0
     terminal_records = []
     for gate in gate_polygons:
         gate_box = gate.bbox()
+        gate_bounds = [gate_box.left * dbu, gate_box.bottom * dbu,
+                       gate_box.right * dbu, gate_box.top * dbu]
         gate_halo = pya.Region(gate).sized(1)
         local_component_ids = {
             index
@@ -292,7 +300,15 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
             if not (component & gate_halo).is_empty()
         }
         if not local_component_ids:
+            if (other_active_region is not None
+                    and not (other_active_region & gate_halo).is_empty()):
+                continue
+            considered += 1
+            orphaned += 1
+            failures.append({"gate_bbox_um": gate_bounds,
+                             "reason": "no_associated_active_component"})
             continue
+        considered += 1
 
         local_active = pya.Region()
         for index in local_component_ids:
@@ -334,23 +350,21 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
             if negative and positive:
                 near_negative = min(negative, key=lambda item: item[0])
                 near_positive = min(positive, key=lambda item: item[0])
-                options.append(
-                    (
-                        near_negative[0] + near_positive[0],
-                        axis,
-                        near_negative[1],
-                        near_positive[1],
-                    )
-                )
+                unique = (sum(gap == near_negative[0] for gap, _ in negative) == 1
+                          and sum(gap == near_positive[0] for gap, _ in positive) == 1)
+                options.append((near_negative[0] + near_positive[0], axis,
+                                near_negative[1], near_positive[1], unique))
 
         if not options:
+            failures.append({"gate_bbox_um": gate_bounds, "reason": "unbounded"})
             continue
         options.sort(key=lambda item: item[0])
-        if len(options) > 1 and options[0][0] == options[1][0]:
+        if not options[0][4] or (len(options) > 1 and options[0][0] == options[1][0]):
             ambiguous += 1
+            failures.append({"gate_bbox_um": gate_bounds, "reason": "ambiguous"})
             continue
 
-        _gap, axis, negative_contact, positive_contact = options[0]
+        _gap, axis, negative_contact, positive_contact, _unique = options[0]
         negative_box = negative_contact.bbox()
         positive_box = positive_contact.bbox()
         corridor = pya.Region()
@@ -392,6 +406,11 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
                         positive_box.top,
                     )
                 )
+        other_gates = gate_region - pya.Region(gate)
+        if not (corridor & other_gates).is_empty():
+            failures.append({"gate_bbox_um": gate_bounds,
+                             "reason": "terminal_corridor_crosses_another_gate"})
+            continue
         mos_contact_region.insert(negative_contact)
         mos_contact_region.insert(positive_contact)
         active_box = local_active.bbox()
@@ -415,16 +434,24 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
 
     access_region = access_region & active_region
     print(
-        "MOS access %s: gates=%d bounded=%d unbounded=%d ambiguous=%d contacts=%d"
+        "MOS access %s: gates=%d bounded=%d unbounded=%d ambiguous=%d "
+        "orphaned=%d contacts=%d"
         % (
             layer_name,
-            len(gate_polygons),
+            considered,
             bounded,
-            len(gate_polygons) - bounded - ambiguous,
+            considered - bounded - ambiguous - orphaned,
             ambiguous,
+            orphaned,
             associated_contacts,
         )
     )
+    summary = {"layer": layer_name, "gates": considered, "bounded": bounded,
+               "unbounded": considered - bounded - ambiguous - orphaned,
+               "ambiguous": ambiguous, "orphaned": orphaned,
+               "failures": failures,
+               "passed": not failures}
+    print("MOS_ACCESS_RESULT " + json.dumps(summary, sort_keys=True))
     print(
         "MOS terminal contact cuts %s: selected=%d"
         % (layer_name, len(region_polygons(mos_contact_region)))
@@ -449,7 +476,7 @@ def carve_mos_terminal_access(gate_region, active_region, contact_region, dbu, l
                 len(region_polygons(component_remaining)),
             )
         )
-    return remaining, mos_contact_region, terminal_records
+    return remaining, mos_contact_region, terminal_records, summary
 
 
 def main():
@@ -520,12 +547,17 @@ def main():
     mos_gate = (tin & diff) - cap
     raw_narea = region("NAREA") & diff
     raw_parea = region("PAREA") & diff
-    narea, mos_n_contacts, n_mos_devices = carve_mos_terminal_access(
-        mos_gate, raw_narea - mos_gate, raw_contacts, layout.dbu, "NAREA"
+    narea, mos_n_contacts, n_mos_devices, n_access = carve_mos_terminal_access(
+        mos_gate, raw_narea - mos_gate, raw_contacts, layout.dbu, "NAREA",
+        other_active_region=raw_parea - mos_gate,
     )
-    parea, mos_p_contacts, p_mos_devices = carve_mos_terminal_access(
-        mos_gate, raw_parea - mos_gate, raw_contacts, layout.dbu, "PAREA"
+    parea, mos_p_contacts, p_mos_devices, p_access = carve_mos_terminal_access(
+        mos_gate, raw_parea - mos_gate, raw_contacts, layout.dbu, "PAREA",
+        other_active_region=raw_narea - mos_gate,
     )
+    access_reports = [n_access, p_access]
+    if not all(report["passed"] for report in access_reports):
+        sys.exit("MOS terminal access mapping is not unique and bounded; see MOS_ACCESS_RESULT")
     mos_devices = []
     for polarity, bottom, records in (
         ("NMOS", "NAREA", n_mos_devices),
@@ -576,10 +608,9 @@ def main():
                     t = sh.text
                     labels.append((t.string, it.trans() * t.position()))
                 it.next()
-    # N/P diffusion outside locally bounded MOS terminal corridors and explicit
-    # RES bodies remains PEX-owned. Ambiguous/unbounded gate geometry is left
-    # untouched; DIO access remains PEX-owned because diode series resistance
-    # is not characterized.
+    # N/P diffusion outside uniquely bounded MOS access and explicit RES bodies
+    # remains PEX-owned. DIO access remains PEX-owned because diode series
+    # resistance is not characterized.
     conductor_region = {
         "TIN": tin,
         "ML1": ml1,
@@ -1051,6 +1082,8 @@ def main():
         )
         f.write("* MOS terminal ties are ideal graph contractions; contact R is excluded\n")
         f.write("* MOS terminal mapping binds LVS D/G/S to physical PEX nodes\n")
+        for summary in access_reports:
+            f.write("* MOS_ACCESS_RESULT " + json.dumps(summary, sort_keys=True) + "\n")
         for record in physical_labels:
             mapping = {
                 "physical": record["physical"],

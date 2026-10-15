@@ -51,6 +51,19 @@
     "require_pin_access": true,
     "require_abutment": true
   },
+  "area_search": {
+    "heights_um": [110, 120, 130, 140, 150, 160, 180],
+    "total_device_widths_um": [13, 24, 26],
+    "fingers": [1, 2],
+    "pin_orders": ["declared", "reverse_signals"],
+    "mirrors": [false, true],
+    "route_channels_um": [0, 20],
+    "workers": 2,
+    "candidate_timeout_s": 120,
+    "pareto_objectives": ["area_um2", "contacts_count", "local_wire_resistance_proxy_ohm"],
+    "require_postlayout_logic": true,
+    "geometry_scaling_qualification": "unqualified; measured compact-model fit only at W24/L6"
+  },
   "cells": {
     "strengths": ["X1"],
     "enable_pin_permutation_variants": true,

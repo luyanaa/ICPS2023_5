@@ -11,6 +11,7 @@ revision.
 |------|----------|---------------|
 | SPICE | `spice/ICPS2023_5_gen_sc.spice` | Transistor-level reference subcircuits for all 26 canonical cell specifications; functional/model reference only |
 | GDSII | `gds/<cell>.gds` | Only cells with strict native-1M DRC, LVS, PEX, and assembly success; exact membership and evidence are in `cell_manifest.json` |
+| LEF | `lef/<cell>.lef` | Accepted cell geometry and pin/access/obstruction contract; no qualified site or row pitch |
 
 The SPICE file defines `nch`/`pch` subcircuits and declares global `SUB`; it
 does not embed model cards. A simulation deck must load the `b4soi` section from
@@ -18,11 +19,11 @@ does not embed model cards. A simulation deck must load the `b4soi` section from
 model is a provisional nominal W=24 µm/L=6 µm fit, not silicon- or
 corner-qualified.
 
-No `cdl`, `lef`, `lib`, `verilog`, or `xschem` view is published: the current
-stdcell flow has no independent exporter/contract for those views. In
-particular, no row/site, abutment, LEF obstruction, timing arc, drive strength,
-or placement/routing contract is established. Missing views are intentional,
-not empty placeholders.
+No `cdl`, Liberty, or published Verilog view exists. The experimental
+`libs.tech/stdcell/export_views.py` emits structural Verilog and accepted-cell
+black-box declarations on request, but refuses Liberty: nominal model arcs,
+geometry scaling, wire coupling, placement site, and timing corners are not
+qualified.
 
 ## Regenerating
 

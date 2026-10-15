@@ -1,0 +1,6 @@
+* ICPS2023_5 canonical 1M standard-cell reference
+.GLOBAL SUB
+.SUBCKT INV_X1 A Y VDD VSS
+M_INV_P VDD A Y SUB pch W=2.4e-05 L=6e-06
+M_INV_N Y A VSS SUB nch W=2.4e-05 L=6e-06
+.ENDS INV_X1

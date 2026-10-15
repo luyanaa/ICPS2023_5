@@ -84,10 +84,13 @@ def _device_records(spec: Mapping[str, Any], fingers: int) -> List[Dict[str, Any
         polarity = str(item.get("polarity", "")).casefold()
         if polarity not in ("n", "p"):
             raise GeometryError(f"MOS entry {index} has invalid polarity")
-        w = _finite(item.get("w_um", 24.0), f"MOS {index} width")
+        total_w = _finite(item.get("w_um", 24.0), f"MOS {index} total width")
+        w = _snap(total_w / fingers)
         length = _finite(item.get("l_um", 6.0), f"MOS {index} length")
         if w < MIN_W or length < MIN_L:
-            raise GeometryError(f"MOS {item.get('name', index)} needs W>=13um and L>=6um; got W={w:g}, L={length:g}")
+            raise GeometryError(f"MOS {item.get('name', index)} needs finger W>=13um and L>=6um; got total W={total_w:g}, fingers={fingers}, finger W={w:g}, L={length:g}")
+        if abs(w * fingers - total_w) > 1e-9:
+            raise GeometryError("total MOS width cannot be split equally on the 0.001um grid")
         for terminal in ("d", "g", "s"):
             if not isinstance(item.get(terminal), str) or not item[terminal]:
                 raise GeometryError(f"MOS entry {index} has no {terminal} net")
@@ -694,6 +697,9 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     ordered_pins = list(pin_order or pins)
     if set(ordered_pins) != set(pins) or len(ordered_pins) != len(pins):
         raise GeometryError("pin_order must be a permutation of the declared pins")
+    pin_rank = {pin: index for index, pin in enumerate(ordered_pins)}
+    def routing_key(net):
+        return (pin_rank.get(net, len(pins)), net) if ordered_pins != pins else (0, net)
     known = set(pins)
     used = {net for d in devices for net in (d["d"], d["g"], d["s"])}
     references: Dict[str,int]=defaultdict(int)
@@ -919,7 +925,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                          spec["sequential"]["clock_inversions"]}
                         if is_sequential else set())
     gate_order=sorted(gate_terminals.items(),
-                      key=lambda item:(item[0] not in clock_inverse_nets,item[0]))
+                      key=lambda item:(item[0] not in clock_inverse_nets,routing_key(item[0])))
     for net,points in gate_order:
         unique=[]
         for point in points:
@@ -1375,7 +1381,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                              gate_terminals.get(net,())),
                             default=float("inf"))),net))
     else:
-        bridge_order=sorted(bridgeable_nets)
+        bridge_order=sorted(bridgeable_nets,key=routing_key)
     for net in bridge_order:
         edge_clearance=20.0 if is_sequential else 0.0
         left_lane_offsets=((0.0,12.0,24.0,36.0)
@@ -1737,14 +1743,14 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                 2 if net in gate_ml1 else
                 4 if net in {"VDD","VSS"} else 3)
     orderings=[
-        sorted(items,key=lambda item:(route_priority(item[0]),item[0])),
+        sorted(items,key=lambda item:(route_priority(item[0]),routing_key(item[0]))),
         sorted(items,key=lambda item:(0 if item[0] in outputs else
                                       1 if item[0] not in pins_set else
                                       2 if item[0] in gate_ml1 else
                                       4 if item[0] in {"VDD","VSS"} else 3,
-                                      item[0])),
-        sorted(items,key=lambda item:(-route_span(item),route_priority(item[0]),item[0])),
-        sorted(items,key=lambda item:(-route_priority(item[0]),item[0])),
+                                      routing_key(item[0]))),
+        sorted(items,key=lambda item:(-route_span(item),route_priority(item[0]),routing_key(item[0]))),
+        sorted(items,key=lambda item:(-route_priority(item[0]),routing_key(item[0]))),
     ]
     priority_order=orderings[1]
     seen_orders={tuple(net for net,_points in order) for order in orderings}
@@ -1821,6 +1827,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         "requested_height_um":requested,"actual_height_um":actual_height,
         "route_channel_um":extension,
         "folding":{"requested_parallel_fingers":nf,"physical_parallel_devices":len(devices),
+                   "total_width_preserved":True,
                    "shared_active_euler_rows":sum(r["euler_shared_active"] for r in row_records)},
         "variant":{"fingers":nf,"mirror":bool(mirror),"pin_order":ordered_pins},
         "routing":{"local_conductors":["ML1","TiN"],"unrouted_nets":[],
@@ -1830,9 +1837,47 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                     "additional_CNT_vias":metal_via_count,
                     "route_order_variant":selected_route_order,
                     "direct_tin_diff_contact":False},
-        "provenance":{"device_geometry":"native ICPS2023_5 PCell equation: contact=13um, gate L>=6um, gate bay=max(4,(22-L)/2), gate overlap2um, CNT5um; gate-contact offset=26um compact, N/P=33/35um sequential",
+        "provenance":{"device_geometry":"native ICPS2023_5 PCell equation: contact=13um, gate L>=6um, gate bay=max(4,(22-L)/2), gate overlap2um, CNT5um; gate-contact offset=11.5um combinational,26um sequential; folding preserves total MOS width",
                        "sheet_resistance_ohm_sq":{"ML1":0.2,"TIN":20.0},
                        "qualification":"canonical DRC/LVS/PEX must still pass; no signoff claim"}}
+    # The reserved drawing rectangle is placement metadata, not a mask layer.
+    boundary = tuple(bbox)
+    for layer_number in (NWL, DIFF, TIN, CNT, ML1, PAREA, NAREA):
+        for shape in top.shapes(layers[layer_number]).each():
+            if not shape.is_box():
+                raise GeometryError(
+                    f"physical layer {layer_number}/0 contains nonrectangular geometry")
+            box = shape.box
+            rect = tuple(value * DBU for value in
+                         (box.left, box.bottom, box.right, box.top))
+            if (rect[0] < boundary[0] or rect[1] < boundary[1] or
+                    rect[2] > boundary[2] or rect[3] > boundary[3]):
+                raise GeometryError(
+                    f"physical layer {layer_number}/0 geometry escapes the cell boundary")
+    for pin, windows in pin_windows.items():
+        for x1, y1, x2, y2 in windows:
+            if (x1 < boundary[0] or y1 < boundary[1] or
+                    x2 > boundary[2] or y2 > boundary[3]):
+                raise GeometryError(f"ML1 pin window for {pin} escapes the cell boundary")
+    boundary_layer = _layer(layout, 100)
+    _put_box(layout, top, boundary_layer, boundary)
+    pin_rectangles = {tuple(rect) for windows in pin_windows.values() for rect in windows}
+    obstructions = set()
+    for shape in top.shapes(layers[ML1]).each():
+        box = shape.box
+        rect = tuple(_snap(value * DBU) for value in
+                     (box.left, box.bottom, box.right, box.top))
+        if rect not in pin_rectangles:
+            obstructions.add(rect)
+    manifest.update(boundary_um=list(boundary), boundary_layer=[100, 0],
+                    boundary_source="generator",
+                    obstructions_um=[list(rect) for rect in sorted(obstructions)],
+                    active_regions_um=[list(rect) for rect in active_regions])
+    manifest["routing"]["shapes"] = {
+        "ML1": [[list(rect), net, kind] for rect, net, kind in m1_shapes],
+        "TIN": [[list(rect), net, kind]
+                for rect, net, kind in tin_shapes + tin_route_shapes],
+    }
     return layout,top,manifest
 
 

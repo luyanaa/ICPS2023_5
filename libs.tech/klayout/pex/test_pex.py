@@ -39,12 +39,16 @@ def run_checked(command):
     return result.stdout
 
 
-def port_mappings(netlist):
+def json_records(text, prefix):
     return [
-        json.loads(line[len("* PORT_MAP "):])
-        for line in netlist.splitlines()
-        if line.startswith("* PORT_MAP ")
+        json.loads(line[len(prefix):])
+        for line in text.splitlines()
+        if line.startswith(prefix)
     ]
+
+
+def port_mappings(netlist):
+    return json_records(netlist, "* PORT_MAP ")
 
 
 def physical_ports(netlist, logical):
@@ -372,6 +376,73 @@ class PexRegressionTests(unittest.TestCase):
             self.assertNotEqual(mappings[0]["physical"], "SUB")
             self.assertEqual(header[2:], [mappings[0]["physical"], "SUB"])
 
+    def test_unbounded_and_ambiguous_mos_access_are_rejected(self):
+        for mode in ("unbounded", "ambiguous"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tempdir:
+                layout, cell = self.make_layout("MOS_ACCESS_" + mode.upper())
+                add_box(layout, cell, (3, 0), 0, 0, 100, 30)
+                add_box(layout, cell, (19, 0), 0, 0, 100, 30)
+                add_box(layout, cell, (5, 0), 40, 0, 46, 30)
+                cuts = [(10, 10)]
+                if mode == "ambiguous":
+                    cuts += [(10, 20), (80, 15)]
+                for x, y in cuts:
+                    add_box(layout, cell, (7, 0), x-2.5, y-2.5, x+2.5, y+2.5)
+                    add_box(layout, cell, (8, 0), x-6.5, y-6.5, x+6.5, y+6.5)
+                input_path = Path(tempdir) / "access.gds"
+                output_path = Path(tempdir) / "access.spice"
+                layout.write(str(input_path))
+                result = subprocess.run(
+                    [sys.executable, str(PEX_SCRIPT), "--input", str(input_path),
+                     "--top", cell.name, "--output", str(output_path)],
+                    text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                reports = json_records(result.stdout, "MOS_ACCESS_RESULT ")
+                self.assertEqual(len(reports), 2, result.stdout)
+                n_report = next(report for report in reports if report["layer"] == "NAREA")
+                self.assertFalse(n_report["passed"])
+                self.assertEqual(n_report[mode], 1)
+                self.assertEqual(n_report["failures"][0]["reason"], mode)
+                self.assertEqual({report["layer"] for report in reports},
+                                 {"NAREA", "PAREA"})
+                self.assertEqual(n_report["gates"], 1)
+                self.assertEqual(n_report["bounded"], 0)
+                self.assertEqual(n_report["unbounded"], int(mode == "unbounded"))
+                self.assertEqual(n_report["ambiguous"], int(mode == "ambiguous"))
+                self.assertEqual(len(n_report["failures"]), 1)
+                self.assertEqual(len(n_report["failures"][0]["gate_bbox_um"]), 4)
+                self.assertFalse(output_path.exists())
+
+
+    def test_mos_gate_without_associated_active_component_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            layout, cell = self.make_layout("MOS_ACCESS_ORPHANED_GATE")
+            add_box(layout, cell, (3, 0), 0, 0, 100, 30)
+            add_box(layout, cell, (5, 0), 40, 0, 46, 30)
+            input_path = Path(tempdir) / "orphaned.gds"
+            output_path = Path(tempdir) / "orphaned.spice"
+            layout.write(str(input_path))
+            result = subprocess.run(
+                [sys.executable, str(PEX_SCRIPT), "--input", str(input_path),
+                 "--top", cell.name, "--output", str(output_path),
+                 "--no-capacitance"],
+                text=True, capture_output=True)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            reports = json_records(result.stdout, "MOS_ACCESS_RESULT ")
+            self.assertEqual({report["layer"] for report in reports},
+                             {"NAREA", "PAREA"})
+            for report in reports:
+                self.assertFalse(report["passed"], report)
+                self.assertEqual(report["gates"], 1, report)
+                self.assertEqual(report["orphaned"], 1, report)
+                self.assertEqual(
+                    report["failures"][0]["reason"],
+                    "no_associated_active_component",
+                    report,
+                )
+            self.assertFalse(output_path.exists())
+
     def test_mos_channel_is_not_replaced_with_a_pex_short(self):
         with tempfile.TemporaryDirectory() as tempdir:
             layout, cell = self.make_layout("MOS_ACCESS_OWNER")
@@ -419,11 +490,40 @@ class PexRegressionTests(unittest.TestCase):
                         terminal_resistance, expected, delta=expected * 0.01
                     )
                     access_layer = "NAREA" if implant == (19, 0) else "PAREA"
-                    self.assertIn(
-                        "MOS access %s: gates=1 bounded=1 unbounded=0 ambiguous=0 contacts=2"
-                        % access_layer,
-                        self.last_pex_log,
+                    access_reports = json_records(spice, "* MOS_ACCESS_RESULT ")
+                    self.assertEqual(len(access_reports), 2, spice)
+                    self.assertEqual(
+                        json_records(self.last_pex_log, "MOS_ACCESS_RESULT "),
+                        access_reports,
                     )
+                    self.assertEqual(
+                        {report["layer"] for report in access_reports},
+                        {"NAREA", "PAREA"},
+                    )
+                    for report in access_reports:
+                        self.assertTrue(report["passed"], report)
+                        self.assertEqual(report["gates"], report["bounded"], report)
+                        self.assertEqual(report["unbounded"], 0, report)
+                        self.assertEqual(report["ambiguous"], 0, report)
+                        self.assertEqual(report["failures"], [], report)
+                    mos_maps = json_records(spice, "* MOS_MAP ")
+                    self.assertEqual(len(mos_maps), 1, spice)
+                    self.assertEqual(
+                        sum(report["bounded"] for report in access_reports),
+                        len(mos_maps),
+                        spice,
+                    )
+                    mos_map = mos_maps[0]
+                    self.assertEqual(
+                        mos_map["polarity"],
+                        "NMOS" if access_layer == "NAREA" else "PMOS",
+                    )
+                    self.assertEqual(mos_map["drain_side"], "positive")
+                    self.assertEqual(mos_map["source_side"], "negative")
+                    self.assertNotEqual(
+                        mos_map["drain_contact"], mos_map["source_contact"]
+                    )
+                    self.assertNotEqual(mos_map["drain"], mos_map["source"])
                     self.assertEqual(
                         self.last_pex_log.count("area_removed=70.000000 um2"),
                         2,

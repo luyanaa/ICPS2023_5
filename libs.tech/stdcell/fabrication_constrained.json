@@ -1,0 +1,15 @@
+{
+  "schema": "ICPS2023_5_fabrication_constrained_v1",
+  "process_profile": "icps2023_5_1m",
+  "area_domain": "fabrication_constrained",
+  "library_view": "physical_qualified",
+  "routing": {
+    "ML1": {"gds": [8, 0], "width_um": 6.0, "space_um": 4.0, "sheet_ohm_sq": 0.2},
+    "TIN": {"gds": [5, 0], "width_um": 6.0, "space_um": 6.0, "sheet_ohm_sq": 20.0, "cross_active": false},
+    "CNT_TIN_ML1": {"gds": [7, 0], "cut_um": 5.0, "landing_um": 10.0, "outside_diffusion": true}
+  },
+  "forbidden": ["POLY", "VIA1", "ML2", "VIA2", "ML3", "direct_TIN_DIFF_contact"],
+  "rules_source": "libs.tech/klayout/drc/icps2023_5.drc strict=true",
+  "qualification": "repository_rule_conformance_only",
+  "capacitance_limits": "No qualified TiN/ML1 interconnect coupling or physical BOX/substrate network. Routed area does not imply calibrated RC or silicon timing."
+}

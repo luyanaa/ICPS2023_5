@@ -22,7 +22,7 @@ PEX = ROOT / "libs.tech/klayout/pex/icps2023_5_pex.py"
 ASSEMBLER = ROOT / "libs.tech/ngspice/tools/assemble_postlayout.py"
 MODELS = ROOT / "libs.tech/ngspice/icps2023_5.lib.spice"
 ALLOWED_LAYERS = {(1, 0), (2, 0), (3, 0), (5, 0), (7, 0), (8, 0),
-                  (13, 0), (14, 0), (18, 0), (19, 0), (21, 0)}
+                  (13, 0), (14, 0), (18, 0), (19, 0), (21, 0), (100, 0)}
 
 
 class VerificationError(RuntimeError):
@@ -114,9 +114,14 @@ def verify_physical(gds_path, reference_path, top_name, output_dir, *, extract=T
         evidence["extracted_spice"] = str(extracted)
         if extract:
             pex_path = output_dir / "parasitics.spice"
-            run_command([sys.executable, PEX, "--input", gds_path, "--top", top_name,
-                         "--output", pex_path, "--process-profile", PROFILE],
-                        output_dir / "pex.log", cwd=output_dir)
+            pex_log = run_command([sys.executable, PEX, "--input", gds_path, "--top", top_name,
+                                   "--output", pex_path, "--process-profile", PROFILE],
+                                  output_dir / "pex.log", cwd=output_dir)
+            evidence["mos_access"] = [
+                json.loads(line.removeprefix("MOS_ACCESS_RESULT "))
+                for line in pex_log.splitlines() if line.startswith("MOS_ACCESS_RESULT ")]
+            if not evidence["mos_access"] or not all(row["passed"] for row in evidence["mos_access"]):
+                raise RuntimeError("PEX did not prove unique bounded MOS terminal access")
             evidence["pex"] = True
             assembled = output_dir / "postlayout.spice"
             loader = importlib.util.spec_from_file_location("icps_stdcell_assembly", ASSEMBLER)

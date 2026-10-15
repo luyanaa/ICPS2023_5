@@ -122,38 +122,47 @@ def from_yosys_json(data: str | Path | dict[str, Any], top: str | None = None) -
     return _canonical_netlist(top, ports, instances)
 
 
-def _map_yosys_primitives(netlist: dict[str, Any],
-                          specs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Replace Yosys simple gates with real library cells; reject unknown cells."""
-    ports = dict(netlist["ports"])
-    ports.setdefault("VDD", "inout")
-    ports.setdefault("VSS", "inout")
-    mapped: list[dict[str, Any]] = []
-    used_names = {str(i["name"]) for i in netlist["instances"]}
-    used_net_names = {str(net).casefold() for net in netlist.get("nets", [])}
-    used_net_names.update(str(net).casefold() for net in ports)
-    serial = 0
+class _CellMapper:
+    """Emit only cells in the selected view, decomposing common gates as needed."""
 
-    def fresh_name() -> str:
-        nonlocal serial
+    _NAND = ("NAND2_X1", "NAND2_BA_X1")
+    _NOR = ("NOR2_X1", "NOR2_BA_X1")
+
+    def __init__(self, specs: dict[str, dict[str, Any]], library_view: str,
+                 instances: list[dict[str, Any]], nets: set[str]) -> None:
+        self.specs = specs
+        self.library_view = library_view
+        self.instances = instances
+        self.nets = nets
+        self.used_names = {str(inst["name"]) for inst in instances}
+        self.used_net_names = {str(net).casefold() for net in nets}
+        self.serial = 0
+
+    def fresh_name(self) -> str:
         while True:
-            name = f"U_MAP{serial}"
-            serial += 1
-            if name not in used_names:
-                used_names.add(name)
+            name = f"U_MAP{self.serial}"
+            self.serial += 1
+            if name not in self.used_names:
+                self.used_names.add(name)
                 return name
 
-    def fresh_net() -> str:
-        nonlocal serial
+    def fresh_net(self) -> str:
         while True:
-            name = f"N_MAP_{serial}"
-            serial += 1
-            if name.casefold() not in used_net_names:
-                used_net_names.add(name.casefold())
+            name = f"N_MAP_{self.serial}"
+            self.serial += 1
+            if name.casefold() not in self.used_net_names:
+                self.used_net_names.add(name.casefold())
+                self.nets.add(name)
                 return name
 
-    def emit(cell: str, connections: dict[str, str], name: str | None = None) -> None:
-        cell_spec = specs[cell]
+    def _cell(self, names: Iterable[str]) -> str | None:
+        return next((name for name in names if name in self.specs), None)
+
+    def emit(self, cell: str, connections: dict[str, str],
+             name: str | None = None) -> None:
+        cell_spec = self.specs.get(cell)
+        if cell_spec is None:
+            raise ValueError(f"{cell} is not eligible in the {self.library_view} view")
         actual = dict(connections)
         if "VDD" in cell_spec["pins"]:
             actual.setdefault("VDD", "VDD")
@@ -162,8 +171,189 @@ def _map_yosys_primitives(netlist: dict[str, Any],
         missing = set(cell_spec["pins"]) - set(actual)
         if missing:
             raise ValueError(f"{cell} mapping is missing pins {sorted(missing)}")
-        mapped.append({"name": name or fresh_name(), "cell": cell,
-                       "connections": actual})
+        self.instances.append({"name": name or self.fresh_name(), "cell": cell,
+                               "connections": actual})
+
+    def invert(self, source: str, target: str | None = None) -> str:
+        target = target or self.fresh_net()
+        cell = self._cell(("INV_X1", *self._NAND, *self._NOR))
+        if cell is None:
+            raise ValueError(
+                f"cannot implement NOT in the {self.library_view} view: "
+                "INV_X1, NAND2_X1, and NOR2_X1 are unavailable")
+        if cell == "INV_X1":
+            self.emit(cell, {"A": source, "Y": target})
+        else:
+            self.emit(cell, {"A": source, "B": source, "Y": target})
+        return target
+
+    def buffer(self, source: str, target: str) -> str:
+        if "BUF_X1" in self.specs:
+            self.emit("BUF_X1", {"A": source, "Y": target})
+            return target
+        intermediate = self.invert(source)
+        return self.invert(intermediate, target)
+
+    def constant(self, value: str, target: str) -> str:
+        if value == "0":
+            source = "VDD"
+        else:
+            source = "VSS"
+        return self.invert(source, target)
+
+    def nand2(self, a: str, b: str, target: str) -> str:
+        cell = self._cell(self._NAND)
+        if cell is not None:
+            self.emit(cell, {"A": a, "B": b, "Y": target})
+            return target
+        positive = self.and2(a, b, self.fresh_net())
+        return self.invert(positive, target)
+
+    def nor2(self, a: str, b: str, target: str) -> str:
+        cell = self._cell(self._NOR)
+        if cell is not None:
+            self.emit(cell, {"A": a, "B": b, "Y": target})
+            return target
+        positive = self.or2(a, b, self.fresh_net())
+        return self.invert(positive, target)
+
+    def and2(self, a: str, b: str, target: str) -> str:
+        direct = "AND2_X1" in self.specs
+        if direct and self.library_view != "physical_qualified":
+            self.emit("AND2_X1", {"A": a, "B": b, "Y": target})
+        elif self._cell(self._NAND) is not None:
+            negative = self.fresh_net()
+            self.nand2(a, b, negative)
+            self.invert(negative, target)
+        elif self._cell(self._NOR) is not None:
+            self.nor2(self.invert(a), self.invert(b), target)
+        elif direct:
+            self.emit("AND2_X1", {"A": a, "B": b, "Y": target})
+        else:
+            raise ValueError(
+                f"cannot implement AND in the {self.library_view} view: "
+                "AND2_X1, NAND2_X1, and NOR2_X1 are unavailable")
+        return target
+
+    def or2(self, a: str, b: str, target: str) -> str:
+        direct = "OR2_X1" in self.specs
+        if direct and self.library_view != "physical_qualified":
+            self.emit("OR2_X1", {"A": a, "B": b, "Y": target})
+        elif self._cell(self._NOR) is not None:
+            negative = self.fresh_net()
+            self.nor2(a, b, negative)
+            self.invert(negative, target)
+        elif self._cell(self._NAND) is not None:
+            self.nand2(self.invert(a), self.invert(b), target)
+        elif direct:
+            self.emit("OR2_X1", {"A": a, "B": b, "Y": target})
+        else:
+            raise ValueError(
+                f"cannot implement OR in the {self.library_view} view: "
+                "OR2_X1, NAND2_X1, and NOR2_X1 are unavailable")
+        return target
+
+    def xor2(self, a: str, b: str, target: str) -> str:
+        if "XOR2_X1" in self.specs:
+            self.emit("XOR2_X1", {"A": a, "B": b, "Y": target})
+        elif self._cell(self._NAND) is not None:
+            not_a, not_b = self.invert(a), self.invert(b)
+            left, right = self.fresh_net(), self.fresh_net()
+            self.nand2(a, not_b, left)
+            self.nand2(not_a, b, right)
+            self.nand2(left, right, target)
+        else:
+            not_a, not_b = self.invert(a), self.invert(b)
+            left, right = self.fresh_net(), self.fresh_net()
+            self.and2(a, not_b, left)
+            self.and2(not_a, b, right)
+            self.or2(left, right, target)
+        return target
+
+    def xnor2(self, a: str, b: str, target: str) -> str:
+        if "XNOR2_X1" in self.specs:
+            self.emit("XNOR2_X1", {"A": a, "B": b, "Y": target})
+        else:
+            intermediate = self.fresh_net()
+            self.xor2(a, b, intermediate)
+            self.invert(intermediate, target)
+        return target
+
+    def mux_yosys(self, a: str, b: str, select: str, target: str) -> str:
+        cell = self._cell(("MUX2_TG6T_X1", "MUX2_STATIC_X1"))
+        if cell is not None:
+            # The library mux selects A at S=1; Yosys selects B.
+            self.emit(cell, {"A": b, "B": a, "S": select, "Y": target})
+        else:
+            selected_b = self.and2(b, select, self.fresh_net())
+            selected_a = self.and2(a, self.invert(select), self.fresh_net())
+            self.or2(selected_b, selected_a, target)
+        return target
+
+
+def _validate_library_view(library_view: str) -> None:
+    if library_view not in ("logical_reference", "physical_qualified"):
+        raise ValueError(
+            "library_view must be 'logical_reference' or 'physical_qualified'")
+
+
+def _mapping_specs(library_view: str, manifest_path: str | Path | None,
+                   specs: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    _validate_library_view(library_view)
+    if library_view == "logical_reference":
+        return cell_specs() if specs is None else specs
+    try:
+        try:
+            from .library import physical_specs
+        except ImportError:  # loaded with libs.tech/stdcell on sys.path
+            from library import physical_specs
+    except ImportError as exc:
+        raise RuntimeError(
+            "physical_qualified mapping requires library.physical_specs()") from exc
+    accepted = physical_specs(manifest_path)
+    if not isinstance(accepted, dict):
+        raise TypeError("library.physical_specs() must return a cell-to-spec mapping")
+    if specs is None:
+        return accepted
+    # An explicit spec set can narrow a qualified view, never broaden it or
+    # replace its validated physical records.
+    return {name: accepted[name] for name in specs if name in accepted}
+
+
+def _map_yosys_primitives(netlist: dict[str, Any],
+                          specs: dict[str, dict[str, Any]], *,
+                          library_view: str) -> dict[str, Any]:
+    """Map Yosys cells into eligible library cells or an eligible gate network."""
+    _validate_library_view(library_view)
+    ports = dict(netlist["ports"])
+    ports.setdefault("VDD", "inout")
+    ports.setdefault("VSS", "inout")
+    mapped: list[dict[str, Any]] = []
+    nets = set(netlist.get("nets", [])) | set(ports)
+    mapper = _CellMapper(specs, library_view, mapped, nets)
+    canonical_specs = cell_specs()
+
+    storage_cells: dict[int, str] = {}
+    for index, inst in enumerate(netlist["instances"]):
+        cell = str(inst["cell"])
+        if cell in ("$_DFF_P_", "$_DFF_N_"):
+            candidates = ("DFF_TG_X1", "DFF_GATE_X1")
+            kind = "DFF"
+        elif cell in ("$_DLATCH_P_", "$_DLATCH_N_"):
+            candidates = ("LATCH_TG_X1", "LATCH_GATE_X1")
+            kind = "latch"
+        elif cell in canonical_specs and canonical_specs[cell].get("sequential"):
+            candidates = (cell,)
+            kind = "latch" if "LATCH" in cell else "DFF"
+        else:
+            continue
+        storage_cell = next((candidate for candidate in candidates
+                             if candidate in specs), None)
+        if storage_cell is None:
+            raise ValueError(
+                f"{kind} cell {'/'.join(candidates)} is not eligible in the "
+                f"{library_view} view")
+        storage_cells[index] = storage_cell
 
     def scalar(value: Any) -> str:
         text = str(value)
@@ -175,57 +365,68 @@ def _map_yosys_primitives(netlist: dict[str, Any],
             raise ValueError(f"vector connection is outside scalar router scope: {text}")
         return text
 
-    for inst in netlist["instances"]:
+    for index, inst in enumerate(netlist["instances"]):
         cell = str(inst["cell"])
         con = {pin: scalar(value) for pin, value in inst["connections"].items()}
         if cell in specs:
-            emit(cell, con, str(inst["name"]))
+            mapper.emit(cell, con, str(inst["name"]))
             continue
+        if cell in canonical_specs:
+            raise ValueError(
+                f"canonical cell {cell} is not eligible in the {library_view} view")
         output = con.get("Y")
         a, b, select = con.get("A"), con.get("B"), con.get("S")
         if cell == "$_NOT_" and output and a:
-            emit("INV_X1", {"A": a, "Y": output})
+            mapper.invert(a, output)
         elif cell == "$_BUF_" and output and a:
-            emit("BUF_X1", {"A": a, "Y": output})
+            mapper.buffer(a, output)
         elif cell == "$_AND_" and output and a and b:
-            intermediate = fresh_net()
-            emit("NAND2_X1", {"A": a, "B": b, "Y": intermediate})
-            emit("INV_X1", {"A": intermediate, "Y": output})
+            mapper.and2(a, b, output)
         elif cell == "$_OR_" and output and a and b:
-            intermediate = fresh_net()
-            emit("NOR2_X1", {"A": a, "B": b, "Y": intermediate})
-            emit("INV_X1", {"A": intermediate, "Y": output})
+            mapper.or2(a, b, output)
         elif cell == "$_NAND_" and output and a and b:
-            emit("NAND2_X1", {"A": a, "B": b, "Y": output})
+            mapper.nand2(a, b, output)
         elif cell == "$_NOR_" and output and a and b:
-            emit("NOR2_X1", {"A": a, "B": b, "Y": output})
+            mapper.nor2(a, b, output)
         elif cell == "$_XOR_" and output and a and b:
-            emit("XOR2_X1", {"A": a, "B": b, "Y": output})
+            mapper.xor2(a, b, output)
         elif cell == "$_XNOR_" and output and a and b:
-            emit("XNOR2_X1", {"A": a, "B": b, "Y": output})
+            mapper.xnor2(a, b, output)
         elif cell in ("$_MUX_", "$_NMUX_") and output and a and b and select:
-            intermediate = output if cell == "$_MUX_" else fresh_net()
-            # Yosys selects B for S=1; this library's MUX selects A for S=1.
-            emit("MUX2_TG6T_X1", {"A": b, "B": a, "S": select, "Y": intermediate})
             if cell == "$_NMUX_":
-                emit("INV_X1", {"A": intermediate, "Y": output})
+                intermediate = mapper.fresh_net()
+                mapper.mux_yosys(a, b, select, intermediate)
+                mapper.invert(intermediate, output)
+            else:
+                mapper.mux_yosys(a, b, select, output)
         elif cell in ("$_DFF_P_", "$_DFF_N_") and con.get("D") and con.get("C") and con.get("Q"):
             clock = con["C"]
             if cell == "$_DFF_N_":
-                inverted_clock = fresh_net()
-                emit("INV_X1", {"A": clock, "Y": inverted_clock})
-                clock = inverted_clock
-            emit("DFF_TG_X1", {"D": con["D"], "CLK": clock, "Q": con["Q"]})
+                clock = mapper.invert(clock)
+            mapper.emit(storage_cells[index],
+                        {"D": con["D"], "CLK": clock, "Q": con["Q"]})
         elif cell in ("$_DLATCH_P_", "$_DLATCH_N_") and con.get("D") and con.get("E") and con.get("Q"):
             enable = con["E"]
             if cell == "$_DLATCH_N_":
-                inverted_enable = fresh_net()
-                emit("INV_X1", {"A": enable, "Y": inverted_enable})
-                enable = inverted_enable
-            emit("LATCH_TG_X1", {"D": con["D"], "CLK": enable, "Q": con["Q"]})
+                enable = mapper.invert(enable)
+            mapper.emit(storage_cells[index],
+                        {"D": con["D"], "CLK": enable, "Q": con["Q"]})
         else:
-            raise ValueError(f"unsupported Yosys cell {cell} at {inst['name']}")
-    return _canonical_netlist(netlist["name"], ports, mapped, netlist["nets"])
+            raise ValueError(f"unsupported Yosys cell {cell} at {inst['name']} "
+                             f"in the {library_view} view")
+    return _canonical_netlist(netlist["name"], ports, mapped, nets)
+
+
+def map_yosys_netlist(data: str | Path | dict[str, Any], top: str | None = None, *,
+                      library_view: str = "logical_reference",
+                      manifest_path: str | Path | None = None,
+                      specs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Convert Yosys JSON (or canonical interchange) into the selected cell view."""
+    selected_specs = _mapping_specs(library_view, manifest_path, specs)
+    return _map_yosys_primitives(from_yosys_json(data, top), selected_specs,
+                                 library_view=library_view)
+
+
 
 
 def export_netlist(netlist: dict[str, Any], path: str | Path) -> dict[str, Any]:
@@ -298,71 +499,69 @@ def _expr_text(x: Any) -> str:
 op_map = {"and": "&", "or": "|", "xor": "^"}
 
 
-def _map_expr(expr: str, output: str, specs: dict[str, dict[str, Any]], instances: list[dict[str, Any]], index: list[int], nets: set[str]) -> str:
+def _map_expr(expr: str, output: str, specs: dict[str, dict[str, Any]],
+              instances: list[dict[str, Any]], nets: set[str], *,
+              library_view: str) -> str:
     ast = _expr_ast(expr)
-    used_net_names = {str(net).casefold() for net in nets}
+    mapper = _CellMapper(specs, library_view, instances, nets)
 
-    def fresh_net() -> str:
-        while True:
-            name = f"N_MAP_{index[0]}"
-            index[0] += 1
-            if name.casefold() not in used_net_names:
-                used_net_names.add(name.casefold())
-                nets.add(name)
-                return name
-
-    def rec(x: Any) -> str:
+    def rec(x: Any, target: str | None = None) -> str:
         if isinstance(x, str):
-            return {"0": "VSS", "1": "VDD"}.get(x, x)
+            if x in ("0", "1"):
+                if target is None:
+                    return "VSS" if x == "0" else "VDD"
+                return mapper.constant(x, target)
+            if target is not None and target != x:
+                return mapper.buffer(x, target)
+            return x
         op = x[0]
         if op == "not":
-            a = rec(x[1]); n = fresh_net()
-            instances.append({"name": f"U{len(instances)}", "cell": "INV_X1", "connections": {"A": a, "Y": n, "VDD": "VDD", "VSS": "VSS"}})
-            return n
-        left, right = rec(x[1]), rec(x[2]); n = fresh_net()
-        wanted = {"and": "NAND2_X1", "or": "NOR2_X1", "xor": "XOR2_X1"}[op]
-        # De Morgan cells require an output inversion; this keeps every mapped
-        # function exact while retaining actual library area accounting.
-        instances.append({"name": f"U{len(instances)}", "cell": wanted, "connections": {"A": left, "B": right, "Y": n, "VDD": "VDD", "VSS": "VSS"}})
-        if op in ("and", "or"):
-            final = fresh_net()
-            instances.append({"name": f"U{len(instances)}", "cell": "INV_X1", "connections": {"A": n, "Y": final, "VDD": "VDD", "VSS": "VSS"}})
-            return final
-        return n
-    result = rec(ast)
-    if result != output:
-        instances.append({"name": f"U{len(instances)}", "cell": "BUF_X1", "connections": {"A": result, "Y": output, "VDD": "VDD", "VSS": "VSS"}})
-    return output
+            return mapper.invert(rec(x[1]), target)
+        left, right = rec(x[1]), rec(x[2])
+        destination = target or mapper.fresh_net()
+        {"and": mapper.and2, "or": mapper.or2,
+         "xor": mapper.xor2}[op](left, right, destination)
+        return destination
+
+    return rec(ast, output)
 
 
-def map_boolean_design(name: str, ports: dict[str, str], outputs: dict[str, str], *, specs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Map scalar Boolean assignments into real X1 library instances."""
-    specs = specs or cell_specs()
+def map_boolean_design(name: str, ports: dict[str, str],
+                       outputs: dict[str, str], *,
+                       library_view: str = "logical_reference",
+                       manifest_path: str | Path | None = None,
+                       specs: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Map scalar Boolean assignments into cells eligible in the selected view."""
+    selected_specs = _mapping_specs(library_view, manifest_path, specs)
     port_directions = dict(ports)
     port_directions.setdefault("VDD", "inout")
     port_directions.setdefault("VSS", "inout")
     instances: list[dict[str, Any]] = []
     nets = set(port_directions)
-    index = [0]
     for output, expr in outputs.items():
-        _map_expr(expr, output, specs, instances, index, nets)
+        _map_expr(expr, output, selected_specs, instances, nets,
+                  library_view=library_view)
     return _canonical_netlist(name, port_directions, instances, nets)
 
 
-def synthesize_rtl(source: str | Path, *, top: str | None = None, specs: dict[str, dict[str, Any]] | None = None,
-                   yosys: str | None = None, workdir: str | Path | None = None) -> dict[str, Any]:
-    """Synthesize RTL, then map the scalar Yosys gate set to physical X1 cells.
+def synthesize_rtl(source: str | Path, *, top: str | None = None,
+                   specs: dict[str, dict[str, Any]] | None = None,
+                   library_view: str = "logical_reference",
+                   manifest_path: str | Path | None = None,
+                   yosys: str | None = None,
+                   workdir: str | Path | None = None) -> dict[str, Any]:
+    """Synthesize RTL and map it using the requested reference or physical view.
 
     ABC performs technology-neutral logic optimization; it does not consume
     unqualified timing arcs or claim area-optimal mapping. Without Yosys, only
     scalar continuous assignments are accepted.
     """
+    _validate_library_view(library_view)
     source_text = Path(source).read_text(encoding="utf-8") if isinstance(source, (str, Path)) and Path(source).exists() else str(source)
     top_name, ports = _ports_from_verilog(source_text)
     top_name = top or top_name
     if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", top_name):
         raise ValueError(f"invalid Yosys top module name {top_name!r}")
-    selected_specs = specs or cell_specs()
     exe = yosys or shutil.which("yosys")
     if exe:
         def run_in(directory: Path) -> dict[str, Any]:
@@ -375,19 +574,26 @@ def synthesize_rtl(source: str | Path, *, top: str | None = None, specs: dict[st
             run = subprocess.run([exe, "-q", "-p", script], capture_output=True, text=True)
             if run.returncode != 0 or not out.exists():
                 raise RuntimeError(f"Yosys failed: {run.stderr.strip()}")
-            raw_netlist = from_yosys_json(out, top_name)
-            return _map_yosys_primitives(raw_netlist, selected_specs)
+            return map_yosys_netlist(out, top_name, library_view=library_view,
+                                     manifest_path=manifest_path, specs=specs)
         if workdir is not None:
             return run_in(Path(workdir))
         with tempfile.TemporaryDirectory(prefix="icps_stdcell_") as temporary:
             return run_in(Path(temporary))
+    if (library_view == "physical_qualified"
+            and re.search(r"\balways(?:_ff|_latch)?\b", source_text)):
+        raise ValueError(
+            "procedural always blocks, including latch/DFF storage, are "
+            "unsupported by scalar synthesis in the physical_qualified view")
     outputs = {m.group(1): m.group(2).strip() for m in _ASSIGN_RE.finditer(source_text)}
     declared_outputs = {name for name, direction in ports.items() if direction == "output"}
     missing_outputs = declared_outputs - set(outputs)
     if not outputs or missing_outputs:
         raise RuntimeError("Yosys unavailable and scalar continuous assignments do not drive all outputs: %s" %
                            sorted(missing_outputs))
-    return map_boolean_design(top_name, ports, outputs, specs=selected_specs)
+    return map_boolean_design(top_name, ports, outputs, library_view=library_view,
+                              manifest_path=manifest_path, specs=specs)
+
 
 
 def synth(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -395,25 +601,64 @@ def synth(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 def area(netlist: dict[str, Any], manifests: dict[str, dict[str, Any]] | None = None,
-         specs: dict[str, dict[str, Any]] | None = None) -> float:
-    """Sum qualified geometry manifests; incomplete cell area is an error."""
-    manifests = manifests or {}
-    specs = specs or cell_specs()
+         specs: dict[str, dict[str, Any]] | None = None, *,
+         manifest_path: str | Path | None = None) -> float:
+    """Sum only cells covered by an explicit accepted physical area contract."""
+    if manifests is None:
+        try:
+            try:
+                from .library import physical_manifests
+            except ImportError:  # loaded with libs.tech/stdcell on sys.path
+                from library import physical_manifests
+        except ImportError as exc:
+            raise RuntimeError(
+                "physical area requires library.physical_manifests()") from exc
+        manifests = physical_manifests(manifest_path)
+        if not isinstance(manifests, dict):
+            raise TypeError(
+                "library.physical_manifests() must return a cell-to-record mapping")
+        eligible = ({cell: {} for cell in manifests} if specs is None else
+                    {cell: specs[cell] for cell in specs if cell in manifests})
+    else:
+        if not isinstance(manifests, dict):
+            raise TypeError("manifests must be a cell-to-record mapping")
+        eligible = ({cell: {} for cell in manifests} if specs is None else
+                    {cell: specs[cell] for cell in specs if cell in manifests})
+
     total = 0.0
     for inst in netlist.get("instances", []):
         cell = inst["cell"]
-        if cell not in specs:
-            raise ValueError(f"unknown standard cell {cell!r} in area query")
+        if cell not in eligible:
+            raise ValueError(
+                f"cell {cell!r} is not eligible in the physical area contract")
         manifest = manifests.get(cell)
-        if manifest is None:
+        if not isinstance(manifest, dict):
             raise ValueError(f"no physical area manifest for {cell}")
-        value = manifest.get("area_um2")
-        if value is None:
-            if "width_um" not in manifest or "height_um" not in manifest:
-                raise ValueError(f"area manifest for {cell} has no area or dimensions")
-            value = float(manifest["width_um"]) * float(manifest["height_um"])
-        value = float(value)
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"invalid physical area for {cell}: {value!r}")
+        try:
+            width = float(manifest["width_um"])
+            height = float(manifest["height_um"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"area manifest for {cell} must provide finite width_um and height_um") from exc
+        if not math.isfinite(width) or not math.isfinite(height) or width <= 0 or height <= 0:
+            raise ValueError(
+                f"invalid physical dimensions for {cell}: {width!r} x {height!r}")
+        dimension_area = width * height
+        if not math.isfinite(dimension_area) or dimension_area <= 0:
+            raise ValueError(f"invalid physical area from dimensions for {cell}")
+        raw_area = manifest.get("area_um2")
+        if raw_area is not None:
+            try:
+                value = float(raw_area)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid physical area for {cell}: {raw_area!r}") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"invalid physical area for {cell}: {value!r}")
+            if not math.isclose(value, dimension_area, rel_tol=1e-6, abs_tol=1e-9):
+                raise ValueError(
+                    f"physical area for {cell} ({value}) disagrees with dimensions "
+                    f"({dimension_area})")
+        else:
+            value = dimension_area
         total += value
     return total

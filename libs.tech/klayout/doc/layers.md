@@ -42,6 +42,7 @@ numbering). Both spaces are defined here once, and every deck selects one with
 | 21/0 | `NCH` | NMOS channel doping (`N-ch` mask), also the body-tie path (`pwl` in LVS) | `N_CH` 13/0 |
 | 50/0 | `PAD` | pad opening | `PAD` 10/0 |
 | 63/63 | `EXCLUDE` | hard keep-out (imported/foreign geometry is ignored) | – |
+| 100/0 | `CELL_BOUNDARY` | experimental standard-cell reserved placement rectangle; drawing only, removed by fab prep | – |
 | 101/0–105/0 | `DM_dcn`, `DM_pcn`, `DM_nscn`, `DM_pscn`, `DM_via1` | dummy (DFM) fill marks inside library cells | – |
 
 Layer polarity (the `W/B` column of the PDK documents): `ALIGNMENT`, `P_DIFF`,

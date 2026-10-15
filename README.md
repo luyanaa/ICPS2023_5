@@ -13,7 +13,7 @@ ICPS2023_5/
 │   ├── klayout/    tech.lyt, layer properties, DRC / LVS / PEX decks, PCells, macros, cross sections
 │   ├── ngspice/    BSIMSOI v4.4 (LEVEL=58) fit, device subcircuits and fit data
 │   ├── xschem/     symbol library + xschemrc
-│   ├── librelane/  experimental 1M technology overlay + physical-only pad config; no SCL/site yet
+│   ├── librelane/  experimental 1M technology + pad config + partial SCL view config; no usable site/timing setup
 │   ├── kicad/      legacy EEschema symbol library (unmaintained)
 │   └── ...
 ├── libs.ref/
@@ -26,10 +26,13 @@ ICPS2023_5/
 ```
 
 The LibreLane overlay is user-authorized experimental collateral only. It does
-not qualify POLY-Si or the specified narrow TiN routes, does not override the
-canonical DRC/LVS/PEX layers, and cannot run full PnR until standard-cell views,
-a real placement site, and process-qualified physical data exist. See
-`libs.tech/librelane/README.md`.
+not qualify POLY-Si or the specified narrow TiN routes, and does not override
+canonical DRC/LVS/PEX layers. The accepted standard-cell package and its partial
+SCL config expose LEF/GDS/SPICE views only; no published Liberty/Verilog/CDL,
+compatible cell-layer alias, qualified placement site, or process-qualified
+timing/RC/PDN data exists. Full PnR is unavailable. After cell characterization,
+LibreLane closure is the first integration task; see
+`libs.tech/librelane/README.md` for the dependency order.
 
 ## Documentation
 
@@ -102,8 +105,8 @@ All KLayout decks are plain, headless DRC/LVS DSL — no external Ruby gems, no
 `MinedaCommon` runtime. The root Nix flake pins the non-LibreLane verification
 toolchain (Nix-EDA 6.11.0; KLayout 0.30.7, Python 3.13.9, ngspice 44, and Ruby
 3.3.10); enter it with `nix develop`. CI runs the non-LibreLane regressions.
-The experimental LibreLane overlay is excluded from CI pending cell
-characterization.
+LibreLane is excluded until cell characterization; closure is the first
+integration task afterward, as documented in `libs.tech/librelane/README.md`.
 
 ```bash
 # DRC (design numbering; add -rd layer_mode=fab for foundry-numbered data)
@@ -156,22 +159,35 @@ source `libs.tech/xschem/xschemrc`).
 
 `libs.tech/stdcell/` contains canonical MOS truth/topology data, a Yosys-to-X1
 mapper, and an area-first geometry generator restricted to the native
-`icps2023_5_1m` conductors. The regression command runs 22 combinational
+`icps2023_5_1m` conductors. The standard-cell regression runs 22 combinational
 transistor-reference truth tables, four sequential capture/hold benches,
-Boolean-fallback and Yosys-mapped RTL simulations, and strict
-DRC/LVS/PEX/assembly plus postlayout characterization for AOI21, and generated
-pin-window coverage/bounds checks for INV, NAND2, and AOI21:
+Boolean-fallback and Yosys-mapped RTL simulations, strict DRC/LVS/PEX/assembly
+plus postlayout characterization for AOI21, and pin-window coverage/bounds
+checks:
 
 ```bash
 nix develop --command python3 libs.tech/stdcell/test_stdcell.py
 ```
 
+The scalar RTL in `libs.tech/stdcell/alu4.v` defines a four-operation unsigned
+4-bit ALU: `S1S0=00` AND, `01` OR, `10` `A+B+CIN`, and `11` `A-B-CIN` with
+`CIN` as borrow-in. `COUT` is zero for logic operations, carry-out for
+addition, and no-borrow for subtraction. `alu.py` builds the canonical
+physical-mapped netlist using only cells accepted by the manifest;
+`test_alu.py` checks RTL synthesis, accepted-cell mapping, and exhaustive
+operation vectors:
+
+```bash
+nix develop --command python3 libs.tech/stdcell/test_alu.py
+```
+
 The experimental reference package is `libs.ref/ICPS2023_5_gen_sc/`: its SPICE
-subcircuits cover all 26 canonical cell specifications, while GDS is published
-only for cells that pass strict native-1M DRC/LVS/PEX and postlayout assembly.
-See its `doc/README.md` and per-cell `doc/cell_manifest.json`. LEF, Liberty,
-CDL, Verilog, and Xschem views are intentionally absent; no matching qualified
-view contract/exporter exists.
+subcircuits cover all 26 canonical cell specifications, while GDS and LEF are
+published only for cells that pass strict native-1M DRC/LVS/PEX and postlayout
+assembly. See its `doc/README.md` and per-cell `doc/cell_manifest.json`.
+`libs.tech/stdcell/export_views.py` can emit structural Verilog and black-box
+declarations for accepted cells, but refuses Liberty because no qualified
+timing library exists.
 
 This is an experimental cell-generation and model-validation path, not a
 qualified standard-cell library or placed-core flow. Generated dimensions and
@@ -200,14 +216,16 @@ wrappers and absolute-maximum voltages are not ESD ratings. SRAM is deferred.
 | LVS `nand_sample_b4soi_reference.cir` compatibility smoke | MATCH, 0 mismatches with `filters=legacy` and explicit experimental profile in design and fab modes |
 | LVS strict compare on NAND reference | NO MATCH under explicit experimental process profile; unmodelled pad-array parasitics remain in scope |
 | PEX on shipped NAND GDS | Rejected in either profile for unmasked upper-metal geometry; no extraction output |
-| PEX regression fixtures | 15 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, and unqualified-coupling omission |
+| PEX regression fixtures | 17 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, orphaned-gate rejection, and unqualified-coupling omission |
 | Layered FEM matrix fixtures | `libs.tech/klayout/pex/test_fieldsolve_box.py` checks matrix symmetry, passivity, charge conservation, material sensitivity, and layer-boundary validation; test permittivities are synthetic |
 | Pad LEF/DEF consistency | 28 fixed independent DEF pins match the frame GDS; LEF/Liberty remain physical-only |
 | ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
 | ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
 | xschem symbol validator | 45 symbols validated; ESD pin order checked against ngspice `.subckt` definitions |
-| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, experimental stdcell, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD is excluded pending cell characterization |
+| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, experimental stdcell and ALU contract, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD remains excluded because the SCL config is partial and has no usable site or timing library. |
 | Experimental stdcell pilot | H160 `AOI21_X1` (183 × 160 µm; 29,280 µm²): strict DRC/LVS/PEX and postlayout assembly passed; 8 truth rows and 5 model-based arcs passed. Not process or timing qualification. |
+| LibreLane configuration checks | LibreLane 3.0.11 loads the partial SCL. A normal invocation stops at PDK validation with missing timing/site/drive/tie/buffer, PDN/RC/CTS, and `MAGIC_PDK_SETUP` inputs; an isolated Classic config substituting Magic-dependent and selected KLayout/signoff steps removes the Magic setup prerequisite from that check but still stops on the remaining PDK inputs. No floorplan, placement, or routing ran; native KLayout DRC/LVS/PEX remains the independent verification path. CI remains non-LibreLane. |
+| ALU view and native route evidence | Accepted-view export validates the 161-instance ALU, three used cells, and 11 accepted-cell black boxes; Liberty/model metadata is refused. `test_alu.py` passes 7 tests; strict accepted-cell manifest verification passes. Native ML1 routing timed out on two attempts without routed GDS/evidence. |
 | Sequential geometry pilot | `LATCH_TG_X1` H210 geometry smoke (`route_channel=40`) pre-routes D, connects VDD through two TiN/ML1 transitions at `(101.5, 200.0)` and `(154.5, 200.0)`, and commits Q/N2/NCLK via routes; it then fails with no legal ML1 route for N1 between `(84.0, 65.0)` and `(224.5, 27.0)`. No strict sequential DRC/LVS/PEX/assembly or postlayout-state evidence exists. |
 
 ## Known limits

@@ -152,6 +152,41 @@ source `libs.tech/xschem/xschemrc`).
 | Local wiring | `bridge` (TiN), `nbridge` (N+ diffusion) | |
 | Pads / frame | `libs.ref/ICPS2023_5_fd_base` | 1600 × 1600 µm frame, 28 × 60 µm pads |
 
+## Experimental 1M standard cells
+
+`libs.tech/stdcell/` contains canonical MOS truth/topology data, a Yosys-to-X1
+mapper, and an area-first geometry generator restricted to the native
+`icps2023_5_1m` conductors. The regression command runs 22 combinational
+transistor-reference truth tables, four sequential capture/hold benches,
+Boolean-fallback and Yosys-mapped RTL simulations, and strict
+DRC/LVS/PEX/assembly plus postlayout characterization for AOI21, and generated
+pin-window coverage/bounds checks for INV, NAND2, and AOI21:
+
+```bash
+nix develop --command python3 libs.tech/stdcell/test_stdcell.py
+```
+
+The experimental reference package is `libs.ref/ICPS2023_5_gen_sc/`: its SPICE
+subcircuits cover all 26 canonical cell specifications, while GDS is published
+only for cells that pass strict native-1M DRC/LVS/PEX and postlayout assembly.
+See its `doc/README.md` and per-cell `doc/cell_manifest.json`. LEF, Liberty,
+CDL, Verilog, and Xschem views are intentionally absent; no matching qualified
+view contract/exporter exists.
+
+This is an experimental cell-generation and model-validation path, not a
+qualified standard-cell library or placed-core flow. Generated dimensions and
+route lengths are geometric candidate metrics; they do not establish a
+qualified row/site, abutment, placement density, clock/power network, timing
+corner, Liberty/LEF contract, or process qualification. The only device-model
+calibration is the documented nominal W=24 µm/L=6 µm point. No timing or
+silicon-performance claim is made.
+
+I/O design remains gated on M3–M4 standard-cell acceptance. The M5 I/O classes
+and ESD validation states are reserved in `libs.tech/stdcell/config.json`, but
+there is no qualified frame-to-pad map or ESD qualification; simplified ESD
+wrappers and absolute-maximum voltages are not ESD ratings. SRAM is deferred.
+
+
 ## Verification status
 
 | Check | Result |
@@ -171,7 +206,9 @@ source `libs.tech/xschem/xschemrc`).
 | ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
 | ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
 | xschem symbol validator | 45 symbols validated; ESD pin order checked against ngspice `.subckt` definitions |
-| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD is excluded pending cell characterization |
+| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, experimental stdcell, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD is excluded pending cell characterization |
+| Experimental stdcell pilot | H160 `AOI21_X1` (183 × 160 µm; 29,280 µm²): strict DRC/LVS/PEX and postlayout assembly passed; 8 truth rows and 5 model-based arcs passed. Not process or timing qualification. |
+| Sequential geometry pilot | `LATCH_TG_X1` H210 geometry smoke (`route_channel=40`) pre-routes D, connects VDD through two TiN/ML1 transitions at `(101.5, 200.0)` and `(154.5, 200.0)`, and commits Q/N2/NCLK via routes; it then fails with no legal ML1 route for N1 between `(84.0, 65.0)` and `(224.5, 27.0)`. No strict sequential DRC/LVS/PEX/assembly or postlayout-state evidence exists. |
 
 ## Known limits
 

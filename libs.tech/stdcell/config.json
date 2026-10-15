@@ -1,0 +1,76 @@
+{
+  "schema": "ICPS2023_5_stdcell_rfc_v2",
+  "library": "ICPS2023_5_sc_1m",
+  "process_profile": "icps2023_5_1m",
+  "dbu_um": 0.001,
+  "objective": {
+    "primary": "min_routed_core_area",
+    "secondary": "min_route_crossing_and_overflow",
+    "tertiary": "min_parasitic_contact_power_cost",
+    "timing": "feasibility_only",
+    "target_clock_period_ns": null
+  },
+  "frame": {
+    "gds": "libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds",
+    "die_bbox_um": [-800, -800, 800, 800],
+    "expected_pad_count": 28,
+    "keepout_um": {"pad": 20, "frame": 10, "edge": 10},
+    "keepout_provenance": "Explicit engineering reservations; manufacturing and package clearance are not qualified.",
+    "power_interface": {},
+    "pro_capacity_multiplier": 4,
+    "pro_capacity_provenance": "user-supplied/unverified",
+    "pro_capacity_interpretations": ["area_multiplier", "side_multiplier"]
+  },
+  "technology": {
+    "allowed_conductors": ["ML1", "TIN", "NAREA", "PAREA"],
+    "poly_routing": "unsupported",
+    "via1_ml2": "forbidden",
+    "tin_to_diff_direct_contact": "unqualified",
+    "contacts": [
+      {"between": ["ML1", "TIN"], "cut": "CNT", "condition": "5x5 um outside DIFF; TiN/ML1 enclosure >=2.5 um"},
+      {"between": ["ML1", "NAREA"], "cut": "CNT", "condition": "NAREA intersect DIFF, no TIN; DIFF/ML1 enclosure >=4 um"},
+      {"between": ["ML1", "PAREA"], "cut": "CNT", "condition": "PAREA intersect DIFF, no TIN; DIFF/ML1 enclosure >=4 um"}
+    ],
+    "crossings": {"ML1_ML1": "forbidden", "ML1_TIN": "insulated_without_CNT", "TIN_active": "intended_MOS_gate_only"},
+    "rules_source": "libs.tech/klayout/drc/icps2023_5.drc (strict=true); pcells/pcells_v0.1.lym",
+    "qualification": "repository_rule_conformance; no foundry signoff claim",
+    "rules_um": {
+      "ML1_width": 6, "ML1_space": 4, "TIN_width": 6, "TIN_space": 6,
+      "CNT_size": 5, "SD_contact_enclosure": 4, "gate_contact_enclosure": 2.5,
+      "gate_to_SD_contact": 8, "MOS_L_min": 6, "MOS_W_min": 13,
+      "DIFF_space": 5, "implant_halo": 2
+    },
+    "sheet_resistance_ohm_sq": {"ML1": 0.2, "TIN": 20, "NAREA": 180, "PAREA": 1200}
+  },
+  "row_candidates": {
+    "nominal_track_counts": [5, 6, 7],
+    "pitch_lower_bound_um": 10,
+    "pitch_provenance": "6 um width +4 um spacing; not an OpenROAD site or qualified track definition",
+    "additional_height_um": [90, 110, 130, 150, 180, 220, 260],
+    "compare_pdn_topologies": ["edge_rails", "segmented_rails", "local_clusters"],
+    "require_pin_access": true,
+    "require_abutment": true
+  },
+  "cells": {
+    "strengths": ["X1"],
+    "enable_pin_permutation_variants": true,
+    "enable_multi_finger_sweep": true,
+    "enable_body_tie_variants": "only_when_verified",
+    "prefer_static_storage": true
+  },
+  "checks": {"strict_drc": true, "strict_lvs": true, "postlayout_spice": true, "routing_1m": true, "power_connectivity": true},
+  "area_definitions": {
+    "A_cell_total": "sum instance height*width including required physical cells",
+    "A_routed_core": "actual allocated floorplan core area including placement whitespace, routing channels, repair and PDN/clock/physical cells",
+    "A_payload": "A_routed_core + fixed pad/frame/measurement overhead; does not equal frame area",
+    "U_effective": "A_cell_total / A_routed_core"
+  },
+  "roadmap": {
+    "io_after": "M3-M4 stdcell acceptance",
+    "io_required": ["IO_IN", "IO_OUT", "IO_BIDIR", "IO_VDD", "IO_VSS", "IO_ANALOG", "IO_ESD_TEST"],
+    "io_states": ["functional_prototype", "electrically_qualified"],
+    "io_driver_strengths": "independent size and multi-stage sweep; X1 restriction does not apply",
+    "esd_qualification": "requires pad-to-rail and rail-to-return discharge network and measured electrical/ESD validation; simplified ESD wrappers and +/-7 V absolute maximum are not ESD ratings",
+    "sram": "deferred until stdcell and IO completed and separately decided"
+  }
+}

@@ -602,11 +602,19 @@ def main():
 
     mos_terminal_ties = []
     mos_tie_counts = {"NAREA": 0, "PAREA": 0}
+    seen_mos_tie_contacts = set()
     for bottom, terminal_contacts in (
         ("NAREA", mos_n_contacts),
         ("PAREA", mos_p_contacts),
     ):
         for poly in terminal_contacts.each():
+            box=poly.bbox()
+            contact_key=(bottom,box.left,box.bottom,box.right,box.top)
+            if contact_key in seen_mos_tie_contacts:
+                # One physical active contact can be discovered from multiple
+                # MOS terminal regions in a shared diffusion island.
+                continue
+            seen_mos_tie_contacts.add(contact_key)
             expanded_cut = pya.Region(poly).sized(
                 MOS_TERMINAL_TIE_EXTENSION_DBU
             )

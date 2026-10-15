@@ -1,0 +1,402 @@
+{
+  "library": "ICPS2023_5_gen_sc",
+  "status": "experimental_partial",
+  "source_specs_sha256": "bfdf8cd9474022ff45ab73da670b3e4f84135a415df2644770278cad95a7b291",
+  "spice_file": "spice/ICPS2023_5_gen_sc.spice",
+  "cells": [
+    {
+      "cell": "INV_X1",
+      "gds": "INV_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            65.0,
+            113.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "0124c387784916573fce1972be8e0b62a78e7d6e60dec40bf91291f82bd2e14c",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "BUF_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "NAND2_X1",
+      "gds": "NAND2_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            100.0,
+            123.5
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "313b7e68d795fe9385a7e3d09caba8950b4d0cf96b4409d9edd41897650b52cb",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "NAND2_BA_X1",
+      "gds": "NAND2_BA_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            100.0,
+            123.5
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "fa5a1ed59e6483dd8b3c68cf408fca3989b85651b8065b0e1ee2c47ee2f7e258",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "NAND3_X1",
+      "gds": "NAND3_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            135.0,
+            123.5
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "e771351a7c2d8cd037c724656a892f2668ed5ef030b307df072ab4adcdaed3cc",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "NOR2_X1",
+      "gds": "NOR2_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            100.0,
+            113.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "92d2471ed0e96e38efd2e07a4fcb896ead0b3acdbfb8c7e4793c77aba07155b4",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "NOR2_BA_X1",
+      "gds": "NOR2_BA_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            100.0,
+            113.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "38319b10409b14d1193eab84e68cfeab2ad2734e9fc7120d4869dbae7c9c8472",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "NOR3_X1",
+      "gds": "NOR3_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            135.0,
+            113.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "9cc389565e608a728bb98a98c8fe7338ccea4c230ab74d71869c0fa237818aa4",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "AOI21_X1",
+      "gds": "AOI21_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            170.0,
+            142.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "569738604718b5164d9ba2ae9adabebcae1c3169e987e99b70479f2855c355e7",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "OAI21_X1",
+      "gds": "OAI21_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            170.0,
+            131.5
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "6a0599b7f891fbc47797416c018d0c047cab4c6654d8d84a726f7d3625321165",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "AOI22_X1",
+      "gds": "AOI22_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            205.0,
+            142.0
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "fa2ddf039f88f3ec04e2263976d93e9e9fbef35fe49ed66e9343676e3d81ed5f",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "OAI22_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "AND2_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "OR2_X1",
+      "gds": "OR2_X1.gds",
+      "status": "strict_physical_pass",
+      "physical": {
+        "process_profile": "icps2023_5_1m",
+        "strict_drc": true,
+        "strict_lvs": true,
+        "pex": true,
+        "assembly": true,
+        "passed": true,
+        "geometry": {
+          "dbu_um": 0.001,
+          "bbox_um": [
+            13.0,
+            9.0,
+            135.0,
+            123.5
+          ]
+        },
+        "drc_markers": [],
+        "gds_sha256": "65895a1d7943452159f371d59da460da27bbba03a73749fa97188b9f3285c58d",
+        "deck_sha256": {
+          "drc": "004f5426be1312b50de28f8466cce96573adedb396f04b6168b0a6bd4f8bd3ca",
+          "lvs": "147d79ccde66ddd4c09336230742cd4375e2d375611bb088be0f04bd44b2dc73",
+          "pex": "ff815018efd441adb3896f8c1f44d21f8980584f4d44e273dc828f587d662734"
+        }
+      }
+    },
+    {
+      "cell": "XOR2_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "XNOR2_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "MUX2_TG6T_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "MUX2_STATIC_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "MUX4_TG_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "MUX4_STATIC_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "HA_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "FA_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "LATCH_TG_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "LATCH_GATE_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "DFF_TG_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    },
+    {
+      "cell": "DFF_GATE_X1",
+      "status": "not_published",
+      "reason": "No strict-verified GDS is included for this cell."
+    }
+  ]
+}

@@ -35,6 +35,7 @@ jobs:
             python3 libs.tech/klayout/pcells/test_1m_golden.py
             python3 libs.tech/klayout/pex/test_pex.py
             python3 libs.ref/ICPS2023_5_fd_base/tools/test_pad_views.py
+            python3 libs.tech/stdcell/test_stdcell.py
             python3 libs.tech/ngspice/tools/test_b4soi_stage1_iv.py
             ruby libs.tech/xschem/tools/validate_symbols.rb
           '

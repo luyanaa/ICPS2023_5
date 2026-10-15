@@ -11,7 +11,7 @@
           python = pkgs.python3.withPackages (ps: [ ps.klayout ]);
         in {
           default = pkgs.mkShell {
-            packages = [ python pkgs.klayout pkgs.ngspice pkgs.ruby ];
+            packages = [ python pkgs.klayout pkgs.ngspice pkgs.ruby pkgs.yosys ];
           };
         });
     };

@@ -48,6 +48,7 @@ WIRE_WIDTH_UM = 6.0
 ML1_SPACE_UM = 4.0
 ROUTE_CLEARANCE_UM = WIRE_WIDTH_UM / 2 + ML1_SPACE_UM
 PLACEMENT_GAP_UM = 32.0
+MULTIROW_GAP_UM = 40.0  # Conservative engineering channel, not a qualified row pitch.
 CORE_MARGIN_UM = 24.0
 ROUTE_CHANNEL_UM = 24.0
 PORT_SPACING_UM = 16.0
@@ -124,6 +125,451 @@ def _component_ids_at(components: list[Any], point: Any) -> list[int]:
     return [index for index, component in enumerate(components)
             if _region_has_point(component, point)]
 
+def _electrical_components(boxes_by_layer: dict[tuple[int, int], list[Any]],
+                           dbu_um: float) -> dict[str, Any]:
+    """Merge native metals only through legal 5um CNT with 2.5um enclosure off DIFF."""
+    metal_layers = (ML1_LAYER, (5, 0))
+    components_by_layer: dict[tuple[int, int], list[Any]] = {}
+    for layer in metal_layers:
+        region = db.Region()
+        for box in boxes_by_layer.get(layer, []):
+            region.insert(box)
+        components_by_layer[layer] = [db.Region(poly) for poly in region.merged().each()]
+
+    active = db.Region()
+    for box in boxes_by_layer.get((3, 0), []):
+        active.insert(box)
+    parents = {
+        (layer, component_id): (layer, component_id)
+        for layer in metal_layers
+        for component_id in range(len(components_by_layer[layer]))
+    }
+
+    def find(node: tuple[tuple[int, int], int]) -> tuple[tuple[int, int], int]:
+        parent = parents[node]
+        while parent != parents[parent]:
+            parents[node] = parents[parents[parent]]
+            parent = parents[node]
+        parents[node] = parent
+        return parent
+
+    def union(first: tuple[tuple[int, int], int],
+              second: tuple[tuple[int, int], int]) -> None:
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            parents[max(first_root, second_root)] = min(first_root, second_root)
+
+    cut_width = _um_to_dbu(5.0, dbu_um, "native CNT width")
+    enclosure = _um_to_dbu(2.5, dbu_um, "native CNT enclosure")
+    for via_box in boxes_by_layer.get((7, 0), []):
+        if via_box.width() != cut_width or via_box.height() != cut_width:
+            continue
+        via = db.Region(via_box)
+        if not (via & active).is_empty():
+            continue
+        landing = db.Region(via_box.enlarged(enclosure))
+        ml1_ids = [index for index, component in enumerate(components_by_layer[ML1_LAYER])
+                   if (landing - component).is_empty()]
+        tin_ids = [index for index, component in enumerate(components_by_layer[(5, 0)])
+                   if (landing - component).is_empty()]
+        if not ml1_ids or not tin_ids:
+            continue
+        contacted = ([(ML1_LAYER, index) for index in ml1_ids] +
+                     [((5, 0), index) for index in tin_ids])
+        for node in contacted[1:]:
+            union(contacted[0], node)
+
+    roots = sorted({find(node) for node in parents})
+    root_ids = {root: index for index, root in enumerate(roots)}
+    electrical_ids = {
+        layer: [root_ids[find((layer, index))]
+                for index in range(len(components_by_layer[layer]))]
+        for layer in metal_layers
+    }
+    return {
+        "components_by_layer": components_by_layer,
+        "electrical_ids_by_layer": electrical_ids,
+        "electrical_component_count": len(roots),
+        "method": ("same-layer merged ML1/TiN regions plus native 5x5um CNT fully enclosed by "
+                   "both metals by 2.5um outside DIFF; labels and MOS channel conduction excluded"),
+    }
+
+
+def _electrical_ids_at_window(window: Any, components: list[Any],
+                              component_electrical_ids: list[int]) -> tuple[list[int], list[int]]:
+    component_ids = [index for index, component in enumerate(components)
+                     if not (db.Region(window) & component).is_empty()]
+    return component_ids, sorted({component_electrical_ids[index] for index in component_ids})
+
+
+def _compressed_path(path: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if len(path) < 3:
+        return path
+    compressed = [path[0]]
+    for index in range(1, len(path) - 1):
+        previous = compressed[-1]
+        current = path[index]
+        following = path[index + 1]
+        if ((previous[0] == current[0] == following[0]) or
+                (previous[1] == current[1] == following[1])):
+            continue
+        compressed.append(current)
+    compressed.append(path[-1])
+    return compressed
+
+
+def _port_endpoints(port_names: list[str], core_width: int, core_height: int,
+                    dbu_um: float, pitch_dbu: int,
+                    power_points: dict[str, tuple[int, int]],
+                    preferred_points_by_name: dict[str, tuple[int, int]] | None = None,
+                    directions_by_name: dict[str, str] | None = None) -> dict[str, tuple[int, int]]:
+    half_wire = _um_to_dbu(WIRE_WIDTH_UM / 2, dbu_um, "ML1 route half-width")
+    top_y = core_height - half_wire
+    endpoints = {name: point for name, point in power_points.items() if name in port_names}
+    signal_ports = [name for name in port_names if name not in endpoints]
+    margin = _um_to_dbu(CORE_MARGIN_UM, dbu_um, "port endpoint margin")
+    min_y = _ceil_multiple(margin, pitch_dbu)
+    max_y = (core_height - margin) // pitch_dbu * pitch_dbu
+    left_x = _ceil_multiple(margin, pitch_dbu)
+    right_x = (core_width - margin) // pitch_dbu * pitch_dbu
+    separation = _um_to_dbu(WIRE_WIDTH_UM + ML1_SPACE_UM, dbu_um,
+                            "port endpoint separation")
+    for index, name in enumerate(signal_ports):
+        preferred = (preferred_points_by_name or {}).get(name)
+        direction = (directions_by_name or {}).get(name, "").lower()
+        if direction == "input":
+            x = half_wire
+            target_y = preferred[1] if preferred else min_y + (index + 1) * (
+                max_y - min_y) // (len(signal_ports) + 1)
+            candidates = [(x, y) for y in range(min_y, max_y + 1, pitch_dbu)]
+        elif direction == "output":
+            x = core_width - half_wire
+            target_y = preferred[1] if preferred else min_y + (index + 1) * (
+                max_y - min_y) // (len(signal_ports) + 1)
+            candidates = [(x, y) for y in range(min_y, max_y + 1, pitch_dbu)]
+        else:
+            target_x = preferred[0] if preferred else left_x + (index + 1) * (
+                right_x - left_x) // (len(signal_ports) + 1)
+            candidates = [(x, top_y) for x in range(left_x, right_x + 1, pitch_dbu)]
+            target_y = top_y
+        available = [
+            (x, y) for x, y in candidates
+            if all(abs(x - px) >= separation or abs(y - py) >= separation
+                   for px, py in endpoints.values())
+        ]
+        if not available:
+            raise CoreRouterError(
+                f"no legal ML1 perimeter endpoint remains for signal port {name}")
+        if direction in ("input", "output"):
+            point = min(available, key=lambda candidate: (
+                abs(candidate[1] - target_y), candidate[1]))
+        else:
+            point = min(available, key=lambda candidate: (
+                abs(candidate[0] - target_x), candidate[0]))
+        endpoints[name] = point
+    return endpoints
+
+
+def _placement_rows(placements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_index: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for item in placements:
+        by_index[int(item.get("row_index", 0))].append(item)
+    rows = []
+    for index, members in sorted(by_index.items()):
+        members.sort(key=lambda item: (item["x_dbu"], item["instance"]))
+        rows.append({
+            "row_index": index,
+            "placements": members,
+            "bottom_dbu": min(item["y_dbu"] for item in members),
+            "top_dbu": max(item["y_dbu"] + item["height_dbu"] for item in members),
+            "left_dbu": min(item["x_dbu"] for item in members),
+            "right_dbu": max(item["x_dbu"] + item["width_dbu"] for item in members),
+        })
+    return rows
+
+
+def _adjacent_row_clusters(placements: list[dict[str, Any]],
+                           target_size: int = 4, maximum_size: int = 8
+                           ) -> list[list[dict[str, Any]]]:
+    ordered = sorted(placements, key=lambda item: (
+        int(item.get("row_index", 0)), item["x_dbu"], item["instance"]))
+    index_by_instance = {item["instance"]: index for index, item in enumerate(ordered)}
+    row_neighbors: dict[int, set[int]] = {index: set() for index in range(len(ordered))}
+    by_row: dict[int, list[int]] = defaultdict(list)
+    for index, item in enumerate(ordered):
+        by_row[int(item.get("row_index", 0))].append(index)
+    for members in by_row.values():
+        for first, second in zip(members, members[1:]):
+            row_neighbors[first].add(second)
+            row_neighbors[second].add(first)
+    sorted_rows = sorted(by_row)
+    for lower_index, upper_index in zip(sorted_rows, sorted_rows[1:]):
+        if upper_index != lower_index + 1:
+            continue
+        for first in by_row[lower_index]:
+            first_right = ordered[first]["x_dbu"] + ordered[first]["width_dbu"]
+            for second in by_row[upper_index]:
+                second_right = ordered[second]["x_dbu"] + ordered[second]["width_dbu"]
+                if max(ordered[first]["x_dbu"], ordered[second]["x_dbu"]) < min(
+                        first_right, second_right):
+                    row_neighbors[first].add(second)
+                    row_neighbors[second].add(first)
+
+    remaining = set(range(len(ordered)))
+    groups = []
+    while remaining:
+        seed = min(remaining)
+        queue = [seed]
+        group_indices = []
+        queued = {seed}
+        while queue and len(group_indices) < target_size:
+            current = queue.pop(0)
+            if current not in remaining:
+                continue
+            remaining.remove(current)
+            group_indices.append(current)
+            for neighbor in sorted(row_neighbors[current]):
+                if neighbor in remaining and neighbor not in queued:
+                    queue.append(neighbor)
+                    queued.add(neighbor)
+        groups.append([ordered[index] for index in group_indices])
+    if len(groups) > 1 and len(groups[-1]) == 1 and len(groups[-2]) < maximum_size:
+        final_member = groups[-1][0]
+        previous_indices = {
+            index_by_instance[item["instance"]] for item in groups[-2]}
+        final_index = index_by_instance[final_member["instance"]]
+        if any(final_index in row_neighbors[index] for index in previous_indices):
+            groups[-2].append(final_member)
+            groups.pop()
+    return groups
+
+
+def _power_topology_plan(topology: str, placements: list[dict[str, Any]],
+                         core_width: int, core_height: int, dbu_um: float,
+                         pitch_dbu: int) -> dict[str, Any]:
+    half_wire = _um_to_dbu(WIRE_WIDTH_UM / 2, dbu_um, "ML1 route half-width")
+    margin = _um_to_dbu(CORE_MARGIN_UM, dbu_um, "core edge rail offset")
+    vdd_offset = _um_to_dbu(12.0, dbu_um, "VDD row rail offset")
+    vss_offset = _um_to_dbu(11.0, dbu_um, "VSS row rail offset")
+    left_x = _ceil_multiple(margin // 2, pitch_dbu)
+    right_x = core_width - left_x
+    top_y = core_height - half_wire
+    boxes: list[tuple[str, tuple[int, int, int, int]]] = []
+    power_points: dict[str, tuple[int, int]] = {}
+    clusters: list[list[str]] = []
+    row_buses = []
+    routing_anchors = []
+
+    def add_routing_anchor(net: str, bounds: tuple[int, int, int, int],
+                           members: list[str] | None = None) -> None:
+        routing_anchors.append({
+            "net": net, "box_dbu": list(bounds),
+            "trunk_instances": list(members or []),
+        })
+    rows = _placement_rows(placements)
+    if len(rows) > 1:
+        required_row_gap = _um_to_dbu(
+            MULTIROW_GAP_UM, dbu_um, "minimum multirow placement gap")
+        for lower, upper in zip(rows, rows[1:]):
+            actual_gap = upper["bottom_dbu"] - lower["top_dbu"]
+            if actual_gap < required_row_gap:
+                raise CoreRouterError(
+                    f"row {upper['row_index']} begins {actual_gap * dbu_um:g}um after "
+                    f"row {lower['row_index']}; at least {MULTIROW_GAP_UM:g}um is required "
+                    "for opposing native ML1 supply bars")
+
+    def append_row_supply(row: dict[str, Any], members: list[dict[str, Any]],
+                          vdd_left: int, vdd_right: int, vss_left: int, vss_right: int,
+                          cluster_index: int | None = None) -> None:
+        row_top = row["top_dbu"]
+        row_bottom = row["bottom_dbu"]
+        vdd_bus_y = row_top + vdd_offset
+        vss_bus_y = row_bottom - vss_offset
+        if len(members) == 1:
+            item = members[0]
+            vdd_candidates = item.get("pin_anchors", {}).get("VDD", {}).get(
+                "candidate_accesses", [])
+            vss_candidates = item.get("pin_anchors", {}).get("VSS", {}).get(
+                "candidate_accesses", [])
+            vdd_access = next((candidate for candidate in vdd_candidates
+                               if candidate["window_index"] == 0), None)
+            vss_access = next((candidate for candidate in vss_candidates
+                               if candidate["window_index"] == 1), None)
+            if vdd_access is not None and vss_access is not None:
+                vdd_local = vdd_access["point_dbu"]
+                vss_local = vss_access["point_dbu"]
+                vdd_point = (item["x_dbu"] + vdd_local[0],
+                             item["y_dbu"] + vdd_local[1])
+                vss_point = (item["x_dbu"] + vss_local[0],
+                             item["y_dbu"] + vss_local[1])
+                vdd_bus = _wire_box((vdd_left, vdd_bus_y),
+                                    (vdd_point[0], vdd_bus_y), half_wire)
+                vdd_drop = _wire_box((vdd_point[0], vdd_bus_y),
+                                     vdd_point, half_wire)
+                vss_bus = _wire_box((vss_point[0], vss_bus_y),
+                                    (vss_right, vss_bus_y), half_wire)
+                vss_drop = _wire_box(vss_point,
+                                     (vss_point[0], vss_bus_y), half_wire)
+                boxes.extend((("VDD", vdd_bus), ("VDD", vdd_drop),
+                              ("VSS", vss_bus), ("VSS", vss_drop)))
+                row_buses.append({
+                    "row_index": row["row_index"],
+                    "cluster_index": cluster_index,
+                    "member_instances": [item["instance"]],
+                    "vdd_center_y_dbu": vdd_bus_y,
+                    "vss_center_y_dbu": vss_bus_y,
+                    "vdd_bbox_dbu": list(vdd_bus),
+                    "vss_bbox_dbu": list(vss_bus),
+                })
+                return
+
+        first_x = min(item["x_dbu"] for item in members)
+        last_x = max(item["x_dbu"] + item["width_dbu"] for item in members)
+        for item in members:
+            cell_left = item["x_dbu"]
+            cell_right = cell_left + item["width_dbu"]
+            cell_top = item["y_dbu"] + item["height_dbu"]
+            cell_vdd_y = cell_top + vdd_offset
+            cell_vss_y = item["y_dbu"] - vss_offset
+            center_x = _ceil_multiple(
+                cell_left + item["width_dbu"] // 2, pitch_dbu)
+            boxes.append(("VDD", (cell_left, cell_vdd_y - half_wire,
+                                  cell_right, cell_vdd_y + half_wire)))
+            if cell_vdd_y != vdd_bus_y:
+                boxes.append(("VDD", (center_x - half_wire,
+                                      min(cell_vdd_y, vdd_bus_y) - half_wire,
+                                      center_x + half_wire,
+                                      max(cell_vdd_y, vdd_bus_y) + half_wire)))
+            boxes.append(("VSS", (cell_left, cell_vss_y - half_wire,
+                                  cell_right, cell_vss_y + half_wire)))
+        boxes.append(("VDD", (vdd_left, vdd_bus_y - half_wire,
+                              vdd_right, vdd_bus_y + half_wire)))
+        boxes.append(("VSS", (vss_left, vss_bus_y - half_wire,
+                              vss_right, vss_bus_y + half_wire)))
+        row_buses.append({
+            "row_index": row["row_index"],
+            "cluster_index": cluster_index,
+            "member_instances": [item["instance"] for item in members],
+            "vdd_center_y_dbu": vdd_bus_y,
+            "vss_center_y_dbu": vss_bus_y,
+            "vdd_bbox_dbu": [vdd_left, vdd_bus_y - half_wire,
+                             vdd_right, vdd_bus_y + half_wire],
+            "vss_bbox_dbu": [vss_left, vss_bus_y - half_wire,
+                             vss_right, vss_bus_y + half_wire],
+        })
+
+    if topology == "edge_rails":
+        members = [item["instance"] for item in placements]
+        for net, y in (("VDD", top_y), ("VSS", half_wire)):
+            rail = (0, y - half_wire, core_width, y + half_wire)
+            boxes.append((net, rail))
+            add_routing_anchor(net, rail, members)
+            power_points[net] = (left_x if net == "VDD" else right_x, y)
+        description = (
+            "continuous top/bottom ML1 edge rails; each cell supply pin connects "
+            "to its designated rail through independently proven ML1 paths")
+    elif topology == "segmented_rails":
+        if not rows:
+            raise CoreRouterError("segmented rails require at least one placed cell")
+        # A 40um gap leaves 17um between opposing +12/-11um supply centers
+        # (11um edge-to-edge for 6um bars). That spaces the two supply nets,
+        # but not a third 6um signal at 4um spacing, which needs 20um between
+        # the supply centers; signal escape therefore uses perimeter channels.
+        for row in rows:
+            append_row_supply(row, row["placements"], left_x, row["right_dbu"],
+                              row["left_dbu"], right_x)
+        lowest_vdd = min(row["top_dbu"] + vdd_offset for row in rows)
+        highest_vss = max(row["bottom_dbu"] - vss_offset for row in rows)
+        vdd_spine = (left_x - half_wire, lowest_vdd - half_wire,
+                     left_x + half_wire, top_y + half_wire)
+        vss_spine = (right_x - half_wire, half_wire - half_wire,
+                     right_x + half_wire, highest_vss + half_wire)
+        vdd_rail = (0, top_y - half_wire, core_width, top_y + half_wire)
+        vss_rail = (0, 0, core_width, 2 * half_wire)
+        boxes.extend((("VDD", vdd_spine), ("VSS", vss_spine),
+                      ("VDD", vdd_rail), ("VSS", vss_rail)))
+        for row_bus in row_buses:
+            add_routing_anchor("VDD", tuple(row_bus["vdd_bbox_dbu"]),
+                               row_bus["member_instances"])
+            add_routing_anchor("VSS", tuple(row_bus["vss_bbox_dbu"]),
+                               row_bus["member_instances"])
+        add_routing_anchor("VDD", vdd_rail)
+        add_routing_anchor("VSS", vss_rail)
+        power_points = {"VDD": (left_x, top_y), "VSS": (right_x, half_wire)}
+        description = (
+            "row-band supply buses join per-cell segments; single-member rows use short "
+            "cell-to-band taps, and off-cell side spines connect row buses to the perimeter rails")
+    elif topology == "local_clusters":
+        for cluster_index, start in enumerate(range(0, len(placements), 4)):
+            members = placements[start:start + 4]
+            clusters.append([item["instance"] for item in members])
+            cluster_first_bus = len(row_buses)
+            by_row: dict[int, list[dict[str, Any]]] = defaultdict(list)
+            for item in members:
+                by_row[int(item.get("row_index", 0))].append(item)
+            cluster_vdd_y = []
+            cluster_vss_y = []
+            for row_index, row_members in sorted(by_row.items()):
+                row = next(row for row in rows if row["row_index"] == row_index)
+                row_left = min(item["x_dbu"] for item in row_members)
+                row_right = max(item["x_dbu"] + item["width_dbu"] for item in row_members)
+                if len(row_members) == 1:
+                    vdd_left, vdd_right = left_x, row_right
+                    vss_left, vss_right = row_left, right_x
+                else:
+                    vdd_left, vdd_right = row_left, row_right
+                    vss_left, vss_right = row_left, row_right
+                append_row_supply(row, row_members, vdd_left, vdd_right,
+                                  vss_left, vss_right, cluster_index)
+                vdd_y = row["top_dbu"] + vdd_offset
+                vss_y = row["bottom_dbu"] - vss_offset
+                if len(row_members) > 1:
+                    boxes.append(("VDD", _wire_box(
+                        (left_x, vdd_y), (row_left, vdd_y), half_wire)))
+                    boxes.append(("VSS", _wire_box(
+                        (row_right, vss_y), (right_x, vss_y), half_wire)))
+                cluster_vdd_y.append(vdd_y)
+                cluster_vss_y.append(vss_y)
+            cluster_instances = [item["instance"] for item in members]
+            if cluster_vdd_y and min(cluster_vdd_y) < max(cluster_vdd_y):
+                vdd_trunk = _wire_box(
+                    (left_x, min(cluster_vdd_y)), (left_x, max(cluster_vdd_y)), half_wire)
+                boxes.append(("VDD", vdd_trunk))
+                add_routing_anchor("VDD", vdd_trunk, cluster_instances)
+            else:
+                bus = row_buses[cluster_first_bus]
+                add_routing_anchor("VDD", tuple(bus["vdd_bbox_dbu"]),
+                                   bus["member_instances"])
+            if cluster_vss_y and min(cluster_vss_y) < max(cluster_vss_y):
+                vss_trunk = _wire_box(
+                    (right_x, min(cluster_vss_y)), (right_x, max(cluster_vss_y)), half_wire)
+                boxes.append(("VSS", vss_trunk))
+                add_routing_anchor("VSS", vss_trunk, cluster_instances)
+            else:
+                bus = row_buses[cluster_first_bus]
+                add_routing_anchor("VSS", tuple(bus["vss_bbox_dbu"]),
+                                   bus["member_instances"])
+        power_points = {"VDD": (left_x, top_y), "VSS": (right_x, half_wire)}
+        description = (
+            "adjacent row-member clusters use local supply trunks and off-cell side feeds; "
+            "each disconnected cluster is tied to the perimeter by proven ML1 routes")
+    else:
+        raise CoreRouterError(
+            f"power_topology must be one of edge_rails, segmented_rails, local_clusters; got {topology!r}")
+    return {
+        "topology": topology,
+        "description": description,
+        "boxes": boxes,
+        "physical_shape_count": len(boxes),
+        "power_port_points_dbu": {name: list(point) for name, point in power_points.items()},
+        "clusters": clusters,
+        "row_buses": row_buses,
+        "routing_anchors": routing_anchors,
+    }
+
+
+
 
 def _load_accepted_cell(cell_name: str, manifest_path: Path,
                         record: dict[str, Any], physical_spec: dict[str, Any]) -> dict[str, Any]:
@@ -198,11 +644,14 @@ def _load_accepted_cell(cell_name: str, manifest_path: Path,
     ml1_region = db.Region()
     for box in ml1_boxes:
         ml1_region.insert(box)
-    ml1_components = [db.Region(poly) for poly in ml1_region.merged().each()]
+    conductors = _electrical_components(boxes_by_layer, dbu_um)
+    ml1_components = conductors["components_by_layer"][ML1_LAYER]
+    ml1_electrical_ids = conductors["electrical_ids_by_layer"][ML1_LAYER]
     if not ml1_components:
         raise CoreRouterError(f"{cell_name} has no connected ML1 components")
 
     pin_components: dict[str, int] = {}
+    pin_ml1_components: dict[str, int] = {}
     pin_windows: dict[str, list[Any]] = {}
     for pin in physical_spec["pins"]:
         label_point = labels[pin].disp
@@ -210,33 +659,41 @@ def _load_accepted_cell(cell_name: str, manifest_path: Path,
         if len(label_components) != 1:
             raise CoreRouterError(
                 f"{cell_name}/{pin} text label is not on exactly one real ML1 component")
-        pin_components[pin] = label_components[0]
+        label_component = label_components[0]
+        electrical_component = ml1_electrical_ids[label_component]
+        pin_components[pin] = electrical_component
+        pin_ml1_components[pin] = label_component
         windows = []
         raw_windows = record["pins"][pin]["windows_um"]
         for window_index, values in enumerate(raw_windows):
             ticks = tuple(_um_to_dbu(value, dbu_um, f"{cell_name}/{pin} access window")
                           for value in values)
             window = db.Box(*ticks)
-            if (db.Region(window) - ml1_region).is_empty():
-                windows.append({"index": window_index, "box": window, "fully_on_ml1": True})
-            else:
-                windows.append({"index": window_index, "box": window, "fully_on_ml1": False})
+            fully_on_ml1 = (db.Region(window) - ml1_region).is_empty()
+            component_ids, window_electrical_ids = _electrical_ids_at_window(
+                window, ml1_components, ml1_electrical_ids)
+            windows.append({
+                "index": window_index,
+                "box": window,
+                "fully_on_ml1": fully_on_ml1,
+                "ml1_component_ids": component_ids,
+                "electrical_component_ids": window_electrical_ids,
+                "equivalent_to_label": electrical_component in window_electrical_ids,
+            })
         if not windows or any(not window["fully_on_ml1"] for window in windows):
             raise CoreRouterError(f"{cell_name}/{pin} access window is not fully covered by real ML1")
         if not any(window["box"].left <= label_point.x <= window["box"].right and
                    window["box"].bottom <= label_point.y <= window["box"].top
                    for window in windows):
             raise CoreRouterError(f"{cell_name}/{pin} text label is outside every accepted ML1 access window")
+        if not any(window["equivalent_to_label"] for window in windows):
+            raise CoreRouterError(
+                f"{cell_name}/{pin} has no access window electrically equivalent to its source label")
         if pin in ("VDD", "VSS"):
             for window in windows:
-                window_region = db.Region(window["box"])
-                component_ids = [
-                    index for index, component in enumerate(ml1_components)
-                    if not (window_region & component).is_empty()
-                ]
-                if component_ids != [label_components[0]]:
+                if window["electrical_component_ids"] != [electrical_component]:
                     raise CoreRouterError(
-                        f"{cell_name}/{pin} access windows do not share one local real-ML1 supply component")
+                        f"{cell_name}/{pin} access windows do not share one local real-conductor supply component")
         pin_windows[pin] = windows
 
     regions_by_layer = {}
@@ -274,9 +731,12 @@ def _load_accepted_cell(cell_name: str, manifest_path: Path,
         "boxes_by_layer": dict(boxes_by_layer),
         "ml1_boxes": ml1_boxes,
         "ml1_components": ml1_components,
+        "ml1_component_electrical_ids": ml1_electrical_ids,
         "ml1_box_component_ids": box_component_ids,
+        "conductors": conductors,
         "labels": labels,
         "pin_components": pin_components,
+        "pin_ml1_components": pin_ml1_components,
         "pin_windows": pin_windows,
         "observed_layers": sorted(observed_layers),
     }
@@ -382,46 +842,81 @@ def _source_component_owners(cell: dict[str, Any], connections: dict[str, str],
     component_nets: dict[int, set[str]] = defaultdict(set)
     for pin, component_id in cell["pin_components"].items():
         component_nets[component_id].add(connections[pin])
-    owners: dict[int, str] = {}
+    electrical_owners: dict[int, str] = {}
     for component_id, nets in component_nets.items():
         if len(nets) != 1:
             raise CoreRouterError(
-                f"{instance}/{cell['name']} has distinct mapped nets on one real ML1 component: {sorted(nets)}")
-        owners[component_id] = next(iter(nets))
+                f"{instance}/{cell['name']} has distinct mapped nets on one real ML1/TiN/CNT component: "
+                f"{sorted(nets)}")
+        electrical_owners[component_id] = next(iter(nets))
+    ml1_component_owners = {
+        index: electrical_owners[electrical_id]
+        for index, electrical_id in enumerate(cell["ml1_component_electrical_ids"])
+        if electrical_id in electrical_owners
+    }
     box_owners: list[str | None] = []
     for component_ids in cell["ml1_box_component_ids"]:
-        known_owners = {owners[index] for index in component_ids if index in owners}
+        known_owners = {ml1_component_owners[index]
+                        for index in component_ids if index in ml1_component_owners}
         if len(known_owners) > 1:
             raise CoreRouterError(f"{instance}/{cell['name']} ML1 geometry joins different canonical nets")
         box_owners.append(next(iter(known_owners)) if known_owners else None)
-    return owners, box_owners
+    return electrical_owners, box_owners
 
 
-def _choose_pin_access(cell: dict[str, Any], pin: str, pitch_dbu: int) -> tuple[int, int, int]:
+def _pin_access_candidates(cell: dict[str, Any], pin: str,
+                           pitch_dbu: int) -> list[dict[str, Any]]:
     label_point = cell["labels"][pin].disp
-    component_id = cell["pin_components"][pin]
-    best: tuple[int, int, int, int] | None = None
+    electrical_component = cell["pin_components"][pin]
+    candidates = []
+    seen = set()
+    half_wire = _um_to_dbu(WIRE_WIDTH_UM / 2, cell["dbu_um"], "pin landing half-width")
+    # A corner overlap is electrically connected but can leave a sub-6um ML1 neck.
     for window in cell["pin_windows"][pin]:
+        if not window["equivalent_to_label"]:
+            continue
         box = window["box"]
-        x_start = _ceil_multiple(box.left, pitch_dbu)
-        y_start = _ceil_multiple(box.bottom, pitch_dbu)
-        x_end = (box.right // pitch_dbu) * pitch_dbu
-        y_end = (box.top // pitch_dbu) * pitch_dbu
+        x_start = _ceil_multiple(box.left + half_wire, pitch_dbu)
+        y_start = _ceil_multiple(box.bottom + half_wire, pitch_dbu)
+        x_end = ((box.right - half_wire) // pitch_dbu) * pitch_dbu
+        y_end = ((box.top - half_wire) // pitch_dbu) * pitch_dbu
         if x_start > x_end or y_start > y_end:
             continue
         for x in range(x_start, x_end + 1, pitch_dbu):
             for y in range(y_start, y_end + 1, pitch_dbu):
                 point = db.Point(x, y)
-                if component_id not in _component_ids_at(cell["ml1_components"], point):
+                component_ids = _component_ids_at(cell["ml1_components"], point)
+                equivalent_components = [
+                    index for index in component_ids
+                    if cell["ml1_component_electrical_ids"][index] == electrical_component
+                ]
+                if not equivalent_components:
                     continue
-                candidate = (abs(x - label_point.x) + abs(y - label_point.y),
-                             window["index"], x, y)
-                if best is None or candidate < best:
-                    best = candidate
-    if best is None:
+                key = (x, y)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({
+                    "point_dbu": [x, y],
+                    "window_index": window["index"],
+                    "component_id": equivalent_components[0],
+                    "electrical_component_id": electrical_component,
+                    "distance_from_label_dbu": abs(x - label_point.x) + abs(y - label_point.y),
+                })
+    candidates.sort(key=lambda row: (row["window_index"], row["distance_from_label_dbu"],
+                                     row["point_dbu"][0], row["point_dbu"][1]))
+    if not candidates:
         raise CoreRouterError(
-            f"{cell['name']}/{pin} has no ML1 access point on the deterministic {PITCH_UM:g}um route grid")
-    return best[2], best[3], best[1]
+            f"{cell['name']}/{pin} has no electrically equivalent ML1 access point on the deterministic "
+            f"{PITCH_UM:g}um route grid")
+    return candidates
+
+
+def _choose_pin_access(cell: dict[str, Any], pin: str,
+                       pitch_dbu: int) -> tuple[int, int, int]:
+    candidate = _pin_access_candidates(cell, pin, pitch_dbu)[0]
+    return (candidate["point_dbu"][0], candidate["point_dbu"][1],
+            candidate["window_index"])
 
 
 class _ObstacleGrid:
@@ -464,37 +959,66 @@ class _ObstacleGrid:
                 return True
         return False
 
-    def route(self, start_dbu: tuple[int, int], goal_dbu: tuple[int, int],
+    def route(self, start_dbu: tuple[int, int] | list[tuple[int, int]],
+              goal_dbu: tuple[int, int] | list[tuple[int, int]],
               net: str) -> tuple[list[tuple[int, int]] | None, str, int]:
         step = self.pitch_dbu
-        if any(value % step for value in (*start_dbu, *goal_dbu)):
+        starts = ([start_dbu] if isinstance(start_dbu, tuple) and len(start_dbu) == 2 and
+                  isinstance(start_dbu[0], int) else list(start_dbu))
+        goals = ([goal_dbu] if isinstance(goal_dbu, tuple) and len(goal_dbu) == 2 and
+                 isinstance(goal_dbu[0], int) else list(goal_dbu))
+        if not starts or not goals:
+            return None, "no_route_access_candidates", 0
+        if any(value % step for point in starts + goals for value in point):
             return None, "endpoint_not_on_route_grid", 0
-        start = (start_dbu[0] // step, start_dbu[1] // step)
-        goal = (goal_dbu[0] // step, goal_dbu[1] // step)
-        if start == goal:
-            return [start_dbu], "connected_at_existing_access", 0
+        start_nodes = sorted({(point[0] // step, point[1] // step) for point in starts})
+        goal_nodes = {(point[0] // step, point[1] // step) for point in goals}
 
         def in_bounds(node: tuple[int, int]) -> bool:
             return (self.min_ix <= node[0] <= self.max_ix and
                     self.min_iy <= node[1] <= self.max_iy)
 
-        for node, label in ((start, "start"), (goal, "goal")):
-            if not in_bounds(node):
-                return None, f"{label}_outside_route_core", 0
-            if self.blocked(node, net):
-                return None, f"{label}_blocked_by_foreign_ml1", 0
+        legal_starts = [node for node in start_nodes if in_bounds(node) and not self.blocked(node, net)]
+        legal_goals = {node for node in goal_nodes if in_bounds(node) and not self.blocked(node, net)}
+        if not legal_starts:
+            reason = "start_outside_route_core" if not any(in_bounds(node) for node in start_nodes) else \
+                "start_blocked_by_foreign_ml1"
+            return None, reason, 0
+        if not legal_goals:
+            reason = "goal_outside_route_core" if not any(in_bounds(node) for node in goal_nodes) else \
+                "goal_blocked_by_foreign_ml1"
+            return None, reason, 0
+        overlap = sorted(set(legal_starts) & legal_goals)
+        if overlap:
+            point = overlap[0]
+            return [(point[0] * step, point[1] * step)], "connected_at_existing_access", 0
+
+        min_gx = min(node[0] for node in legal_goals)
+        max_gx = max(node[0] for node in legal_goals)
+        min_gy = min(node[1] for node in legal_goals)
+        max_gy = max(node[1] for node in legal_goals)
+
+        def heuristic(node: tuple[int, int]) -> int:
+            # Distance to the target-set bounding box is admissible. Pin windows
+            # contain hundreds of lattice points; scanning all of them per node
+            # makes a bounded geometric search needlessly quadratic.
+            return (max(min_gx - node[0], 0, node[0] - max_gx) +
+                    max(min_gy - node[1], 0, node[1] - max_gy))
 
         queue: list[tuple[int, int, tuple[int, int]]] = []
+        previous: dict[tuple[int, int], tuple[int, int] | None] = {}
+        costs: dict[tuple[int, int], int] = {}
         serial = 0
-        start_h = abs(start[0] - goal[0]) + abs(start[1] - goal[1])
-        heapq.heappush(queue, (start_h, serial, start))
-        previous: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-        costs = {start: 0}
+        for start in legal_starts:
+            previous[start] = None
+            costs[start] = 0
+            heapq.heappush(queue, (heuristic(start), serial, start))
+            serial += 1
         expanded = 0
         directions = ((1, 0), (0, 1), (-1, 0), (0, -1))
         while queue:
             _estimate, _serial, current = heapq.heappop(queue)
-            if current == goal:
+            if current in legal_goals:
                 path = []
                 cursor: tuple[int, int] | None = current
                 while cursor is not None:
@@ -514,9 +1038,8 @@ class _ObstacleGrid:
                     continue
                 costs[neighbor] = new_cost
                 previous[neighbor] = current
+                heapq.heappush(queue, (new_cost + heuristic(neighbor), serial, neighbor))
                 serial += 1
-                heuristic = abs(neighbor[0] - goal[0]) + abs(neighbor[1] - goal[1])
-                heapq.heappush(queue, (new_cost + heuristic, serial, neighbor))
         return None, "no_legal_ml1_path", expanded
 
 
@@ -535,62 +1058,263 @@ def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+def _centerline_length_dbu(edges: set[tuple[tuple[int, int], tuple[int, int]]]) -> int:
+    intervals: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for first, second in edges:
+        if first[0] == second[0]:
+            key = (0, first[0])
+            interval = sorted((first[1], second[1]))
+        elif first[1] == second[1]:
+            key = (1, first[1])
+            interval = sorted((first[0], second[0]))
+        else:
+            raise CoreRouterError("centerline contains a non-Manhattan segment")
+        intervals[key].append((interval[0], interval[1]))
+    total = 0
+    for spans in intervals.values():
+        spans.sort()
+        start, end = spans[0]
+        for next_start, next_end in spans[1:]:
+            if next_start <= end:
+                end = max(end, next_end)
+            else:
+                total += end - start
+                start, end = next_start, next_end
+        total += end - start
+    return total
+
+
 def _connect_net(grid: _ObstacleGrid, anchors: list[dict[str, Any]],
                  net: str) -> dict[str, Any]:
-    unique: list[tuple[int, int]] = []
-    for anchor in anchors:
-        point = tuple(anchor["point_dbu"])
-        if point not in unique:
-            unique.append(point)
-    if not unique:
-        return {"passed": False, "error": "net has no physical terminals", "paths": []}
-    connected = [unique[0]]
-    remaining = unique[1:]
+    terminals = []
+    for index, anchor in enumerate(anchors):
+        candidates = anchor.get("candidate_accesses")
+        if candidates is None:
+            candidates = [{"point_dbu": list(anchor["point_dbu"])}]
+        unique_candidates = []
+        seen = set()
+        for candidate in candidates:
+            point = tuple(candidate["point_dbu"])
+            if point in seen:
+                continue
+            seen.add(point)
+            unique_candidates.append({**candidate, "point_dbu": list(point)})
+        if unique_candidates:
+            terminals.append({"anchor_index": index, "candidates": unique_candidates,
+                              "equivalent_accesses": anchor.get("kind") == "cell_pin"})
+    if not terminals:
+        return {"passed": False, "error": "net has no physical terminals", "paths": [],
+                "terminal_accesses": [None] * len(anchors)}
+
+    selected_accesses: list[dict[str, Any] | None] = [None] * len(anchors)
+    root = terminals.pop(0)
+    selected_accesses[root["anchor_index"]] = root["candidates"][0]
+    if not root["equivalent_accesses"]:
+        root["candidates"] = root["candidates"][:1]
+    connected_terminals = [root]
+    connected_points = sorted({tuple(row["point_dbu"]) for row in root["candidates"]})
     paths = []
     expanded = 0
     last_failures = []
-    while remaining:
-        candidates = sorted((_manhattan(source, target), source, target, target)
-                            for source in connected for target in remaining)
+    while terminals:
+        terminals.sort(key=lambda terminal: min(
+            _manhattan(source, tuple(candidate["point_dbu"]))
+            for source in connected_points for candidate in terminal["candidates"]))
         selected = None
-        for _length, source, target, target_key in candidates:
-            path, reason, seen = grid.route(source, target, net)
+        for terminal in terminals:
+            targets = [tuple(candidate["point_dbu"]) for candidate in terminal["candidates"]]
+            path, reason, seen = grid.route(connected_points, targets, net)
             expanded += seen
             if path is not None:
-                selected = (source, target, target_key, path)
+                target_point = tuple(path[-1])
+                access = next(row for row in terminal["candidates"]
+                              if tuple(row["point_dbu"]) == target_point)
+                selected = (terminal, access, path)
                 break
-            last_failures.append({"source_dbu": list(source), "target_dbu": list(target),
-                                  "reason": reason, "expanded_nodes": seen})
+            last_failures.append({
+                "anchor_index": terminal["anchor_index"],
+                "candidate_count": len(targets),
+                "reason": reason,
+                "expanded_nodes": seen,
+            })
         if selected is None:
-            return {"passed": False,
-                    "error": "no legal ML1 connection could be proven for every terminal",
-                    "paths": [], "attempted_paths": paths, "expanded_nodes": expanded,
-                    "failed_pairs": last_failures[-32:]}
-        source, target, target_key, path = selected
-        paths.append({"from_dbu": list(source), "to_dbu": list(target),
-                      "target_point_dbu": list(target_key), "points_dbu": [list(p) for p in path]})
-        connected.append(target)
-        remaining.remove(target_key)
-    return {"passed": True, "paths": paths, "expanded_nodes": expanded}
+            return {
+                "passed": False,
+                "error": "no legal ML1 connection could be proven for every terminal",
+                "paths": paths,
+                "attempted_paths": paths,
+                "expanded_nodes": expanded,
+                "failed_terminals": last_failures[-32:],
+                "terminal_accesses": selected_accesses,
+            }
+        terminal, access, path = selected
+        source_point = tuple(path[0])
+        for source_terminal in connected_terminals:
+            source_access = next(
+                (candidate for candidate in source_terminal["candidates"]
+                 if tuple(candidate["point_dbu"]) == source_point), None)
+            if source_access is not None:
+                selected_accesses[source_terminal["anchor_index"]] = source_access
+        anchor_index = terminal["anchor_index"]
+        selected_accesses[anchor_index] = access
+        if not terminal["equivalent_accesses"]:
+            terminal["candidates"] = [access]
+        compressed = _compressed_path(path)
+        paths.append({
+            "target_anchor_index": anchor_index,
+            "from_dbu": list(path[0]),
+            "to_dbu": list(path[-1]),
+            "target_point_dbu": list(path[-1]),
+            "target_access": access,
+            "points_dbu": [list(point) for point in compressed],
+        })
+        connected_points.extend(path)
+        connected_points.extend(tuple(row["point_dbu"]) for row in terminal["candidates"])
+        connected_points = sorted(set(connected_points))
+        connected_terminals.append(terminal)
+        terminals.remove(terminal)
+    return {
+        "passed": True,
+        "paths": paths,
+        "expanded_nodes": expanded,
+        "terminal_accesses": selected_accesses,
+    }
+
+
+def _box_centerline_points(bounds: tuple[int, int, int, int],
+                           pitch_dbu: int, half_wire_dbu: int) -> set[tuple[int, int]]:
+    left, bottom, right, top = bounds
+    if right - left >= top - bottom:
+        y = _ceil_multiple((bottom + top) // 2, pitch_dbu)
+        first = _ceil_multiple(left + half_wire_dbu, pitch_dbu)
+        last = ((right - half_wire_dbu) // pitch_dbu) * pitch_dbu
+        return {(x, y) for x in range(first, last + 1, pitch_dbu)}
+    x = _ceil_multiple((left + right) // 2, pitch_dbu)
+    first = _ceil_multiple(bottom + half_wire_dbu, pitch_dbu)
+    last = ((top - half_wire_dbu) // pitch_dbu) * pitch_dbu
+    return {(x, y) for y in range(first, last + 1, pitch_dbu)}
+
+
+def _connect_power_net(grid: _ObstacleGrid, anchors: list[dict[str, Any]],
+                       net: str, pitch_dbu: int,
+                       half_wire_dbu: int) -> dict[str, Any]:
+    backbone_count = next((index for index, anchor in enumerate(anchors)
+                           if anchor["kind"] == "cell_pin"), len(anchors))
+    backbone = anchors[:backbone_count]
+    cell_pins = anchors[backbone_count:]
+    if not backbone:
+        return {"passed": False, "error": "power net has no planned perimeter or feedthrough",
+                "paths": [], "attempted_paths": [], "expanded_nodes": 0,
+                "failed_terminals": [], "terminal_accesses": [None] * len(anchors)}
+
+    trunk = _connect_net(grid, backbone, net)
+    trunk_accesses = list(trunk.get("terminal_accesses", []))
+    if len(trunk_accesses) < backbone_count:
+        trunk_accesses.extend([None] * (backbone_count - len(trunk_accesses)))
+    terminal_accesses = [*trunk_accesses, *([None] * len(cell_pins))]
+    paths = list(trunk.get("paths", []))
+    for path in paths:
+        points = path["points_dbu"]
+        for first, second in zip(points, points[1:]):
+            if first != second:
+                grid.add_box(_wire_box(tuple(first), tuple(second), half_wire_dbu), net)
+    grid.sort_rows()
+    if not trunk["passed"]:
+        return {
+            **trunk,
+            "paths": paths,
+            "terminal_accesses": terminal_accesses,
+            "failed_terminals": trunk.get("failed_terminals", []),
+            "power_terminal_policy": "planned_perimeter_and_trunks_before_cell_pins",
+        }
+
+    trunk_points_by_instance: dict[str, set[tuple[int, int]]] = defaultdict(set)
+    for anchor in backbone:
+        members = anchor.get("trunk_instances", [])
+        if not members:
+            continue
+        points = set()
+        bounds = anchor.get("box_dbu")
+        if bounds is not None:
+            points.update(_box_centerline_points(
+                tuple(bounds), pitch_dbu, half_wire_dbu))
+        candidates = anchor.get("candidate_accesses")
+        if candidates is None:
+            candidates = [{"point_dbu": anchor["point_dbu"]}]
+        points.update(tuple(candidate["point_dbu"]) for candidate in candidates)
+        for instance in members:
+            trunk_points_by_instance[instance].update(points)
+
+    expanded = int(trunk.get("expanded_nodes", 0))
+    failures = []
+    for index, anchor in enumerate(cell_pins, start=backbone_count):
+        designated_trunk = sorted(trunk_points_by_instance.get(anchor["instance"], ()))
+        if not designated_trunk:
+            failures.append({
+                "anchor_index": index,
+                "candidate_count": len(anchor.get("candidate_accesses", [])),
+                "reason": "no_designated_power_trunk",
+                "expanded_nodes": 0,
+            })
+            continue
+        candidates = anchor.get("candidate_accesses")
+        if candidates is None:
+            candidates = [{"point_dbu": anchor["point_dbu"]}]
+        targets = [tuple(candidate["point_dbu"]) for candidate in candidates]
+        path, reason, seen = grid.route(designated_trunk, targets, net)
+        expanded += seen
+        if path is None:
+            failures.append({
+                "anchor_index": index,
+                "candidate_count": len(targets),
+                "reason": reason,
+                "expanded_nodes": seen,
+            })
+            continue
+        target_point = tuple(path[-1])
+        access = next(candidate for candidate in candidates
+                      if tuple(candidate["point_dbu"]) == target_point)
+        terminal_accesses[index] = access
+        points = _compressed_path(path)
+        paths.append({
+            "target_anchor_index": index,
+            "from_dbu": list(path[0]),
+            "to_dbu": list(path[-1]),
+            "target_point_dbu": list(path[-1]),
+            "target_access": access,
+            "points_dbu": [list(point) for point in points],
+        })
+        for first, second in zip(points, points[1:]):
+            if first != second:
+                grid.add_box(_wire_box(first, second, half_wire_dbu), net)
+        grid.sort_rows()
+
+    result = {
+        "passed": not failures,
+        "paths": paths,
+        "attempted_paths": paths,
+        "expanded_nodes": expanded,
+        "terminal_accesses": terminal_accesses,
+        "power_terminal_policy": "planned_perimeter_then_designated_row_trunk",
+    }
+    if failures:
+        result["error"] = "no legal ML1 connection could be proven from designated power trunks"
+        result["failed_terminals"] = failures
+    return result
 
 
 def _segments_cross(first: tuple[tuple[int, int], tuple[int, int]],
                     second: tuple[tuple[int, int], tuple[int, int]]) -> tuple[int, int] | None:
-    (x1, y1), (x2, y2) = first
-    (x3, y3), (x4, y4) = second
-    first_horizontal = y1 == y2
-    second_horizontal = y3 == y4
-    if first_horizontal == second_horizontal:
-        return None
-    if first_horizontal:
-        horizontal, vertical = first, second
-    else:
-        horizontal, vertical = second, first
-    (hx1, hy), (hx2, _hy2) = horizontal
-    (vx, vy1), (_vx2, vy2) = vertical
-    if min(hx1, hx2) <= vx <= max(hx1, hx2) and min(vy1, vy2) <= hy <= max(vy1, vy2):
-        return vx, hy
-    return None
+    """Return an intersection of closed orthogonal segments, including overlaps."""
+    (ax, ay), (bx, by) = first
+    (cx, cy), (dx, dy) = second
+    if (ax != bx and ay != by) or (cx != dx and cy != dy):
+        raise CoreRouterError("crossing evidence requires orthogonal centerlines")
+    left = max(min(ax, bx), min(cx, dx))
+    right = min(max(ax, bx), max(cx, dx))
+    bottom = max(min(ay, by), min(cy, dy))
+    top = min(max(ay, by), max(cy, dy))
+    return (left, bottom) if left <= right and bottom <= top else None
 
 
 def _crossing_report(net_anchors: dict[str, list[dict[str, Any]]],
@@ -645,13 +1369,17 @@ def _crossing_report(net_anchors: dict[str, list[dict[str, Any]]],
     }
 
 
-def _prove_connectivity(top: Any, ml1_layer_index: int,
+def _prove_connectivity(top: Any, layer_indices: dict[tuple[int, int], int],
                         anchors_by_net: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    metal = db.Region()
-    for shape in top.shapes(ml1_layer_index).each():
-        if shape.is_box():
-            metal.insert(shape.box)
-    components = [db.Region(poly) for poly in metal.merged().each()]
+    boxes_by_layer: dict[tuple[int, int], list[Any]] = defaultdict(list)
+    for layer in (ML1_LAYER, (5, 0), (7, 0), (3, 0)):
+        layer_index = layer_indices[layer]
+        for shape in top.shapes(layer_index).each():
+            if shape.is_box():
+                boxes_by_layer[layer].append(shape.box)
+    conductors = _electrical_components(boxes_by_layer, float(top.layout().dbu))
+    components = conductors["components_by_layer"][ML1_LAYER]
+    ml1_electrical_ids = conductors["electrical_ids_by_layer"][ML1_LAYER]
     component_to_nets: dict[int, set[str]] = defaultdict(set)
     nets = {}
     for net, anchors in sorted(anchors_by_net.items()):
@@ -660,10 +1388,17 @@ def _prove_connectivity(top: Any, ml1_layer_index: int,
         for anchor in anchors:
             point = db.Point(*anchor["point_dbu"])
             point_ids = _component_ids_at(components, point)
-            anchor_rows.append({"kind": anchor["kind"], "instance": anchor.get("instance"),
-                                "pin": anchor.get("pin"), "point_dbu": list(anchor["point_dbu"]),
-                                "component_ids": point_ids, "on_real_ml1": bool(point_ids)})
-            ids.extend(point_ids)
+            electrical_ids = sorted({ml1_electrical_ids[index] for index in point_ids})
+            anchor_rows.append({
+                "kind": anchor["kind"],
+                "instance": anchor.get("instance"),
+                "pin": anchor.get("pin"),
+                "point_dbu": list(anchor["point_dbu"]),
+                "ml1_component_ids": point_ids,
+                "electrical_component_ids": electrical_ids,
+                "on_real_ml1": bool(point_ids),
+            })
+            ids.extend(electrical_ids)
         unique_ids = sorted(set(ids))
         for component_id in unique_ids:
             component_to_nets[component_id].add(net)
@@ -680,11 +1415,22 @@ def _prove_connectivity(top: Any, ml1_layer_index: int,
     for net in shorted_nets:
         nets[net]["connected"] = False
         nets[net]["shorted_to_other_net"] = True
+    layer_component_counts = {
+        f"{layer[0]}/{layer[1]}": len(conductors["components_by_layer"][layer])
+        for layer in ((5, 0), ML1_LAYER)
+    }
+    for layer in ((3, 0), (7, 0)):
+        region = db.Region()
+        for box in boxes_by_layer.get(layer, []):
+            region.insert(box)
+        layer_component_counts[f"{layer[0]}/{layer[1]}"] = region.merged().count()
     return {
         "passed": bool(nets) and all(row["connected"] for row in nets.values()) and not shorts,
-        "method": "merged connected components of actual ML1 shapes; labels are excluded",
+        "method": conductors["method"],
         "text_labels_used_for_connectivity": False,
-        "component_count": len(components),
+        "channel_or_diffusion_conduction_used": False,
+        "component_count": conductors["electrical_component_count"],
+        "layer_component_counts": layer_component_counts,
         "nets": nets,
         "shorts": shorts,
     }
@@ -699,14 +1445,22 @@ def _initial_evidence(output_dir: Path, base: str) -> dict[str, Any]:
         "status": "failed",
         "failed": True,
         "rankable": False,
-        "rankable_scope": "native_ml1_route_geometry_only; no process-signoff or frame-capacity claim",
+        "rankable_scope": "strict_physical_and_electrical_acceptance_only; route proof is not RFC rankability",
         "failure": None,
         "failure_reasons": [],
         "area_domain": ("flat core-router sandbox including accepted cell placement, whitespace, "
                         "and signal/power route channels; excludes I/O, ESD, SRAM, PDN, clock, "
                         "repair, and physical-only-cell integration"),
         "cell_geometry_area_um2": None,
+        "placement_width_limit_um": None,
+        "allocated_core_area_um2": None,
+        "allocated_bbox_area_um2": None,
+        "sandbox_route_area_um2": None,
         "routed_core_area_um2": None,
+        "route_proof_passed": False,
+        "power_topology": None,
+        "power_topology_plan": None,
+        "placement_constraints": None,
         "placement_bbox": None,
         "route_bbox": None,
         "overflow_count": 0,
@@ -750,15 +1504,87 @@ def _persist_evidence(path: Path, evidence: dict[str, Any]) -> None:
     path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _place_instances(instances: list[dict[str, Any]], cells: dict[str, dict[str, Any]],
+                     base_y: int, pitch_dbu: int, gap_dbu: int, margin_dbu: int,
+                     max_core_width_dbu: int | None) -> list[dict[str, Any]]:
+    placements = []
+    cursor_x = _ceil_multiple(margin_dbu, pitch_dbu)
+    row_y = base_y
+    row_height = 0
+    row_index = 0
+    row_has_cells = False
+    dbu_um = next(iter(cells.values()))["dbu_um"]
+    row_gap_dbu = (0 if max_core_width_dbu is None else
+                   _um_to_dbu(MULTIROW_GAP_UM, dbu_um, "multirow placement gap"))
+    if max_core_width_dbu is not None and max_core_width_dbu <= 2 * margin_dbu:
+        raise CoreRouterError(
+            f"max_core_width_um leaves no placement width after "
+            f"{2 * margin_dbu * dbu_um:g}um of total core margins")
+
+    for instance in instances:
+        cell = cells[instance["cell"]]
+        width_dbu = cell["width_dbu"]
+        if max_core_width_dbu is not None and width_dbu > max_core_width_dbu - 2 * margin_dbu:
+            minimum = (width_dbu + 2 * margin_dbu) * cell["dbu_um"]
+            raise CoreRouterError(
+                f"{instance['cell']} width {width_dbu * cell['dbu_um']:g}um cannot fit "
+                f"max_core_width_um={max_core_width_dbu * cell['dbu_um']:g}um after "
+                f"{2 * margin_dbu * cell['dbu_um']:g}um of total core margins; "
+                f"minimum core width is {minimum:g}um")
+
+        candidate_x = _ceil_multiple(
+            cursor_x + (gap_dbu if row_has_cells else 0), pitch_dbu)
+        if (max_core_width_dbu is not None and row_has_cells and
+                candidate_x + width_dbu > max_core_width_dbu - margin_dbu):
+            row_index += 1
+            row_y = _ceil_multiple(row_y + row_height + row_gap_dbu, pitch_dbu)
+            cursor_x = _ceil_multiple(margin_dbu, pitch_dbu)
+            row_height = 0
+            row_has_cells = False
+            candidate_x = cursor_x
+
+        x = candidate_x
+        y = row_y
+        _, box_owners = _source_component_owners(
+            cell, instance["connections"], instance["name"])
+        pin_anchors = {}
+        for pin in cell["spec"]["pins"]:
+            candidates = _pin_access_candidates(cell, pin, pitch_dbu)
+            first = candidates[0]
+            pin_anchors[pin] = {
+                "local_dbu": first["point_dbu"],
+                "window_index": first["window_index"],
+                "component_id": first["component_id"],
+                "candidate_accesses": candidates,
+            }
+        placements.append({
+            "instance": instance["name"],
+            "cell": instance["cell"],
+            "connections": instance["connections"],
+            "x_dbu": x,
+            "y_dbu": y,
+            "width_dbu": width_dbu,
+            "height_dbu": cell["height_dbu"],
+            "row_index": row_index,
+            "box_owners": box_owners,
+            "pin_anchors": pin_anchors,
+        })
+        cursor_x = x + width_dbu
+        row_height = max(row_height, cell["height_dbu"])
+        row_has_cells = True
+    return placements
+
+
 def route_core(netlist: dict[str, Any] | str | Path | None,
                output_dir: str | Path, *,
                manifest_path: str | Path | None = None,
-               top_name: str | None = None) -> dict[str, Any]:
+               top_name: str | None = None,
+               power_topology: str = "edge_rails",
+               max_core_width_um: float | None = None) -> dict[str, Any]:
     """Place and route a canonical mapped netlist, or the default tiny benchmark.
 
-    The function always attempts to retain JSON route evidence.  A routing or
-    proof failure returns ``status == 'failed'`` and ``rankable == False``; it
-    never converts an incomplete candidate into a pass.
+    ``max_core_width_um`` enables deterministic row packing within a geometric
+    core-width cap; ``None`` preserves the original single horizontal row.
     """
     out = Path(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -770,6 +1596,18 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
     evidence = _initial_evidence(out, base)
     stage = "load_library"
     try:
+        evidence["power_topology"] = power_topology
+        if max_core_width_um is not None:
+            if (isinstance(max_core_width_um, bool) or
+                    not isinstance(max_core_width_um, (int, float)) or
+                    not math.isfinite(float(max_core_width_um)) or max_core_width_um <= 0):
+                raise CoreRouterError("max_core_width_um must be a finite positive number")
+            evidence["placement_width_limit_um"] = float(max_core_width_um)
+        else:
+            evidence["placement_width_limit_um"] = None
+        if power_topology not in ("edge_rails", "segmented_rails", "local_clusters"):
+            raise CoreRouterError(
+                "power_topology must be one of edge_rails, segmented_rails, local_clusters")
         selected_manifest = Path(manifest_path).resolve() if manifest_path is not None else library.DEFAULT_MANIFEST.resolve()
         manifest = library.load_library(selected_manifest, check=True)
         accepted_specs = library.physical_specs(selected_manifest)
@@ -828,36 +1666,99 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
 
         stage = "place_cells"
         base_y = _ceil_multiple(margin_dbu, pitch_dbu)
-        cursor_x = _ceil_multiple(margin_dbu, pitch_dbu)
-        placements = []
-        for instance in design["instances"]:
-            cell = cells[instance["cell"]]
-            x = _ceil_multiple(cursor_x, pitch_dbu)
-            y = base_y
-            _, box_owners = _source_component_owners(
-                cell, instance["connections"], instance["name"])
-            pin_anchors = {}
-            for pin in cell["spec"]["pins"]:
-                ax, ay, window_index = _choose_pin_access(cell, pin, pitch_dbu)
-                pin_anchors[pin] = {"local_dbu": [ax, ay], "window_index": window_index,
-                                    "component_id": cell["pin_components"][pin]}
-            placements.append({"instance": instance["name"], "cell": instance["cell"],
-                               "connections": instance["connections"], "x_dbu": x, "y_dbu": y,
-                               "width_dbu": cell["width_dbu"], "height_dbu": cell["height_dbu"],
-                               "box_owners": box_owners, "pin_anchors": pin_anchors})
-            cursor_x = x + cell["width_dbu"] + gap_dbu
+        max_core_width_dbu = (
+            None if max_core_width_um is None else
+            _um_to_dbu(float(max_core_width_um), dbu_um, "max_core_width_um"))
+        row_gap_dbu = (0 if max_core_width_dbu is None else
+                       _um_to_dbu(MULTIROW_GAP_UM, dbu_um, "multirow placement gap"))
+        if max_core_width_dbu is not None and max_core_width_dbu <= 0:
+            raise CoreRouterError("max_core_width_um must be at least one source DBU")
+        placements = _place_instances(
+            design["instances"], cells, base_y, pitch_dbu, gap_dbu, margin_dbu,
+            max_core_width_dbu)
         placement_left = min(item["x_dbu"] for item in placements)
         placement_bottom = min(item["y_dbu"] for item in placements)
         placement_right = max(item["x_dbu"] + item["width_dbu"] for item in placements)
         placement_top = max(item["y_dbu"] + item["height_dbu"] for item in placements)
         port_names = list(design["ports"])
-        port_xs = {name: margin_dbu + (index + 1) * port_spacing_dbu
-                   for index, name in enumerate(port_names)}
         track_y = _ceil_multiple(placement_top + route_channel_dbu, pitch_dbu)
-        core_width = _ceil_multiple(max(placement_right + margin_dbu,
-                                      margin_dbu + (len(port_names) + 1) * port_spacing_dbu + margin_dbu),
-                                    pitch_dbu)
+        minimum_port_width_dbu = (
+            margin_dbu + (len(port_names) + 1) * port_spacing_dbu + margin_dbu)
+        required_width_dbu = max(placement_right + margin_dbu, minimum_port_width_dbu)
+        core_width = _ceil_multiple(required_width_dbu, pitch_dbu)
+        if max_core_width_dbu is not None and core_width > max_core_width_dbu:
+            raise CoreRouterError(
+                f"max_core_width_um={max_core_width_dbu * dbu_um:g}um cannot accommodate "
+                f"the placed cells and {len(port_names)} perimeter ports; at least "
+                f"{core_width * dbu_um:g}um is required")
         core_height = _ceil_multiple(track_y + margin_dbu, pitch_dbu)
+        evidence["placement_constraints"] = {
+            "strategy": ("bounded_width_first_fit_rows" if max_core_width_dbu is not None
+                         else "single_horizontal_row"),
+            "max_core_width_um": (None if max_core_width_dbu is None
+                                  else max_core_width_dbu * dbu_um),
+            "width_units": "um",
+            "row_gap_um": (None if max_core_width_dbu is None else row_gap_dbu * dbu_um),
+            "row_gap_basis": ("40um conservative engineering routing channel; not a qualified row pitch"
+                              if max_core_width_dbu is not None else None),
+            "placement_gap_um": gap_dbu * dbu_um,
+            "site_qualified": False,
+            "rows_qualified": False,
+        }
+        power_plan = _power_topology_plan(
+            power_topology, placements, core_width, core_height, dbu_um, pitch_dbu)
+        core_bounds = (0, 0, core_width, core_height)
+        for net, bounds in power_plan["boxes"]:
+            if (bounds[0] < core_bounds[0] or bounds[1] < core_bounds[1] or
+                    bounds[2] > core_bounds[2] or bounds[3] > core_bounds[3]):
+                raise CoreRouterError(
+                    f"{net} power topology shape {bounds} exceeds actual core bounds {core_bounds}")
+        preferred_points = {}
+        for port in port_names:
+            pin_points = sorted(
+                (item["x_dbu"] + item["pin_anchors"][pin]["candidate_accesses"][0]["point_dbu"][0],
+                 item["y_dbu"] + item["pin_anchors"][pin]["candidate_accesses"][0]["point_dbu"][1])
+                for item in placements for pin, net in item["connections"].items()
+                if net == port)
+            if pin_points:
+                preferred_points[port] = pin_points[(len(pin_points) - 1) // 2]
+        port_anchors = _port_endpoints(
+            port_names, core_width, core_height, dbu_um, pitch_dbu,
+            {name: tuple(point)
+             for name, point in power_plan["power_port_points_dbu"].items()},
+            preferred_points, design["ports"])
+        vdd_offset_dbu = _um_to_dbu(12.0, dbu_um, "VDD row rail offset")
+        vss_offset_dbu = _um_to_dbu(11.0, dbu_um, "VSS row rail offset")
+        rows = _placement_rows(placements)
+        row_gaps_dbu = [
+            rows[index + 1]["bottom_dbu"] - rows[index]["top_dbu"]
+            for index in range(len(rows) - 1)
+        ]
+        evidence["power_topology_plan"] = {
+            "topology": power_plan["topology"],
+            "description": power_plan["description"],
+            "coordinate_units": "dbu",
+            "dbu_um": dbu_um,
+            "physical_shape_count": power_plan["physical_shape_count"],
+            "power_port_points_dbu": power_plan["power_port_points_dbu"],
+            "physical_boxes_dbu": [
+                {"net": net, "box_dbu": list(bounds)}
+                for net, bounds in power_plan["boxes"]
+            ],
+            "row_buses": power_plan["row_buses"],
+            "row_gap_um": [value * dbu_um for value in row_gaps_dbu],
+            "opposing_row_rail_center_spacing_um": (
+                [
+                    ((rows[index + 1]["bottom_dbu"] - vss_offset_dbu) -
+                     (rows[index]["top_dbu"] + vdd_offset_dbu)) * dbu_um
+                    for index in range(len(rows) - 1)
+                ] if power_plan["topology"] in ("segmented_rails", "local_clusters")
+                else []),
+            "minimum_ml1_center_spacing_um": WIRE_WIDTH_UM + ML1_SPACE_UM,
+            "physical_shapes_inside_actual_core_boundary": True,
+            "pdn_claimed": False,
+            "clusters": power_plan["clusters"],
+        }
         evidence["placement_bbox"] = {
             "bbox_um": [placement_left * dbu_um, placement_bottom * dbu_um,
                         placement_right * dbu_um, placement_top * dbu_um],
@@ -865,18 +1766,42 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                                          (placement_top - placement_bottom) * dbu_um * dbu_um),
             "cell_geometry_area_um2": sum(cells[item["cell"]]["area_um2"] for item in placements),
             "cell_count": len(placements),
+            "row_count": len(rows),
+            "row_gap_um": (row_gaps_dbu[0] * dbu_um if row_gaps_dbu else None),
             "site_or_row_qualification": None,
         }
         evidence["cell_geometry_area_um2"] = sum(
             cells[item["cell"]]["area_um2"] for item in placements)
-        evidence["routed_core_area_um2"] = float(core_width * core_height * dbu_um * dbu_um)
+        allocated_area_um2 = float(core_width * core_height * dbu_um * dbu_um)
+        evidence["allocated_core_area_um2"] = allocated_area_um2
+        evidence["allocated_bbox_area_um2"] = allocated_area_um2
+        evidence["sandbox_route_area_um2"] = allocated_area_um2
+        evidence["routed_core_area_um2"] = None
+        row_bands = [
+            {
+                "row_index": row["row_index"],
+                "bbox_um": [row["left_dbu"] * dbu_um, row["bottom_dbu"] * dbu_um,
+                            row["right_dbu"] * dbu_um, row["top_dbu"] * dbu_um],
+                "height_um": (row["top_dbu"] - row["bottom_dbu"]) * dbu_um,
+                "instances": [item["instance"] for item in row["placements"]],
+            }
+            for row in rows
+        ]
         evidence["placement"] = {
             "orientation": "R0",
+            "strategy": evidence["placement_constraints"]["strategy"],
+            "max_core_width_um": evidence["placement_constraints"]["max_core_width_um"],
             "gap_um": gap_dbu * dbu_um,
+            "row_gap_um": evidence["placement_constraints"]["row_gap_um"],
+            "row_gap_basis": evidence["placement_constraints"]["row_gap_basis"],
+            "row_bands": row_bands,
             "site_qualified": False,
             "rows_qualified": False,
+            "allocated_bbox_um": [0.0, 0.0, core_width * dbu_um, core_height * dbu_um],
+            "allocated_bbox_area_um2": allocated_area_um2,
             "instances": [
                 {"instance": item["instance"], "cell": item["cell"],
+                 "row_index": item["row_index"],
                  "origin_um": [item["x_dbu"] * dbu_um, item["y_dbu"] * dbu_um],
                  "bbox_um": [item["x_dbu"] * dbu_um, item["y_dbu"] * dbu_um,
                              (item["x_dbu"] + item["width_dbu"]) * dbu_um,
@@ -902,6 +1827,10 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
             for layer, boxes in cell["boxes_by_layer"].items():
                 for box_index, box in enumerate(boxes):
                     transformed = box.transformed(transform)
+                    if (transformed.left < 0 or transformed.bottom < 0 or
+                            transformed.right > core_width or transformed.top > core_height):
+                        raise CoreRouterError(
+                            f"{placed['instance']} source geometry exceeds actual core bounds")
                     output_cell.shapes(output_layers[layer]).insert(transformed)
                     copied_shape_counts[f"{layer[0]}/{layer[1]}"] += 1
                     if layer == ML1_LAYER:
@@ -911,10 +1840,13 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                         ml1_obstacles.append((bounds, owner))
             for pin in cell["spec"]["pins"]:
                 anchor = placed["pin_anchors"][pin]
-                point = (placed["x_dbu"] + anchor["local_dbu"][0],
-                         placed["y_dbu"] + anchor["local_dbu"][1])
-                chosen_window = cell["pin_windows"][pin][anchor["window_index"]]["box"]
-                placed_window = chosen_window.transformed(transform)
+                candidate_accesses = [
+                    {**candidate,
+                     "point_dbu": [placed["x_dbu"] + candidate["point_dbu"][0],
+                                   placed["y_dbu"] + candidate["point_dbu"][1]]}
+                    for candidate in anchor["candidate_accesses"]
+                ]
+                point = tuple(candidate_accesses[0]["point_dbu"])
                 label_point = transform * cell["labels"][pin].disp
                 net = placed["connections"][pin]
                 access = {
@@ -922,21 +1854,67 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                     "net": net, "layer": "ML1", "point_dbu": list(point),
                     "point_um": [point[0] * dbu_um, point[1] * dbu_um],
                     "source_text_point_um": [label_point.x * dbu_um, label_point.y * dbu_um],
-                    "selected_window_index": anchor["window_index"],
-                    "selected_window_um": _bbox_um(placed_window, dbu_um),
+                    "selected_window_index": candidate_accesses[0]["window_index"],
+                    "selected_window_um": _bbox_um(
+                        cell["pin_windows"][pin][candidate_accesses[0]["window_index"]]["box"].transformed(transform),
+                        dbu_um),
+                    "electrically_equivalent_window_indices": [
+                        window["index"] for window in cell["pin_windows"][pin]
+                        if window["equivalent_to_label"]],
+                    "candidate_access_count": len(candidate_accesses),
                     "all_source_windows_fully_on_real_ml1": True,
                     "source_ml1_component_id": anchor["component_id"],
+                    "source_electrical_component_id": cell["pin_components"][pin],
                     "label_used_as_connectivity_evidence": False,
                 }
                 pin_access_rows.append(access)
-                anchors_by_net[net].append({"kind": "cell_pin", "instance": placed["instance"],
-                                            "pin": pin, "point_dbu": list(point)})
+                anchors_by_net[net].append({
+                    "kind": "cell_pin",
+                    "instance": placed["instance"],
+                    "pin": pin,
+                    "row_index": placed["row_index"],
+                    "point_dbu": list(point),
+                    "candidate_accesses": candidate_accesses,
+                })
 
-        port_anchors = {}
-        for name in port_names:
-            point = (port_xs[name], track_y)
-            port_anchors[name] = point
-            anchors_by_net[name].append({"kind": "top_level_net_endpoint", "point_dbu": list(point)})
+        native_supply_ml1 = {net: db.Region() for net in ("VDD", "VSS")}
+        for bounds, owner in ml1_obstacles:
+            if owner in native_supply_ml1:
+                native_supply_ml1[owner].insert(db.Box(*bounds))
+        for net, bounds in power_plan["boxes"]:
+            output_cell.shapes(output_layers[ML1_LAYER]).insert(db.Box(*bounds))
+            ml1_obstacles.append((bounds, net))
+        for route_anchor in power_plan["routing_anchors"]:
+            net = route_anchor["net"]
+            bounds = tuple(route_anchor["box_dbu"])
+            pdn_anchor = {
+                "kind": "pdn_geometry",
+                "point_dbu": [((bounds[0] + bounds[2]) // 2) // pitch_dbu * pitch_dbu,
+                              ((bounds[1] + bounds[3]) // 2) // pitch_dbu * pitch_dbu],
+                "box_dbu": list(bounds),
+                "trunk_instances": route_anchor["trunk_instances"],
+            }
+            anchors_by_net[net].append(pdn_anchor)
+        for name, point in port_anchors.items():
+            candidates = [list(point)]
+            if name not in ("VDD", "VSS"):
+                half = _um_to_dbu(WIRE_WIDTH_UM / 2, dbu_um, "port wire half-width")
+                direction = design["ports"][name].lower()
+                sides = ([half] if direction == "input" else
+                         [core_width - half] if direction == "output" else
+                         [half, core_width - half])
+                candidates = [[x, y] for x in sides
+                              for y in range(half, core_height - half + 1, pitch_dbu)]
+            anchors_by_net[name].append({
+                "kind": "top_level_net_endpoint",
+                "point_dbu": list(point),
+                "candidate_accesses": [{"point_dbu": candidate} for candidate in candidates],
+            })
+        for net in ("VDD", "VSS"):
+            anchors_by_net[net].sort(
+                key=lambda anchor: (
+                    0 if anchor["kind"] == "top_level_net_endpoint" else
+                    1 if anchor["kind"] == "pdn_geometry" else 2))
 
         grid = _ObstacleGrid(core_width, core_height, dbu_um, pitch_dbu)
         for bounds, owner in ml1_obstacles:
@@ -946,7 +1924,7 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
         stage = "route_ml1_nets"
         ordered_nets = sorted(
             anchors_by_net,
-            key=lambda net: (0 if net in ("VDD", "VSS") else 1,
+            key=lambda net: (0 if net == "VSS" else 1 if net == "VDD" else 2,
                              -len(anchors_by_net[net]), net))
         route_records = {}
         route_edges: dict[str, set[tuple[tuple[int, int], tuple[int, int]]]] = {}
@@ -954,13 +1932,23 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
         route_failures = []
         half_wire_dbu = _um_to_dbu(WIRE_WIDTH_UM / 2, dbu_um, "ML1 route half-width")
         for net in ordered_nets:
-            route = _connect_net(grid, anchors_by_net[net], net)
+            if net in ("VDD", "VSS"):
+                route = _connect_power_net(
+                    grid, anchors_by_net[net], net, pitch_dbu, half_wire_dbu)
+            else:
+                route = _connect_net(grid, anchors_by_net[net], net)
             route_records[net] = route
             if not route["passed"]:
                 route_failures.append({"net": net, "stage": "route_ml1_nets",
                                        "error": route["error"],
-                                       "failed_pairs": route.get("failed_pairs", [])})
-                continue
+                                       "failed_terminals": route.get("failed_terminals", [])})
+            for anchor, selected_access in zip(
+                    anchors_by_net[net], route.get("terminal_accesses", [])):
+                if selected_access is not None:
+                    anchor["point_dbu"] = list(selected_access["point_dbu"])
+                    anchor["selected_access"] = selected_access
+                    if anchor["kind"] == "top_level_net_endpoint":
+                        port_anchors[net] = tuple(selected_access["point_dbu"])
             edges = set()
             boxes = set()
             for path_record in route["paths"]:
@@ -971,24 +1959,71 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                         boxes.add(_wire_box(first, second, half_wire_dbu))
             route_edges[net] = edges
             for bounds in sorted(boxes):
+                if (bounds[0] < 0 or bounds[1] < 0 or
+                        bounds[2] > core_width or bounds[3] > core_height):
+                    raise CoreRouterError(
+                        f"{net} router-generated ML1 shape {bounds} exceeds actual core bounds "
+                        f"{core_bounds}")
                 output_cell.shapes(output_layers[ML1_LAYER]).insert(db.Box(*bounds))
                 routed_boxes.append((net, bounds))
-                grid.add_box(bounds, net)
+                if net not in ("VDD", "VSS"):
+                    grid.add_box(bounds, net)
             grid.sort_rows()
+
+        added_supply_ml1 = {net: db.Region() for net in ("VDD", "VSS")}
+        for net, bounds in [*power_plan["boxes"], *routed_boxes]:
+            if net in added_supply_ml1:
+                added_supply_ml1[net].insert(db.Box(*bounds))
+        supply_area = {
+            net: float((region.merged() - native_supply_ml1[net]).area()) * dbu_um * dbu_um
+            for net, region in added_supply_ml1.items()}
+        evidence["power_topology_plan"]["added_ml1_area_um2_by_net"] = supply_area
+        evidence["power_topology_plan"]["added_ml1_area_um2"] = sum(supply_area.values())
+        evidence["power_topology_plan"]["cost_scope"] = (
+            "actual union of added supply ML1 minus pre-existing supply ML1; not IR-drop qualification")
 
         for net in ordered_nets:
             route = route_records[net]
-            route["wire_length_um"] = (sum(_manhattan(*edge) for edge in route_edges.get(net, set())) *
-                                       dbu_um)
+            route["wire_length_um"] = _centerline_length_dbu(route_edges.get(net, set())) * dbu_um
+            for path in route["paths"]:
+                points = [tuple(point) for point in path["points_dbu"]]
+                length = sum(_manhattan(first, second) for first, second in zip(points, points[1:]))
+                path["wire_length_um"] = length * dbu_um
+                path["detour_um"] = (length - _manhattan(points[0], points[-1])) * dbu_um
             route["wire_layer"] = "ML1"
             route["terminal_count"] = len(anchors_by_net[net])
         evidence["net_routes"] = route_records
         evidence["overflow_count"] = len(route_failures)
         evidence["failure_reasons"].extend(route_failures)
 
-        stage = "prove_ml1_connectivity"
-        ml1_layer_index = output_layers[ML1_LAYER]
-        connectivity = _prove_connectivity(output_cell, ml1_layer_index, anchors_by_net)
+        for access in pin_access_rows:
+            anchor = next(row for row in anchors_by_net[access["net"]]
+                          if row["kind"] == "cell_pin" and
+                          row["instance"] == access["instance"] and row["pin"] == access["pin"])
+            candidates = anchor["candidate_accesses"]
+            blocked = sum(grid.blocked((row["point_dbu"][0] // pitch_dbu,
+                                        row["point_dbu"][1] // pitch_dbu), access["net"])
+                          for row in candidates)
+            access["blocked_access_candidate_count"] = blocked
+            access["legal_access_candidate_count"] = len(candidates) - blocked
+            access["landing_width_um"] = WIRE_WIDTH_UM
+            selected = anchor.get("selected_access")
+            if selected is None:
+                access["selected_anchor_on_real_ml1"] = False
+                continue
+            access["point_dbu"] = list(anchor["point_dbu"])
+            access["point_um"] = [coordinate * dbu_um for coordinate in anchor["point_dbu"]]
+            access["selected_window_index"] = selected.get("window_index")
+            access["selected_component_id"] = selected.get("component_id")
+            placed = next(item for item in placements if item["instance"] == access["instance"])
+            cell = cells[placed["cell"]]
+            transform = db.Trans(db.Trans.R0, db.Point(placed["x_dbu"], placed["y_dbu"]))
+            selected_window = cell["pin_windows"][access["pin"]][
+                access["selected_window_index"]]["box"].transformed(transform)
+            access["selected_window_um"] = _bbox_um(selected_window, dbu_um)
+
+        stage = "prove_physical_connectivity"
+        connectivity = _prove_connectivity(output_cell, output_layers, anchors_by_net)
         evidence["connectivity"] = connectivity
         for access in pin_access_rows:
             net_result = connectivity["nets"][access["net"]]
@@ -1003,13 +2038,14 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                        if row["connected"] and route_records[net]["passed"]}
         if connectivity["shorts"]:
             evidence["failure_reasons"].extend(
-                {"stage": "prove_ml1_connectivity", "error": "distinct nets share one ML1 component",
+                {"stage": "prove_physical_connectivity",
+                 "error": "distinct nets share one actual ML1/TiN/CNT electrical component",
                  **short} for short in connectivity["shorts"])
         for net, row in component_nets.items():
             if not row["connected"] and route_records[net]["passed"]:
                 evidence["failure_reasons"].append(
-                    {"stage": "prove_ml1_connectivity", "net": net,
-                     "error": "all ML1 terminal components could not be proven connected"})
+                    {"stage": "prove_physical_connectivity", "net": net,
+                     "error": "all actual-conductor terminal components could not be proven connected"})
 
         stage = "write_gds"
         text_labels = []
@@ -1019,9 +2055,8 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
             for pin in cell["spec"]["pins"]:
                 net = placed["connections"][pin]
                 if net in proven_nets:
-                    label_name = net
-                else:
-                    label_name = f"UNROUTED_{_safe_slug(placed['instance'])}_{pin}_{hashlib.sha256((placed['instance'] + '/' + pin).encode()).hexdigest()[:8].upper()}"
+                    continue
+                label_name = f"UNROUTED_{_safe_slug(placed['instance'])}_{pin}_{hashlib.sha256((placed['instance'] + '/' + pin).encode()).hexdigest()[:8].upper()}"
                 label_trans = transform * cell["labels"][pin]
                 output_cell.shapes(output_layers[TEXT_LAYER]).insert(db.Text(label_name, label_trans))
                 text_labels.append({"instance": placed["instance"], "pin": pin,
@@ -1045,6 +2080,7 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
         evidence["native_shape_counts"] = {
             "copied_cell_geometry_by_layer": dict(sorted(copied_shape_counts.items())),
             "added_ml1_route_rectangles": len(routed_boxes),
+            "added_ml1_power_topology_shapes": power_plan["physical_shape_count"],
             "accepted_source_layers_by_cell": {
                 name: [list(layer) for layer in cells[name]["observed_layers"]]
                 for name in used_cells
@@ -1088,7 +2124,7 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                 evidence["overflow_count"] += max(1, len(evidence["failure_reasons"]))
             evidence["failure"] = {
                 "stage": stage,
-                "error": "one or more routes or native-geometry proofs failed",
+                "error": "one or more routes or physical-conductor proofs failed",
                 "failed_nets": sorted({row["net"] for row in route_failures} |
                                       {net for net, result in connectivity["nets"].items()
                                        if not result["connected"]}),
@@ -1097,7 +2133,7 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
                 evidence["failure_reasons"].append(evidence["failure"])
         evidence["route_proof_passed"] = bool(proof)
         evidence["failed"] = not bool(proof)
-        evidence["rankable"] = bool(proof)
+        evidence["rankable"] = False
         evidence["status"] = "route_proof_passed" if proof else "failed"
         evidence["route_geometry"] = {
             "grid_pitch_um": PITCH_UM,
@@ -1143,8 +2179,13 @@ def route_core(netlist: dict[str, Any] | str | Path | None,
         evidence["area_metrics"] = {
             "cell_geometry_area_um2": evidence["cell_geometry_area_um2"],
             "placement_bbox_area_um2": evidence["placement_bbox"]["placement_bbox_area_um2"],
-            "routed_core_area_um2": evidence["routed_core_area_um2"],
-            "routed_core_area_domain": "router sandbox only; not frame capacity or floorplan feasibility",
+            "allocated_core_area_um2": evidence["allocated_core_area_um2"],
+            "allocated_bbox_area_um2": evidence["allocated_bbox_area_um2"],
+            "sandbox_route_area_um2": evidence["sandbox_route_area_um2"],
+            "routed_core_area_um2": None,
+            "routed_core_area_domain": (
+                "reserved for strict physical/electrical acceptance plus integrated PDN; "
+                "this route sandbox does not establish it"),
             "core_bbox_um": [0.0, 0.0, core_width * dbu_um, core_height * dbu_um],
         }
         evidence["provenance_hashes"]["accepted_gds_sha256_by_cell"] = {
@@ -1188,11 +2229,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="output directory for flat GDS, reference SPICE, and route JSON")
     parser.add_argument("--manifest", help="accepted physical-cell manifest override")
     parser.add_argument("--top-name", help="optional safe top-cell/SPICE subcircuit name")
+    parser.add_argument("--power-topology", choices=("edge_rails", "segmented_rails", "local_clusters"),
+                        default="edge_rails",
+                        help="physical ML1 supply layout to compare in the sandbox")
     args = parser.parse_args(argv)
     evidence = route_core(args.netlist, args.out, manifest_path=args.manifest,
-                          top_name=args.top_name)
+                          top_name=args.top_name, power_topology=args.power_topology)
     print(json.dumps(evidence, indent=2, sort_keys=True))
-    return 0 if evidence.get("rankable") else 2
+    return 0 if evidence.get("route_proof_passed") else 2
 
 
 if __name__ == "__main__":  # pragma: no cover - command-line entry point

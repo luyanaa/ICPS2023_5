@@ -1,0 +1,7 @@
+* Charge-only overlap candidate library selector.
+* Mirrors icps2023_5.lib.spice's b4soi section but selects the charge-only
+* candidate cards instead of the frozen cards.  DC behaviour is identical by
+* construction (CGSO/CGDO are pure capacitance parameters).
+.lib b4soi
+.include "models/b4soi_overlap_candidate.inc"
+.endl b4soi

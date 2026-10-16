@@ -55,8 +55,10 @@ libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds
   unchanged.
 
 libs.tech/ngspice/
-  models/icps2023_5_b4soi.inc is the active stage-1 BSIMSOI v4.4 (ngspice
-  LEVEL=58) fit. VTH0 is anchored to the PDK p.7 table; graph-derived output
+  models/icps2023_5_b4soi.inc is the frozen stage-1 PD reference (SOIMOD=0,
+  BSIMSOI v4.4/ngspice LEVEL=58), retained by the compatibility selector.
+  This does not assign physical depletion mode to NMOS or PMOS. VTH0 is
+  anchored to the PDK p.7 table; graph-derived output
   and transfer curves set the other documented fit parameters. TSI/TBOX are
   initial values from the dated 2021 AIST cross-section, not a validated
   2023 production-stack characterization; XJ=50 nm is an explicit
@@ -69,6 +71,16 @@ libs.tech/ngspice/
   BSIM3SOI cards and their converter were removed in the B4SOI cutover.
   The active selector is .lib b4soi in icps2023_5.lib.spice. Passives include
   separate compatibility approximations; see libs.tech/ngspice/README.md.
+  audit/b4soi_depletion_mode.md separates this process revision's evidence
+  from external FD/PD context and records the isolated 0/1/2 sensitivity
+  audit. Candidate generation changes only SOIMOD from the frozen/overlap
+  bases; it is not FD migration, silicon calibration, or nominal selection.
+  External context: 2022 Minimal Fab FD/PD NMOS comparison,
+  https://doi.org/10.11470/jsapmeeting.2022.2.0_2726 ; SMeRL's independent,
+  non-foundry tutorial/design notes, https://smerl.jp/minimal-fc/ and
+  https://smerl.jp/minimal-dt/ ; historical Technology 2018 announcement,
+  https://global.jaxa.jp/press/2019/05/20190510a.html . Model/terminal meanings:
+  https://ngspice.sourceforge.io/external-documents/models/BSIMSOIv4.4_UsersManual.pdf .
 
 libs.tech/klayout/
   tech.lyt, layer properties and legacy macro assets originate in the original

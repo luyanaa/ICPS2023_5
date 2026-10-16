@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Deterministic, unpublished sequential-cell closure experiments.
+"""Unpublished native-1M sequential-cell physical and storage experiments.
 
-This runner uses only the native ICPS2023_5_1m physical verifier. It records
-logical-model and postlayout capture/hold evidence as separate stages, never
-publishes a cell, and never ranks candidates. Cell geometry area is not routed
-core area or placement qualification.
+Channel geometry is the default; compact_rows is available only when explicitly
+selected. Postlayout storage results are nominal-model timing-feasibility evidence,
+never publication, placement, clock, or process qualification.
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import importlib
-import itertools
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Iterable
@@ -21,11 +20,17 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[2]
 STD_CELL_SOURCE = Path(__file__).resolve().parent
 TARGET_CELLS = ("LATCH_TG_X1", "LATCH_GATE_X1", "DFF_TG_X1", "DFF_GATE_X1")
-SWEEP_HEIGHTS_UM = (210.0, 230.0, 250.0)
-SWEEP_ROUTE_CHANNELS_UM = (40.0, 0.0, 80.0)
-SWEEP_PIN_ORDER_VARIANTS = ("declared", "reverse_signals")
-SWEEP_MIRRORS = (False, True)
-STATE_LOAD_FF = 10.0
+ARCHITECTURES = ("channel", "compact_rows")
+DEFAULT_ARCHITECTURE = "channel"
+TALLER_HEIGHT_DELTA_UM = 50.0
+DEFAULT_ROUTE_CHANNEL_UM = 0.0
+LOGICAL_REFERENCE_AUX_STATE_LOAD_FF = 10.0
+LOGICAL_REFERENCE_AUX_STATE_RESISTANCE_OHM = 1e12
+LOGICAL_OUTPUT_LOAD_FF = 10.0
+STORAGE_OUTPUT_LOAD_FF = 10.0
+STORAGE_INPUT_SLEW_NS = 2.0
+STORAGE_HOLD_TIMES_US = (10.0, 1000.0)
+STORAGE_MODEL = "nominal ICPS2023_5_1m B4SOI model card"
 STAGE_NAMES = (
     "runtime_dependencies",
     "logical_model_state",
@@ -36,6 +41,7 @@ STAGE_NAMES = (
     "strict_physical_verification",
     "postlayout_state",
 )
+DIAGNOSTIC_ONLY_STAGES = ("logical_model_state",)
 PROCESS_PROFILE = "icps2023_5_1m"
 
 
@@ -70,28 +76,52 @@ def _existing_artifacts(output_root: Path, **paths: Path) -> dict[str, str]:
             for name, path in paths.items() if path.exists()}
 
 
-def _signal_pin_order(spec: dict[str, Any], variant: str) -> list[str]:
-    declared = list(spec["pins"])
-    if variant == "declared":
-        return declared
-    if variant != "reverse_signals":
-        raise ValueError(f"unsupported pin-order variant {variant!r}")
-    signals = [pin for pin in declared if pin not in {"VDD", "VSS"}]
-    supplies = [pin for pin in declared if pin in {"VDD", "VSS"}]
-    return list(reversed(signals)) + supplies
+def _height_candidates(spec: dict[str, Any], architecture: str,
+                       heights: Iterable[float] | None
+                       ) -> tuple[tuple[float, ...], float | None]:
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"unsupported architecture {architecture!r}")
+    template_minimum = None
+    if architecture == "channel":
+        channel_geometry = importlib.import_module("channel_geometry")
+        template_minimum = float(channel_geometry.minimum_height_um(spec, fingers=1))
+    if heights is None:
+        if architecture != "channel":
+            raise ValueError(
+                "compact_rows requires an explicit height; no automatic fallback is selected")
+        selected = (template_minimum, template_minimum + TALLER_HEIGHT_DELTA_UM)
+    else:
+        try:
+            selected = tuple(float(height) for height in heights)
+        except (TypeError, ValueError) as error:
+            raise ValueError("heights must be a nonempty sequence of positive finite values") from error
+    if not selected:
+        raise ValueError("heights must be a nonempty sequence of positive finite values")
+    if any(not math.isfinite(height) or height <= 0 for height in selected):
+        raise ValueError("heights must be positive finite values")
+    if len(set(selected)) != len(selected):
+        raise ValueError("heights must not contain duplicates")
+    return selected, template_minimum
 
 
-def parameter_sweep(spec: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Return the fixed, ordered sweep; no device dimensions are altered."""
+def parameter_sweep(spec: dict[str, Any], *,
+                    architecture: str = DEFAULT_ARCHITECTURE,
+                    heights: Iterable[float] | None = None,
+                    mirror: bool = False) -> tuple[dict[str, Any], ...]:
+    """Return only explicitly selected cell variants without changing MOS dimensions."""
+    if not isinstance(mirror, bool):
+        raise ValueError("mirror must be a boolean")
+    selected_heights, template_minimum = _height_candidates(
+        spec, architecture, heights)
     parameters = []
-    for height, channel, pin_variant, mirror in itertools.product(
-            SWEEP_HEIGHTS_UM, SWEEP_ROUTE_CHANNELS_UM,
-            SWEEP_PIN_ORDER_VARIANTS, SWEEP_MIRRORS):
+    for height in selected_heights:
         parameters.append({
+            "architecture": architecture,
             "height_um": height,
-            "route_channel_um": channel,
-            "pin_order_variant": pin_variant,
-            "pin_order": _signal_pin_order(spec, pin_variant),
+            "template_minimum_height_um": template_minimum,
+            "route_channel_um": DEFAULT_ROUTE_CHANNEL_UM,
+            "pin_order_variant": "declared",
+            "pin_order": list(spec["pins"]),
             "mirror": mirror,
             "fingers": 1,
             "mos_dimensions_changed": False,
@@ -102,9 +132,9 @@ def parameter_sweep(spec: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 def _candidate_id(cell: str, index: int, parameters: dict[str, Any]) -> str:
     height = f"{parameters['height_um']:g}"
     channel = f"{parameters['route_channel_um']:g}"
-    order = "D" if parameters["pin_order_variant"] == "declared" else "R"
+    architecture = parameters["architecture"]
     mirror = int(parameters["mirror"])
-    return f"{cell}_C{index:03d}_H{height}_CH{channel}_P{order}_M{mirror}"
+    return f"{cell}_C{index:03d}_A{architecture}_H{height}_CH{channel}_PD_M{mirror}"
 
 
 def _area_metrics(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -121,12 +151,20 @@ def _finalize_candidate(record: dict[str, Any]) -> None:
     failed = [name for name, stage in record["stages"].items()
               if stage["status"] == "failed"]
     record["failed_stages"] = failed
-    record["failure_stage"] = failed[0] if failed else None
+    record["diagnostic_failures"] = [
+        name for name in failed if name in DIAGNOSTIC_ONLY_STAGES]
+    record["gate_failures"] = [
+        name for name in failed if name not in DIAGNOSTIC_ONLY_STAGES]
+    record["failure_stage"] = record["gate_failures"][0] if record["gate_failures"] else None
+    record["incomplete_gate_stages"] = [
+        name for name, stage in record["stages"].items()
+        if name not in DIAGNOSTIC_ONLY_STAGES and stage["status"] != "passed"
+    ]
     record["accepted_for_publication"] = False
-    if all(stage["status"] == "passed" for stage in record["stages"].values()):
-        record["status"] = "verified_unpublished_candidate"
-    elif any(stage["status"] == "pending" for stage in record["stages"].values()):
+    if any(stage["status"] == "pending" for stage in record["stages"].values()):
         record["status"] = "in_progress"
+    elif not record["incomplete_gate_stages"]:
+        record["status"] = "verified_unpublished_candidate"
     else:
         record["status"] = "not_accepted"
 
@@ -149,8 +187,12 @@ def _exception_details(error: Exception) -> dict[str, str]:
 
 def _logical_reference(spec: dict[str, Any], path: Path, logic: Any,
                        model_library: Path) -> None:
-    """Write a model-only subcircuit with explicit state-node stabilization."""
-    logic.write_reference(spec, path, library=True)
+    """Write a logical reference with auxiliary state loads and explicit SUB port."""
+    reference_spec = dict(spec)
+    reference_spec["pins"] = list(spec["pins"])
+    if "SUB" not in reference_spec["pins"]:
+        reference_spec["pins"].append("SUB")
+    logic.write_reference(reference_spec, path, library=True)
     lines = [f'.lib "{model_library.resolve()}" b4soi']
     lines.extend(path.read_text(encoding="utf-8").splitlines())
     pins = set(spec["pins"])
@@ -163,8 +205,10 @@ def _logical_reference(spec: dict[str, Any], path: Path, logic: Any,
     for line in lines:
         if line == expected_end:
             for index, net in enumerate(internal_nets):
-                rewritten.extend((f"RSTATE{index} {net} 0 1e12",
-                                  f"CSTATE{index} {net} 0 {STATE_LOAD_FF:g}f"))
+                rewritten.extend((
+                    f"RSTATE{index} {net} 0 {LOGICAL_REFERENCE_AUX_STATE_RESISTANCE_OHM:g}",
+                    f"CSTATE{index} {net} 0 {LOGICAL_REFERENCE_AUX_STATE_LOAD_FF:g}f",
+                ))
             inserted = True
         rewritten.append(line)
     if not inserted:
@@ -177,6 +221,14 @@ def _run_logical_state(spec: dict[str, Any], cell_dir: Path,
     stage: dict[str, Any] = {
         "status": "failed",
         "scope": "logical_model_reference; not physical-layout evidence",
+        "gate_role": "diagnostic_only",
+        "auxiliary_internal_state_loads": {
+            "scope": "logical_model_reference_only",
+            "resistance_ohm": LOGICAL_REFERENCE_AUX_STATE_RESISTANCE_OHM,
+            "capacitance_ff": LOGICAL_REFERENCE_AUX_STATE_LOAD_FF,
+            "applied_to_postlayout": False,
+        },
+        "output_load_ff": LOGICAL_OUTPUT_LOAD_FF,
         "artifacts": {},
     }
     reference = cell_dir / "logical_model_reference.spice"
@@ -184,7 +236,7 @@ def _run_logical_state(spec: dict[str, Any], cell_dir: Path,
     try:
         _logical_reference(spec, reference, logic, characterize.MODELS)
         result = characterize.sequential_state(
-            spec, reference, state_dir, load_ff=STATE_LOAD_FF)
+            spec, reference, state_dir, load_ff=LOGICAL_OUTPUT_LOAD_FF)
         state_path = state_dir / "state.json"
         stage.update({
             "status": "passed",
@@ -211,19 +263,153 @@ def _run_logical_state(spec: dict[str, Any], cell_dir: Path,
     return stage
 
 
+def _storage_characterization_details(integration_method: str = "trap") -> dict[str, Any]:
+    return {
+        "scope": (
+            "strictly verified extracted-and-assembled layout; nominal-model "
+            "preservation and setup/hold/pulse timing feasibility only"),
+        "characterization": "characterize_storage",
+        "model": STORAGE_MODEL,
+        "model_fingerprint": "SHA-256 recorded as result.model_sha256",
+        "output_load_ff": STORAGE_OUTPUT_LOAD_FF,
+        "input_slew_ns": STORAGE_INPUT_SLEW_NS,
+        "stopped_clock_hold_times_us": list(STORAGE_HOLD_TIMES_US),
+        "integration_method": integration_method,
+        "timing_objective": "feasibility_only",
+        "postlayout_internal_state_loads_added": False,
+        "postlayout_forced_initial_state": False,
+        "qualification": (
+            "nominal model only; no qualified clock, placement site, process, "
+            "IO/ESD, PVT, silicon, or metastability qualification"),
+    }
+
+
+def _storage_artifacts(output_root: Path, state_dir: Path) -> dict[str, str]:
+    capture_dir = state_dir / "capture"
+    return _existing_artifacts(
+        output_root,
+        characterization_dir=state_dir,
+        storage=state_dir / "storage.json",
+        capture_dir=capture_dir,
+        capture_bench=capture_dir / "bench.cir",
+        capture_simulator_log=capture_dir / "ngspice.log",
+        capture_state=capture_dir / "state.json",
+    )
+def _storage_evidence_is_complete(spec: dict[str, Any],
+                                  result: dict[str, Any]) -> bool:
+    required_bounds = {"setup", "hold", "high_pulse", "low_pulse"}
+    bounds = result.get("timing_bounds")
+    if (result.get("passed") is not True or
+            result.get("preservation_correctness") is not True or
+            result.get("hold_correctness") is not True or
+            result.get("pulse_correctness") is not True or
+            result.get("internal_state_loads_added") is not False or
+            result.get("timing_objective") != "feasibility_only" or
+            result.get("load_ff") != STORAGE_OUTPUT_LOAD_FF or
+            result.get("input_slew_ns") != STORAGE_INPUT_SLEW_NS or
+            not isinstance(result.get("model_sha256"), str) or
+            not isinstance(result.get("capture"), dict) or
+            not result["capture"].get("samples") or
+            not isinstance(bounds, dict) or
+            not required_bounds.issubset(bounds)):
+        return False
+
+    state = spec.get("sequential", {})
+    clock_levels = (0, 1) if state.get("kind") == "flip_flop" else (0,)
+    expected_retention = {
+        (bit, level, hold_time)
+        for bit in (0, 1)
+        for level in clock_levels
+        for hold_time in STORAGE_HOLD_TIMES_US
+    }
+    retention = result.get("retention")
+    if not isinstance(retention, list):
+        return False
+    observed_retention = {
+        (record.get("stored_bit"), record.get("stopped_clock_level"),
+         record.get("hold_time_us"))
+        for record in retention if isinstance(record, dict)
+    }
+    if (not expected_retention.issubset(observed_retention) or
+            any(record.get("passed") is not True
+                for record in retention if isinstance(record, dict))):
+        return False
+
+    experiments = result.get("aperture_experiments")
+    if not isinstance(experiments, dict):
+        return False
+    for kind in ("setup", "hold", "high_pulse", "low_pulse"):
+        bound = bounds[kind]
+        if not isinstance(bound, dict):
+            return False
+        records = experiments.get(kind)
+        if not isinstance(records, list):
+            return False
+        if kind == "low_pulse" and state.get("kind") == "latch":
+            if bound.get("applicable") is not False or records:
+                return False
+            continue
+        if (bound.get("applicable") is not True or
+                "conservative_tested_bound_ns" not in bound or not records):
+            return False
+        for record in records:
+            transitions = record.get("transitions") if isinstance(record, dict) else None
+            if (not isinstance(transitions, list) or
+                    {item.get("captured_bit") for item in transitions
+                     if isinstance(item, dict)} != {0, 1}):
+                return False
+    return True
+
+
+def _run_postlayout_storage(spec: dict[str, Any], candidate_id: str,
+                            postlayout_path: Path, state_dir: Path,
+                            output_root: Path, characterize: Any, *,
+                            integration_method: str = "trap") -> dict[str, Any]:
+    stage: dict[str, Any] = {
+        "status": "failed",
+        **_storage_characterization_details(integration_method),
+    }
+    characterization_spec = copy.deepcopy(spec)
+    characterization_spec["name"] = candidate_id
+    try:
+        result = characterize.characterize_storage(
+            characterization_spec, postlayout_path, state_dir,
+            load_ff=STORAGE_OUTPUT_LOAD_FF,
+            hold_times_us=STORAGE_HOLD_TIMES_US,
+            slew_ns=STORAGE_INPUT_SLEW_NS, integration_method=integration_method)
+        if not isinstance(result, dict):
+            raise RuntimeError("storage characterizer returned a non-object result")
+        stage["result"] = result
+        if not _storage_evidence_is_complete(characterization_spec, result):
+            raise RuntimeError(
+                "storage characterizer did not return complete passing preservation/timing evidence")
+        stage["status"] = "passed"
+    except Exception as error:
+        stage.update(_exception_details(error))
+    stage["artifacts"] = _storage_artifacts(output_root, state_dir)
+    return stage
+
+
+
+
 def _new_candidate(cell: str, candidate_id: str,
                    parameters: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema": "ICPS2023_5_sequential_closure_candidate_v1",
+        "schema": "ICPS2023_5_sequential_closure_candidate_v2",
         "cell": cell,
         "candidate_id": candidate_id,
         "parameters": copy.deepcopy(parameters),
         "status": "in_progress",
         "accepted_for_publication": False,
-        "qualification": "experimental unpublished candidate; no process, placement-site, or timing qualification",
+        "qualification": (
+            "experimental unpublished candidate; nominal-model timing feasibility only; "
+            "no qualified clock, placement-site, process, IO/ESD, or PVT qualification"),
         "stages": {name: {"status": "pending"} for name in STAGE_NAMES},
         "failed_stages": [],
         "failure_stage": None,
+        "diagnostic_failures": [],
+        "gate_failures": [],
+        "incomplete_gate_stages": [],
         "metrics": {
             "cell_geometry_area_um2": None,
             "cell_bbox_um": None,
@@ -263,6 +449,9 @@ def _summary_failures(summary: dict[str, Any]) -> list[dict[str, str]]:
                     "candidate_id": candidate["candidate_id"],
                     "record": candidate["record"],
                     "stage": name,
+                    "gate_role": (
+                        "diagnostic_only" if name in DIAGNOSTIC_ONLY_STAGES
+                        else "acceptance_gate"),
                     "error": stage.get("error", "stage failed without an error string"),
                 })
     return failures
@@ -277,6 +466,10 @@ def _record_candidate(summary: dict[str, Any], record: dict[str, Any],
         "status": record["status"],
         "record": _path_record(record_path, output_root),
         "stage_results": copy.deepcopy(record["stages"]),
+        "failed_stages": list(record["failed_stages"]),
+        "diagnostic_failures": list(record["diagnostic_failures"]),
+        "gate_failures": list(record["gate_failures"]),
+        "incomplete_gate_stages": list(record["incomplete_gate_stages"]),
         "metrics": copy.deepcopy(record["metrics"]),
     })
     summary["failures"] = _summary_failures(summary)
@@ -295,8 +488,12 @@ def _module_failure(name: str, errors: dict[str, dict[str, str]]) -> dict[str, A
     return {"missing_module": name, **failure}
 
 
-def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) -> dict[str, Any]:
-    """Run all selected deterministic attempts and persist every stage result."""
+def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS,
+                architecture: str = DEFAULT_ARCHITECTURE,
+                heights: Iterable[float] | None = None,
+                mirror: bool = False,
+                integration_method: str = "trap") -> dict[str, Any]:
+    """Run selected unpublished attempts and persist every stage result."""
     output_root = Path(output_dir).expanduser().resolve()
     selected_cells = tuple(cells)
     if not selected_cells or len(set(selected_cells)) != len(selected_cells):
@@ -304,26 +501,59 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
     unknown = [cell for cell in selected_cells if cell not in TARGET_CELLS]
     if unknown:
         raise ValueError(f"unsupported sequential cells: {unknown}")
+    if architecture not in ARCHITECTURES:
+        raise ValueError(f"unsupported architecture {architecture!r}")
+    if not isinstance(mirror, bool):
+        raise ValueError("mirror must be a boolean")
+    if integration_method not in {"trap", "gear"}:
+        raise ValueError("integration_method must be trap or gear")
+    if architecture == "compact_rows" and heights is None:
+        raise ValueError(
+            "compact_rows requires an explicit height; no automatic fallback is selected")
+    selected_heights = None
+    if heights is not None:
+        try:
+            selected_heights = tuple(float(height) for height in heights)
+        except (TypeError, ValueError) as error:
+            raise ValueError("heights must be a nonempty sequence of positive finite values") from error
+        if (not selected_heights or
+                any(not math.isfinite(height) or height <= 0 for height in selected_heights) or
+                len(set(selected_heights)) != len(selected_heights)):
+            raise ValueError("heights must be unique positive finite values")
     _validate_output_root(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {
-        "schema": "ICPS2023_5_sequential_closure_v1",
+        "schema": "ICPS2023_5_sequential_closure_v2",
         "process_profile": PROCESS_PROFILE,
         "status": "running",
-        "scope": "experimental native-1M sequential closure; no publication or process qualification",
+        "scope": (
+            "experimental native-1M sequential-cell closure; no publication, "
+            "foundry, or process qualification"),
         "limits": [
-            "no process, timing, placement-site, or row qualification",
-            "IO/ESD and SRAM remain deferred",
+            "no foundry, placement-site, qualified-clock, IO/ESD, or PVT qualification",
+            "nominal-model results only; no measured wafer calibration",
+            "no user target RTL, array placement, or routed-core area was supplied or evaluated",
             "no combinational geometry or behavior is modified",
         ],
         "logical_and_physical_state_evidence_are_separate": True,
+        "diagnostic_only_stages": list(DIAGNOSTIC_ONLY_STAGES),
+        "selection": {
+            "architecture": architecture,
+            "heights_um": list(selected_heights) if selected_heights is not None else None,
+            "default_height_policy": (
+                f"channel template minimum and {TALLER_HEIGHT_DELTA_UM:g}um taller comparison"
+                if selected_heights is None else "explicit height selection"),
+            "mirror": mirror,
+            "route_channel_um": DEFAULT_ROUTE_CHANNEL_UM,
+        },
+        "postlayout_storage_characterization": _storage_characterization_details(integration_method),
         "area_semantics": {
             "cell_geometry_area_um2": "candidate bounding-box area including configured route-channel whitespace",
             "array_geometry_area_um2": None,
             "routed_core_area_um2": None,
             "note": "array and routed-core area are not evaluated by this single-cell runner",
         },
-        "selection_policy": "fixed sweep order only; candidates are never ranked",
+        "selection_policy": "selected parameter sets are attempted independently; candidates are never ranked",
         "candidates": [],
         "failures": [],
         "verified_unpublished_candidates": [],
@@ -365,7 +595,15 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
         if characterize is None:
             logical_stage = {
                 "status": "failed",
+                "gate_role": "diagnostic_only",
                 "scope": "logical_model_reference; not physical-layout evidence",
+                "auxiliary_internal_state_loads": {
+                    "scope": "logical_model_reference_only",
+                    "resistance_ohm": LOGICAL_REFERENCE_AUX_STATE_RESISTANCE_OHM,
+                    "capacitance_ff": LOGICAL_REFERENCE_AUX_STATE_LOAD_FF,
+                    "applied_to_postlayout": False,
+                },
+                "output_load_ff": LOGICAL_OUTPUT_LOAD_FF,
                 **_module_failure("characterize", dependency_errors),
                 "artifacts": {},
             }
@@ -374,7 +612,9 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
                 spec, cell_dir, output_root, characterize, logic)
         _write_json(cell_dir / "logical_model_stage.json", logical_stage)
 
-        for index, parameters in enumerate(parameter_sweep(spec), start=1):
+        for index, parameters in enumerate(parameter_sweep(
+                spec, architecture=architecture, heights=selected_heights,
+                mirror=mirror), start=1):
             candidate_id = _candidate_id(cell, index, parameters)
             candidate_dir = cell_dir / candidate_id
             candidate_dir.mkdir()
@@ -393,6 +633,7 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
             build_spec = copy.deepcopy(spec)
             build_spec["name"] = candidate_id
             geometry = modules.get("geometry")
+
             try:
                 if geometry is None:
                     raise ImportError(dependency_errors.get("geometry", {}).get(
@@ -402,10 +643,12 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
                     fingers=parameters["fingers"],
                     pin_order=parameters["pin_order"],
                     mirror=parameters["mirror"],
-                    route_channel_um=parameters["route_channel_um"])
+                    route_channel_um=parameters["route_channel_um"],
+                    architecture=parameters["architecture"])
                 layout.rename_cell(top.cell_index(), candidate_id)
                 record["metrics"] = _area_metrics(manifest)
                 record["geometry"] = {
+                    "architecture": parameters["architecture"],
                     "width_um": float(manifest["width_um"]),
                     "height_um": float(manifest["height_um"]),
                     "contacts_count": int(manifest["contacts_count"]),
@@ -515,43 +758,30 @@ def run_closure(output_dir: str | Path, *, cells: Iterable[str] = TARGET_CELLS) 
 
             if record["stages"]["strict_physical_verification"]["status"] != "passed":
                 _set_stage(record, "postlayout_state", "skipped",
-                           reason="postlayout state requires successful strict physical verification")
+                           reason="postlayout storage requires successful strict physical verification")
             elif characterize is None:
                 _set_stage(record, "postlayout_state", "failed",
-                           scope="strictly verified extracted-and-assembled layout; model-based capture/hold only",
-                           **_module_failure("characterize", dependency_errors))
+                           **_storage_characterization_details(integration_method),
+                           **_module_failure("characterize", dependency_errors),
+                           artifacts={})
             else:
                 state_dir = candidate_dir / "postlayout_state"
-                characterization_spec = copy.deepcopy(spec)
-                characterization_spec["name"] = candidate_id
-                try:
-                    postlayout_path = Path(physical_evidence["postlayout_spice"])
-                    state_result = characterize.sequential_state(
-                        characterization_spec, postlayout_path, state_dir,
-                        load_ff=STATE_LOAD_FF)
-                    state_path = state_dir / "state.json"
-                    _set_stage(record, "postlayout_state", "passed",
-                               scope="strictly verified extracted-and-assembled layout; model-based capture/hold only",
-                               result=state_result,
-                               artifacts=_existing_artifacts(
-                                   output_root,
-                                   state_dir=state_dir,
-                                   bench=state_dir / "bench.cir",
-                                   simulator_log=state_dir / "ngspice.log",
-                                   state=state_path,
-                               ))
-                except Exception as error:
-                    details = _exception_details(error)
-                    details["artifacts"] = _existing_artifacts(
-                        output_root,
-                        state_dir=state_dir,
-                        bench=state_dir / "bench.cir",
-                        simulator_log=state_dir / "ngspice.log",
-                        state=state_dir / "state.json",
-                    )
-                    _set_stage(record, "postlayout_state", "failed",
-                               scope="strictly verified extracted-and-assembled layout; model-based capture/hold only",
-                               **details)
+                postlayout_value = physical_evidence.get("postlayout_spice")
+                if not postlayout_value:
+                    storage_stage = {
+                        "status": "failed",
+                        **_storage_characterization_details(integration_method),
+                        "error_type": "MissingArtifact",
+                        "error": "strict physical verification did not provide postlayout_spice",
+                        "artifacts": {},
+                    }
+                else:
+                    storage_stage = _run_postlayout_storage(
+                        spec, candidate_id, Path(postlayout_value), state_dir,
+                        output_root, characterize, integration_method=integration_method)
+                _set_stage(
+                    record, "postlayout_state", storage_stage.pop("status"),
+                    **storage_stage)
             _checkpoint(record, record_path)
             _record_candidate(summary, record, record_path, output_root, summary_path)
 
@@ -570,9 +800,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="new or empty directory outside libs.tech and libs.ref")
     parser.add_argument("--cell", action="append", choices=TARGET_CELLS,
                         help="cell to attempt; repeat to select several (default: all four)")
+    parser.add_argument("--architecture", choices=ARCHITECTURES,
+                        default=DEFAULT_ARCHITECTURE,
+                        help="geometry architecture (default: channel)")
+    parser.add_argument("--height", type=float,
+                        help="one explicit candidate height; default channel runs template minimum and +50um")
+    parser.add_argument("--mirror", action="store_true",
+                        help="mirror the selected candidate; default is unmirrored")
+    parser.add_argument("--integration-method", choices=("trap", "gear"), default="trap",
+                        help="explicit transient integration method, recorded with every storage experiment")
     args = parser.parse_args(argv)
     try:
-        summary = run_closure(args.output_dir, cells=args.cell or TARGET_CELLS)
+        selected_heights = (args.height,) if args.height is not None else None
+        summary = run_closure(
+            args.output_dir, cells=args.cell or TARGET_CELLS,
+            architecture=args.architecture, heights=selected_heights,
+            mirror=args.mirror, integration_method=args.integration_method)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print(json.dumps({"status": summary["status"],

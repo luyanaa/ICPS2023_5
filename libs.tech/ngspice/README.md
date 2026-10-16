@@ -1,12 +1,16 @@
 # ICPS2023_5 ngspice models
 
-The library has one nominal selector, `b4soi`. The two MOS model cards use
-ngspice's BSIMSOI v4.4 implementation (`LEVEL=58`). No process corners are
+The compatibility selector `b4soi` retains the frozen stage-1 **PD reference**
+cards (`SOIMOD=0`, ngspice BSIMSOI v4.4 `LEVEL=58`). This simulator selection
+does not establish that either ICPS2023_5 NMOS or PMOS is physically partially
+depleted. No process corners or polarity-specific depletion assignment are
 provided or inferred.
 
 ```spice
 .lib "$PDK_ROOT/ICPS2023_5/libs.tech/ngspice/icps2023_5.lib.spice" b4soi
 .options temp=25 tnom=25
+* Example common substrate reference, not a qualified bias prescription.
+VSUB SUB 0 0
 M1 d g s SUB nch W=24u L=6u
 M2 d g s SUB pch W=24u L=6u
 ```
@@ -23,6 +27,12 @@ The stock xschem symbols expose the four-node D/G/S/E form only. The fit is
 anchored at the one measured geometry `L=6 µm`, `W=24 µm`; the xschem and PCell
 defaults are not additional calibrated geometries. The library does not set
 simulator-global options.
+
+Direct fifth-P syntax is not a claim of physical body-contact support. The
+current LVS deck compares the NMOS-only `NMOS4`/`NCH4` body-tie structure;
+there is no PMOS4/PCH4 extraction path. PEX/postlayout assembly accepts
+ordinary four-terminal N/P devices only. Do not convert the historical bulk
+BSIM3 `B=S` approximation into a BSIMSOI `E=S` connection or invent a P contact.
 
 ## Stage-1 fit and data provenance
 
@@ -60,9 +70,12 @@ The process geometry uses `TOX=15 nm` from the 2023 PDK PDF. `TSI=95 nm` and
 `TBOX=400 nm` are initial values from the July 2021 `AIST-SOI-CMOS.xs` prior,
 not a validated 2023 production-stack characterization. `XJ=50 nm` is
 independent of `TSI` and satisfies `XJ ≤ TSI`; it is not a PDK measurement.
-`SOIMOD=0` selects the partially depleted model mode and is the only nominal
-mode in the frozen evaluator. FD/PD back-gate experiments remain isolated:
-back-gate measurements are absent, so no mode comparison is claimed.
+`SOIMOD=0` selects the partially depleted equations and remains the frozen
+reference. The isolated depletion audit compares unified `SOIMOD=1` and
+ideal-FD `SOIMOD=2` separately for NMOS and PMOS. These are uncalibrated,
+SOIMOD-only sensitivities, not migrated FD fits. Unified mode 1 is the next
+investigation path; ideal-FD mode 2 is a limiting control, not an automatic
+replacement. No mode 3 or nominal promotion is implied.
 
 ### Frozen fit regression
 
@@ -157,10 +170,12 @@ python3 libs.tech/ngspice/tools/assemble_postlayout.py \
 ```
 
 The assembler checks MOS geometry/polarity, terminal contacts, source-tied
-LVS body nodes, one physical component per logical LVS net, no resistive
-component joining distinct LVS nets, and no unanchored PEX component. It
-deliberately supports the R0 MOS-only inverter/NAND extraction contract; it
-does not infer device orientation or merge arbitrary LVS elements.
+LVS MOS4 body **serialization artifacts**, one physical component per logical
+LVS net, no resistive component joining distinct LVS nets, and no unanchored
+PEX component. That source-tied fourth node is not the BSIMSOI E terminal:
+every assembled MOS gets the separate `E_SUB` formal. The assembler supports
+ordinary MOS-only inverter/NAND extraction, not NMOS4/PCH4 body contacts or
+arbitrary LVS elements.
 
 Run the native integration regression inside the KLayout/ngspice development
 shell:
@@ -217,3 +232,50 @@ silicon timing.
 ngspice writes `b4soiv1check.log` in the invoking directory; `*check.log` is
 ignored by the repository. Run simulations from a scratch directory if the
 checker log should not be left beside a netlist.
+
+## Depletion-mode audit: reference versus candidates
+
+See [`audit/b4soi_depletion_mode.md`](audit/b4soi_depletion_mode.md) and its
+[`JSON snapshot`](audit/b4soi_depletion_mode.json) for the process-evidence
+hierarchy, endpoint trace, F0–F5 boundaries, and per-case numerical results.
+Neither Technology 2018 nor the 2022 FD/PD NMOS comparison assigns a
+depletion mode to both polarities of this process revision.
+
+```sh
+python3 libs.tech/ngspice/tools/audit_b4soi_depletion_static.py \
+  --ngspice /path/to/ngspice --out build/ngspice-depletion
+python3 libs.tech/ngspice/tools/audit_b4soi_depletion_dynamic.py \
+  --ngspice /path/to/ngspice --out build/ngspice-depletion
+python3 libs.tech/ngspice/tools/test_b4soi_depletion.py
+```
+
+Both audit commands generate explicitly selected libraries under the output
+directory. Each library preserves the frozen or existing overlap base and
+changes only the independently chosen N/P SOIMOD values. No candidate is
+included by `icps2023_5.lib.spice`. FD channel doping, flatband/back-gate and
+body parameters remain inherited assumptions, not process measurements.
+In mode 2, ngspice warns that inherited NCH=1.7e17 cm⁻³ and TSI=95 nm are
+incompatible with its band-bending limit, then resets NCH to 1.46152e17 cm⁻³.
+The snapshot records the exposed effective value, not just the card-input delta.
+
+The commands retain every deck/log/data file and report `observed`, `failed`
+and `inconclusive` separately. Exit 0 means that evidence collection completed,
+not that every bench passed or that a model is qualified. Full `showmod`
+query failures are separate from finite operating-point/model-load results.
+The new ramp audit has no hidden convergence retry ladder.
+The recorded matrix retains 3/24 gate-ramp aborts and 21/216 transient aborts;
+all 72 offline substrate sweeps complete. Quiet voltage tails do not qualify
+charge/current behavior, physical depletion, or reliability.
+
+F4 substrate sweeps are offline mathematical sensitivity only: the repository
+does not contain manufacturer-approved E/source/body reliability limits.
+Hardware discrimination and F5 silicon fitting remain blocked by those limits
+and revision-specific, polarity-resolved body-bias/C–V/process data.
+
+Historical transient reports are not interchangeable with the corrected
+common-E benches: `diagnose_b4soi_transient.inv_deck` used PMOS E=VDD and
+emitted a fifth PMOS node even in its `body=e` branch;
+`audit_b4soi_switching.inverter_deck` also used PMOS E=VDD. Some old T7 decks
+in `diagnose_b4soi_cv_leads.py`/`diagnose_b4soi_feasibility.py` did not drive
+SUB explicitly. Those artifacts are retained as historical numerical studies,
+not proof of the present four-terminal, common-substrate topology.

@@ -43,8 +43,15 @@ def environment():
 
 
 def run_command(command, log_path, *, cwd=None, timeout=300):
-    result = subprocess.run([str(part) for part in command], capture_output=True,
-                            text=True, cwd=cwd, env=environment(), timeout=timeout)
+    try:
+        result = subprocess.run([str(part) for part in command], capture_output=True,
+                                text=True, cwd=cwd, env=environment(), timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        # subprocess exposes partial output as bytes even with text=True.
+        parts = [part.decode("utf-8", errors="replace") if isinstance(part, bytes)
+                 else (part or "") for part in (error.stdout, error.stderr)]
+        Path(log_path).write_text("".join(parts), encoding="utf-8")
+        raise
     text = result.stdout + result.stderr
     Path(log_path).write_text(text, encoding="utf-8")
     if result.returncode:

@@ -156,7 +156,19 @@ class _CellMapper:
                 return name
 
     def _cell(self, names: Iterable[str]) -> str | None:
+        if self.library_view == "physical_qualified":
+            return min((name for name in names if name in self.specs),
+                       key=lambda name: self.specs[name]["_area_um2"], default=None)
         return next((name for name in names if name in self.specs), None)
+
+    def _prefer_direct(self, cell: str, decomposition: list[str]) -> bool:
+        if cell not in self.specs:
+            return False
+        if self.library_view != "physical_qualified":
+            return True
+        direct = self.specs[cell]["_area_um2"]
+        alternative = sum(self.specs[name]["_area_um2"] for name in decomposition)
+        return direct <= alternative
 
     def emit(self, cell: str, connections: dict[str, str],
              name: str | None = None) -> None:
@@ -188,7 +200,9 @@ class _CellMapper:
         return target
 
     def buffer(self, source: str, target: str) -> str:
-        if "BUF_X1" in self.specs:
+        inverter = self._cell(("INV_X1", *self._NAND, *self._NOR))
+        if ("BUF_X1" in self.specs and (inverter is None or
+                self._prefer_direct("BUF_X1", [inverter, inverter]))):
             self.emit("BUF_X1", {"A": source, "Y": target})
             return target
         intermediate = self.invert(source)
@@ -254,13 +268,15 @@ class _CellMapper:
         return target
 
     def xor2(self, a: str, b: str, target: str) -> str:
-        if "XOR2_X1" in self.specs:
+        nand = self._cell(self._NAND)
+        if ("XOR2_X1" in self.specs and (nand is None or
+                self._prefer_direct("XOR2_X1", [nand] * 4))):
             self.emit("XOR2_X1", {"A": a, "B": b, "Y": target})
-        elif self._cell(self._NAND) is not None:
-            not_a, not_b = self.invert(a), self.invert(b)
-            left, right = self.fresh_net(), self.fresh_net()
-            self.nand2(a, not_b, left)
-            self.nand2(not_a, b, right)
+        elif nand is not None:
+            shared, left, right = self.fresh_net(), self.fresh_net(), self.fresh_net()
+            self.nand2(a, b, shared)
+            self.nand2(a, shared, left)
+            self.nand2(b, shared, right)
             self.nand2(left, right, target)
         else:
             not_a, not_b = self.invert(a), self.invert(b)
@@ -271,7 +287,10 @@ class _CellMapper:
         return target
 
     def xnor2(self, a: str, b: str, target: str) -> str:
-        if "XNOR2_X1" in self.specs:
+        nand = self._cell(self._NAND)
+        inverter = self._cell(("INV_X1", *self._NAND, *self._NOR))
+        if ("XNOR2_X1" in self.specs and (nand is None or inverter is None or
+                self._prefer_direct("XNOR2_X1", [nand] * 4 + [inverter]))):
             self.emit("XNOR2_X1", {"A": a, "B": b, "Y": target})
         else:
             intermediate = self.fresh_net()
@@ -281,9 +300,17 @@ class _CellMapper:
 
     def mux_yosys(self, a: str, b: str, select: str, target: str) -> str:
         cell = self._cell(("MUX2_TG6T_X1", "MUX2_STATIC_X1"))
-        if cell is not None:
+        nand = self._cell(self._NAND)
+        inverter = self._cell(("INV_X1", *self._NAND, *self._NOR))
+        if cell is not None and (nand is None or inverter is None or
+                self._prefer_direct(cell, [nand] * 3 + [inverter])):
             # The library mux selects A at S=1; Yosys selects B.
             self.emit(cell, {"A": b, "B": a, "S": select, "Y": target})
+        elif nand is not None:
+            selected_b, selected_a = self.fresh_net(), self.fresh_net()
+            self.nand2(b, select, selected_b)
+            self.nand2(a, self.invert(select), selected_a)
+            self.nand2(selected_b, selected_a, target)
         else:
             selected_b = self.and2(b, select, self.fresh_net())
             selected_a = self.and2(a, self.invert(select), self.fresh_net())
@@ -304,15 +331,17 @@ def _mapping_specs(library_view: str, manifest_path: str | Path | None,
         return cell_specs() if specs is None else specs
     try:
         try:
-            from .library import physical_specs
+            from .library import physical_manifests
         except ImportError:  # loaded with libs.tech/stdcell on sys.path
-            from library import physical_specs
+            from library import physical_manifests
     except ImportError as exc:
         raise RuntimeError(
-            "physical_qualified mapping requires library.physical_specs()") from exc
-    accepted = physical_specs(manifest_path)
-    if not isinstance(accepted, dict):
-        raise TypeError("library.physical_specs() must return a cell-to-spec mapping")
+            "physical_qualified mapping requires library.physical_manifests()") from exc
+    records = physical_manifests(manifest_path)
+    if not isinstance(records, dict):
+        raise TypeError("library.physical_manifests() must return accepted physical records")
+    accepted = {name: {**record["physical_spec"], "_area_um2": record["area_um2"]}
+                for name, record in records.items()}
     if specs is None:
         return accepted
     # An explicit spec set can narrow a qualified view, never broaden it or
@@ -331,6 +360,11 @@ def _map_yosys_primitives(netlist: dict[str, Any],
     mapped: list[dict[str, Any]] = []
     nets = set(netlist.get("nets", [])) | set(ports)
     mapper = _CellMapper(specs, library_view, mapped, nets)
+    # Reserve source names before generating replacements, including names of
+    # later instances. SPICE identifiers are case-insensitive.
+    mapper.used_names.update(
+        name for inst in netlist["instances"]
+        for name in (str(inst["name"]), str(inst["name"]).upper()))
     canonical_specs = cell_specs()
 
     storage_cells: dict[int, str] = {}
@@ -369,7 +403,10 @@ def _map_yosys_primitives(netlist: dict[str, Any],
         cell = str(inst["cell"])
         con = {pin: scalar(value) for pin, value in inst["connections"].items()}
         if cell in specs:
-            mapper.emit(cell, con, str(inst["name"]))
+            name = str(inst["name"])
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", name):
+                name = mapper.fresh_name()
+            mapper.emit(cell, con, name)
             continue
         if cell in canonical_specs:
             raise ValueError(
@@ -516,7 +553,15 @@ def _map_expr(expr: str, output: str, specs: dict[str, dict[str, Any]],
             return x
         op = x[0]
         if op == "not":
-            return mapper.invert(rec(x[1]), target)
+            child = x[1]
+            if not isinstance(child, str):
+                if child[0] == "not":
+                    return rec(child[1], target)
+                if child[0] in {"and", "or"}:
+                    destination = target or mapper.fresh_net()
+                    negative = mapper.nand2 if child[0] == "and" else mapper.nor2
+                    return negative(rec(child[1]), rec(child[2]), destination)
+            return mapper.invert(rec(child), target)
         left, right = rec(x[1]), rec(x[2])
         destination = target or mapper.fresh_net()
         {"and": mapper.and2, "or": mapper.or2,
@@ -542,6 +587,96 @@ def map_boolean_design(name: str, ports: dict[str, str],
         _map_expr(expr, output, selected_specs, instances, nets,
                   library_view=library_view)
     return _canonical_netlist(name, port_directions, instances, nets)
+def _abc_genlib_expression(expression: str, inputs: list[str]) -> str | None:
+    """Encode one canonical Boolean function as a Genlib sum of products."""
+    ast = _expr_ast(expression)
+
+    def evaluate(node: Any, values: dict[str, int]) -> int:
+        if isinstance(node, str):
+            if node == "0":
+                return 0
+            if node == "1":
+                return 1
+            if node not in values:
+                raise ValueError(f"Genlib function references unknown input {node!r}")
+            return values[node]
+        op = node[0]
+        if op == "not":
+            return 1 - evaluate(node[1], values)
+        left, right = evaluate(node[1], values), evaluate(node[2], values)
+        if op == "and":
+            return left & right
+        if op == "or":
+            return left | right
+        if op == "xor":
+            return left ^ right
+        raise ValueError(f"unsupported Genlib Boolean operator {op!r}")
+
+    terms: list[str] = []
+    for assignment in range(1 << len(inputs)):
+        values = {pin: (assignment >> index) & 1
+                  for index, pin in enumerate(inputs)}
+        if evaluate(ast, values):
+            terms.append("(" + "*".join(
+                pin if values[pin] else f"!{pin}" for pin in inputs) + ")")
+    if not terms or len(terms) == 1 << len(inputs):
+        # Constant functions are represented by native connectivity, not
+        # fabricated tie cells in the ABC library.
+        return None
+    return "+".join(terms)
+
+
+def _abc_area_genlib(specs: dict[str, dict[str, Any]]) -> str:
+    """Build a combinational-only area library from accepted physical records."""
+    lines: list[str] = []
+    included = 0
+    for cell, spec in sorted(specs.items()):
+        if spec.get("sequential") is not None or len(spec.get("outputs", [])) != 1:
+            continue
+        inputs = list(spec.get("inputs", []))
+        outputs = list(spec.get("outputs", []))
+        if not inputs or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cell):
+            raise ValueError(f"cannot encode accepted cell {cell!r} in ABC Genlib")
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pin)
+               for pin in inputs + outputs):
+            raise ValueError(f"cannot encode non-identifier pins for accepted cell {cell}")
+        functions = spec.get("function", {})
+        if len(outputs) != 1 or outputs[0] not in functions:
+            raise ValueError(f"cannot encode accepted cell function for {cell}")
+        try:
+            area_um2 = float(spec["_area_um2"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"accepted cell {cell} has no physical area cost") from exc
+        if not math.isfinite(area_um2) or area_um2 <= 0:
+            raise ValueError(f"accepted cell {cell} has invalid physical area cost")
+        function = _abc_genlib_expression(str(functions[outputs[0]]), inputs)
+        if function is None:
+            continue
+        lines.append(f"GATE {cell} {area_um2!r} {outputs[0]}={function};")
+        # Genlib requires input-load and timing slots. All are zero and
+        # intentionally unused: ABC runs area-only map -a with no constraints.
+        lines.extend(f"PIN {pin} UNKNOWN 0 0 0 0 0 0" for pin in inputs)
+        included += 1
+    if not included:
+        raise ValueError("the accepted physical view has no encodable combinational cells")
+    return "\n".join(lines) + "\n"
+
+
+def _require_abc_area_cells(data: str | Path | dict[str, Any], top: str,
+                            accepted: dict[str, dict[str, Any]]) -> None:
+    """Reject ABC output that would silently fall back to primitive mapping."""
+    netlist = from_yosys_json(data, top)
+    sequential = {"$_DFF_P_", "$_DFF_N_", "$_DLATCH_P_", "$_DLATCH_N_"}
+    for instance in netlist["instances"]:
+        cell = str(instance["cell"])
+        if cell in accepted or cell in sequential:
+            continue
+        if cell == "$_BUF_":
+            # from_yosys_json may add a logical output alias after ABC.
+            continue
+        raise RuntimeError(
+            f"ABC area-only mapping left generic cell {cell!r}; "
+            "refusing primitive-only fallback")
 
 
 def synthesize_rtl(source: str | Path, *, top: str | None = None,
@@ -549,31 +684,49 @@ def synthesize_rtl(source: str | Path, *, top: str | None = None,
                    library_view: str = "logical_reference",
                    manifest_path: str | Path | None = None,
                    yosys: str | None = None,
-                   workdir: str | Path | None = None) -> dict[str, Any]:
-    """Synthesize RTL and map it using the requested reference or physical view.
+                   workdir: str | Path | None = None,
+                   area_only_abc: bool = False) -> dict[str, Any]:
+    """Synthesize RTL with Yosys and map it into the requested cell view.
 
-    ABC performs technology-neutral logic optimization; it does not consume
-    unqualified timing arcs or claim area-optimal mapping. Without Yosys, only
-    scalar continuous assignments are accepted.
+    ``area_only_abc`` enables combinational ABC mapping against Genlib costs
+    derived only from accepted physical bounding-box areas. It requires Yosys,
+    excludes storage from ABC, and uses no electrical timing model.
     """
     _validate_library_view(library_view)
+    if area_only_abc and library_view != "physical_qualified":
+        raise ValueError("area_only_abc requires the physical_qualified view")
     source_text = Path(source).read_text(encoding="utf-8") if isinstance(source, (str, Path)) and Path(source).exists() else str(source)
     top_name, ports = _ports_from_verilog(source_text)
     top_name = top or top_name
     if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", top_name):
         raise ValueError(f"invalid Yosys top module name {top_name!r}")
     exe = yosys or shutil.which("yosys")
+    if area_only_abc and not exe:
+        raise RuntimeError("area_only_abc requires external Yosys/ABC")
     if exe:
         def run_in(directory: Path) -> dict[str, Any]:
             directory.mkdir(parents=True, exist_ok=True)
             inp, out = directory / "input.v", directory / "mapped.json"
             inp.write_text(source_text, encoding="utf-8")
-            script = (f"read_verilog -sv {json.dumps(str(inp))}; "
-                      f"hierarchy -check -top {top_name}; proc; opt; techmap; opt; "
-                      f"abc -g simple; opt; check; write_json {json.dumps(str(out))}")
-            run = subprocess.run([exe, "-q", "-p", script], capture_output=True, text=True)
+            synthesis = (f"read_verilog -sv {json.dumps(str(inp))}; "
+                         f"hierarchy -check -top {top_name}; proc; opt; techmap; opt; ")
+            if area_only_abc:
+                accepted = _mapping_specs(library_view, manifest_path, specs)
+                genlib = directory / "accepted_area.genlib"
+                genlib.write_text(_abc_area_genlib(accepted), encoding="utf-8")
+                # The required Genlib timing/load slots are all zero; map -a
+                # explicitly uses the accepted cell areas as its only cost.
+                synthesis += (f"abc -genlib {json.dumps(str(genlib))} "
+                              f"-script \"+strash;map -a\"; ")
+            else:
+                synthesis += "abc -g simple; "
+            script = synthesis + f"opt; check; write_json {json.dumps(str(out))}"
+            run = subprocess.run([exe, "-q", "-p", script],
+                                 capture_output=True, text=True)
             if run.returncode != 0 or not out.exists():
                 raise RuntimeError(f"Yosys failed: {run.stderr.strip()}")
+            if area_only_abc:
+                _require_abc_area_cells(out, top_name, accepted)
             return map_yosys_netlist(out, top_name, library_view=library_view,
                                      manifest_path=manifest_path, specs=specs)
         if workdir is not None:
@@ -593,6 +746,8 @@ def synthesize_rtl(source: str | Path, *, top: str | None = None,
                            sorted(missing_outputs))
     return map_boolean_design(top_name, ports, outputs, library_view=library_view,
                               manifest_path=manifest_path, specs=specs)
+
+
 
 
 

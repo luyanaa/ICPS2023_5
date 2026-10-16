@@ -358,11 +358,11 @@ netlist.each_circuit do |circuit|
     device.set_parameter("L", channel_length)
   end
 end
-# Preserve logical top-level pin names in the extracted SPICE so the PEX
-# assembler can bind PORT_MAP entries without guessing internal node numbers.
+# Preserve physical MOS instances and named ports for PEX assembly. Comparison
+# may combine parallel devices, but MOS_MAP still identifies each physical gate.
 netlist.purge
 netlist.make_top_level_pins
-target_netlist(output_file, write_spice, "Created by KLayout")
+physical_netlist = netlist.dup
 
 # Comparison settings formerly loaded from nand_sample_lvs_settings.rb.  The
 # extracted top is paired with the SPICE reader's .TOP circuit; device-class
@@ -401,3 +401,4 @@ schematic.combine_devices
 
 matched = compare
 puts(matched ? "ICPS2023_5 LVS MATCH (mismatches=0)" : "ICPS2023_5 LVS NO MATCH (see #{report_file} for mismatches)")
+physical_netlist.write(output_file, write_spice, "Created by KLayout")

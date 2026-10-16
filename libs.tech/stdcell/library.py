@@ -63,6 +63,12 @@ def _current_provenance() -> dict[str, Any]:
         "verify": ROOT / "libs.tech/stdcell/verify.py",
     }
     current = {name: _file_digest(path) for name, path in files.items()}
+    generator_files = {
+        "geometry.py": current["generator_sha256"],
+        "channel_geometry.py": _file_digest(ROOT / "libs.tech/stdcell/channel_geometry.py"),
+    }
+    current["generator_files_sha256"] = generator_files
+    current["generator_sha256"] = _digest(generator_files)
     current["deck_sha256"] = {name: _file_digest(path) for name, path in decks.items()}
     current["source_specs_sha256"] = _digest(logic.cell_specs())
     return current
@@ -198,6 +204,11 @@ def _validate_physical_spec(record: dict[str, Any], current_spec: dict[str, Any]
         raise LibraryValidationError(f"full generator manifest missing for {record['cell']}")
     folding = generator_manifest.get("folding", {})
     variant = generator_manifest.get("variant", {})
+    architecture = parameters.get("architecture")
+    if (architecture not in {"compact_rows", "channel"} or
+            generator_manifest.get("architecture") != architecture or
+            variant.get("architecture") != architecture):
+        raise LibraryValidationError(f"layout architecture is absent or inconsistent for {record['cell']}")
     if (generator_manifest.get("requested_height_um") != parameters.get("height_um") or
             generator_manifest.get("route_channel_um") != parameters.get("route_channel_um") or
             folding.get("requested_parallel_fingers") != fingers or

@@ -58,22 +58,29 @@ def _physical_spec(spec: dict[str, Any], devices: list[dict[str, Any]]) -> dict[
 
 def _parameters(spec: dict[str, Any], args: argparse.Namespace,
                 previous: dict[str, Any] | None = None) -> dict[str, Any]:
-    default_height = 210.0 if spec.get("sequential") else 160.0
-    default_channel = 40.0 if spec.get("sequential") else 0.0
     old = (previous or {}).get("parameters", {})
+    architecture = args.architecture if args.architecture is not None else old.get(
+        "architecture", "channel" if spec.get("sequential") else "compact_rows")
+    width = args.width_um if args.width_um is not None else old.get("width_um")
+    fingers = args.fingers if args.fingers is not None else old.get("fingers", 1)
+    height = args.height_um if args.height_um is not None else old.get("height_um")
+    if height is None and architecture == "channel":
+        from channel_geometry import minimum_height_um
+        sized = copy.deepcopy(spec)
+        if width is not None:
+            for device in sized["mos"]:
+                device["w_um"] = width
+        height = minimum_height_um(sized, fingers=fingers)
+    if height is None:
+        height = 210.0 if spec.get("sequential") else 160.0
     return {
-        "height_um": args.height_um if args.height_um is not None
-                     else old.get("height_um", default_height),
-        "width_um": args.width_um if args.width_um is not None
-                    else old.get("width_um"),
-        "fingers": args.fingers if args.fingers is not None
-                   else old.get("fingers", 1),
+        "height_um": height, "width_um": width, "fingers": fingers,
+        "architecture": architecture,
         "pin_order": list(args.pin_order) if args.pin_order is not None
                      else list(old.get("pin_order", spec["pins"])),
-        "mirror": args.mirror if args.mirror is not None
-                  else old.get("mirror", False),
+        "mirror": args.mirror if args.mirror is not None else old.get("mirror", False),
         "route_channel_um": args.route_channel_um if args.route_channel_um is not None
-                            else old.get("route_channel_um", default_channel),
+                            else old.get("route_channel_um", 0.0),
     }
 
 
@@ -175,7 +182,7 @@ def _build_one(name: str, spec: dict[str, Any], parameters: dict[str, Any],
         layout, top, generator_manifest = geometry.build_cell(
             build_spec, parameters["height_um"], fingers=parameters["fingers"],
             pin_order=parameters["pin_order"], mirror=parameters["mirror"],
-            route_channel_um=parameters["route_channel_um"])
+            route_channel_um=parameters["route_channel_um"], architecture=parameters["architecture"])
     except geometry.GeometryError as error:
         return {"cell": name, "status": "geometry_failed", "error": str(error)}
     for source_mos in spec["mos"]:
@@ -212,6 +219,62 @@ def _build_one(name: str, spec: dict[str, Any], parameters: dict[str, Any],
     record["fingerprints"] = _fingerprints(record, stage, provenance,
                                            logical_spice_sha256)
     return record
+
+
+def build_candidate_library(output_dir: str | Path, cells: list[str], *,
+                            height_um: float | None, width_um: float | None = None,
+                            fingers: int = 1, mirror: bool = False,
+                            route_channel_um: float = 0.0,
+                            pin_order: list[str] | None = None,
+                            pin_order_mode: str = "declared",
+                            architecture: str = "compact_rows") -> dict[str, Any]:
+    """Build a private, strictly checked cell set without changing publication.
+
+    Failed attempts remain in ``attempts.json`` and have no eligible physical
+    view in the candidate manifest. Existing output is never overwritten.
+    """
+    specs = logic.cell_specs()
+    if not cells or len(cells) != len(set(cells)) or set(cells) - set(specs):
+        raise ValueError("cells must be a nonempty unique selection of canonical cells")
+    if pin_order_mode not in {"declared", "reverse_signals"}:
+        raise ValueError("pin_order_mode must be declared or reverse_signals")
+    if pin_order is not None and pin_order_mode != "declared":
+        raise ValueError("explicit pin_order and pin_order_mode are mutually exclusive")
+    if height_um is None and architecture != "channel":
+        raise ValueError("automatic template height requires the explicit channel architecture")
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    provenance = library._current_provenance()
+    logical_hash = _write_logical_spice(specs, output_dir)
+    records = []
+    attempts = []
+    for name, spec in specs.items():
+        if name not in cells:
+            records.append({"cell": name, "status": "not_published",
+                            "reason": "Not selected for this private experiment."})
+            continue
+        ordered_pins = list(spec["pins"]) if pin_order is None else list(pin_order)
+        if pin_order_mode == "reverse_signals":
+            ordered_pins = list(reversed([pin for pin in ordered_pins if pin not in {"VDD", "VSS"}]))
+            ordered_pins += [pin for pin in spec["pins"] if pin in {"VDD", "VSS"}]
+        parameters = _parameters(spec, argparse.Namespace(
+            height_um=height_um, width_um=width_um, fingers=fingers,
+            pin_order=ordered_pins, mirror=mirror,
+            route_channel_um=route_channel_um, architecture=architecture))
+        record = _build_one(name, spec, parameters, output_dir, provenance, logical_hash)
+        attempts.append(record)
+        records.append(record if record["status"] == "strict_physical_pass" else
+                       {"cell": name, "status": "not_published",
+                        "reason": record.get("error", record["status"])})
+        (output_dir / "attempts.json").write_text(
+            json.dumps(attempts, indent=2) + "\n", encoding="utf-8")
+    manifest_path = output_dir / "doc/cell_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_manifest(records, provenance, logical_hash), indent=2) + "\n",
+        encoding="utf-8")
+    library.load_library(manifest_path, check=True)
+    return {"manifest_path": str(manifest_path), "attempts": attempts}
 
 
 def _copy_views(record: dict[str, Any], source_root: Path, stage: Path) -> None:
@@ -285,6 +348,10 @@ def _prepare_reverify_records(old_manifest: dict[str, Any], specs: dict[str, dic
         _copy_views(record, library_root, stage)
         record["fingerprints"]["deck_sha256"] = current["deck_sha256"]
         _write_record_views(record, stage)
+        physical = verify.verify_physical(
+            stage / record["views"]["gds"], stage / record["views"]["spice"],
+            name, stage / "verification" / name)
+        record["physical"] = _physical_summary(physical)
         result.append(record)
     return result
 
@@ -360,7 +427,7 @@ def _publish(args: argparse.Namespace, specs: dict[str, dict[str, Any]]) -> dict
     if args.reverify:
         if requested or any(value is not None for value in
                             (args.height_um, args.width_um, args.fingers, args.pin_order,
-                             args.route_channel_um)) or args.mirror is not None:
+                             args.route_channel_um, args.architecture)) or args.mirror is not None:
             raise RuntimeError("--reverify cannot be combined with builds or generator parameters")
         if old_manifest is None:
             raise RuntimeError("--reverify requires an existing cell manifest")
@@ -376,17 +443,8 @@ def _publish(args: argparse.Namespace, specs: dict[str, dict[str, Any]]) -> dict
         old_status = {record["cell"]: record["status"] for record in current_library["cells"]}
         pass_names = {name for name, status in old_status.items()
                       if status == "strict_physical_pass"}
-        if not requested.issubset(pass_names):
-            raise RuntimeError("this phase preserves existing publication statuses; new cells are not selectable")
         if gds_names != pass_names:
             raise RuntimeError("GDS membership differs from accepted records; use --rebuild-published")
-        if requested and not requested.issubset(set(specs)):
-            raise RuntimeError("invalid cell selection")
-    elif old_manifest is not None and args.rebuild_published:
-        pass_names = {record["cell"] for record in old_manifest["cells"]
-                      if record.get("status") == "strict_physical_pass"}
-        if not requested.issubset(pass_names):
-            raise RuntimeError("this phase preserves existing publication statuses; new cells are not selectable")
     elif old_manifest is None and not requested:
         raise RuntimeError("no accepted manifest; select cells with --build-cell")
 
@@ -414,13 +472,7 @@ def _publish(args: argparse.Namespace, specs: dict[str, dict[str, Any]]) -> dict
                         continue
                     _copy_views(previous, LIBRARY, stage)
                     record = copy.deepcopy(previous)
-                    _write_record_views(record, stage)
-                    record["fingerprints"] = _fingerprints(
-                        record, stage, current, logical_spice_sha256)
-                    try:
-                        records.append(_verify_existing(record, stage))
-                    except RuntimeError as error:
-                        raise RuntimeError(str(error)) from error
+                    records.append(record)
 
         failed = [record for record in records
                   if record.get("status") != "strict_physical_pass" and
@@ -453,12 +505,18 @@ def main() -> int:
                         help="re-run strict checks and refresh deck evidence without rebuilding GDS")
     parser.add_argument("--height-um", type=float,
                         help="requested cell height for selected cells")
+    parser.add_argument("--auto-channel-height", action="store_true",
+                        help="private channel candidates: use each cell's template height, not a process minimum")
     parser.add_argument("--width-um", type=float,
                         help="selected total width per source MOS (None preserves the canonical width)")
     parser.add_argument("--fingers", type=int,
                         help="parallel finger count for selected cells")
+    parser.add_argument("--architecture", choices=("compact_rows", "channel"),
+                        help="explicit layout architecture; new storage defaults to channel")
     parser.add_argument("--pin-order", type=lambda value: value.split(","),
                         help="comma-separated pin permutation for selected cells")
+    parser.add_argument("--pin-order-mode", choices=("declared", "reverse_signals"),
+                        default="declared", help="pin permutation for private candidates")
     mirror_group = parser.add_mutually_exclusive_group()
     mirror_group.add_argument("--mirror", dest="mirror", action="store_true",
                               help="mirror selected cell geometry horizontally")
@@ -469,15 +527,43 @@ def main() -> int:
                         help="explicit additional routing channel for selected cells")
     parser.add_argument("--check", action="store_true",
                         help="read-only provenance and physical-geometry check")
+    parser.add_argument("--candidate-output", type=Path,
+                        help="build a private candidate library here; never change publication")
     args = parser.parse_args()
     specs = logic.cell_specs()
     unknown = sorted(set(args.build_cell) - set(specs))
     if unknown:
         parser.error("unknown cell name(s): " + ", ".join(unknown))
+    if args.auto_channel_height:
+        if args.candidate_output is None or args.height_um is not None:
+            parser.error("--auto-channel-height requires --candidate-output and no --height-um")
+        if args.architecture not in (None, "channel"):
+            parser.error("--auto-channel-height requires channel architecture")
+        args.architecture = "channel"
+    if args.pin_order_mode != "declared" and args.candidate_output is None:
+        parser.error("--pin-order-mode is available only for private candidates")
+    if args.candidate_output is not None:
+        if args.check or args.reverify or args.rebuild_published:
+            parser.error("--candidate-output cannot be combined with check/reverify/publication rebuild")
+        if not args.build_cell or (args.height_um is None and not args.auto_channel_height):
+            parser.error("--candidate-output requires --build-cell and --height-um or --auto-channel-height")
+        candidate = build_candidate_library(
+            args.candidate_output, args.build_cell, height_um=args.height_um,
+            width_um=args.width_um, fingers=args.fingers if args.fingers is not None else 1,
+            mirror=args.mirror if args.mirror is not None else False,
+            route_channel_um=args.route_channel_um if args.route_channel_um is not None else 0.0,
+            pin_order=args.pin_order, pin_order_mode=args.pin_order_mode,
+            architecture=args.architecture or "compact_rows")
+        counts: dict[str, int] = {}
+        for record in candidate["attempts"]:
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+        print(json.dumps({"manifest": candidate["manifest_path"], "statuses": counts}, sort_keys=True))
+        return 0 if set(counts) == {"strict_physical_pass"} else 2
     if args.check and (args.build_cell or args.rebuild_published or args.reverify or
                        args.height_um is not None or args.width_um is not None or
                        args.fingers is not None or args.pin_order is not None or
-                       args.mirror is not None or args.route_channel_um is not None):
+                       args.mirror is not None or args.route_channel_um is not None or
+                       args.architecture is not None):
         parser.error("--check is read-only and cannot be combined with build/reverify options")
     try:
         if args.check:

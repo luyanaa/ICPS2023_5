@@ -189,6 +189,127 @@ assembly. See its `doc/README.md` and per-cell `doc/cell_manifest.json`.
 declarations for accepted cells, but refuses Liberty because no qualified
 timing library exists.
 
+`frame.py` measures the actual 1600µm/28-pad frame polygons. With explicit
+20/10/10µm pad/frame/edge engineering reservations, the remaining Boolean
+polygon is 1,997,200µm²; this is not a process-qualified usable core or a
+bondout/power assignment. The two unverified “4×” interpretations keep unknown
+core capacity rather than scaling this result.
+
+`feasibility.py` compares INV/NAND2/AOI21 template heights and three physically
+drawn PDNs (`edge_rails`, `segmented_rails`, `local_clusters`) on one fixed
+NAND+INV benchmark. Before shared-diffusion generation, sparse-channel H200
+candidates closed strict DRC/LVS/PEX, postlayout assembly, DC truth and
+sensitized path arcs for all three PDNs: 548×272 =149,056µm² experimental
+logic core, including signal/supply routing and whitespace, excluding
+unintegrated frame/IO. A mirrored experiment also closed all three PDNs.
+The 50/60/70µm candidates fail that template's height bounds; this is neither a
+global 5/6/7-track impossibility proof nor a qualified row/site. Run selected
+current experiments rather than repeating unchanged historical failures:
+
+```bash
+nix develop --command python3 libs.tech/stdcell/feasibility.py --out build/m0-selected --height 50 --height 60 --height 70 --height 200 --architecture channel --mirror
+nix develop --command python3 libs.tech/stdcell/benchmarks.py all --out build/rtl-benchmarks
+```
+
+`metrics.py` requires complete observed physical/functional/routing gates and
+ranks routed-core area first, routing robustness next, electrical/contact/PDN
+costs last. Missing measurements stay unknown, never zero. No clock target is
+specified, so measured delay is not a ranking objective. `benchmarks.py`
+provides real RTL and independent reference semantics for tiny logic,
+INV/NAND2/AOI21, mux4+decoder, counter, shift-register4, ALU8 and ripple-adder8;
+mapped-netlist success alone is not routed or electrical acceptance.
+
+`channel_geometry.py` now reuses topology-safe native Euler diffusion sharing.
+The private W24/L6, reverse-signal-order bank has 16 strict physical passes.
+Its 14 combinational cells have 13 complete nominal truth/arc passes; OAI21's
+arc convergence failure remains explicit. Example channel-template dimensions
+are below; these are **A_cell**, not completed core area or process minima:
+
+| Cell | Width × height (µm) | A_cell (µm²) |
+|------|---------------------|--------------|
+| INV | 166 × 150 | 24,900 |
+| NAND2 / NOR2 | 236 × 170 | 40,120 |
+| AOI21 / OAI21 | 306 × 200 | 61,200 |
+| BUF | 236 × 160 | 37,760 |
+| XOR2 | 516 × 240 | 123,840 |
+| MUX2 TG6T / static | 372 × 190 / 652 × 260 | 70,680 / 169,520 |
+
+Six minimum logic cells passed 24 actual zero-gap array cases: 2×2, 4×4,
+mirrored rows and reversed R180 rows, including strict checks, per-instance
+truth, pin windows and conductor isolation. Their supplies are instance-scoped
+and ideally driven by the bench, not a completed shared row/core PDN.
+
+Build a new private bank and exercise a real RTL core:
+
+```bash
+nix develop --command python3 libs.ref/ICPS2023_5_gen_sc/tools/make_gen_sc.py \
+  --candidate-output build/channel-bank --auto-channel-height \
+  --pin-order-mode reverse_signals \
+  --build-cell INV_X1 --build-cell BUF_X1 \
+  --build-cell NAND2_X1 --build-cell NAND3_X1 \
+  --build-cell NOR2_X1 --build-cell NOR3_X1 \
+  --build-cell AOI21_X1 --build-cell OAI21_X1 \
+  --build-cell AOI22_X1 --build-cell OAI22_X1 \
+  --build-cell XOR2_X1 --build-cell XNOR2_X1 \
+  --build-cell MUX2_TG6T_X1 --build-cell MUX2_STATIC_X1 \
+  --build-cell LATCH_GATE_X1 --build-cell DFF_TG_X1
+nix develop --command python3 libs.tech/stdcell/routed_benchmarks.py \
+  --manifest build/channel-bank/doc/cell_manifest.json \
+  --out build/tiny-routed --benchmark tiny_and
+```
+
+Omit `--benchmark` to run all seven RTL fixtures. Outputs must be new
+directories. The flow retains both accepted-only area-oriented ABC and
+primitive covers: ABC is heuristic, so neither an ABC cover nor a smaller
+A_cell sum is declared the routed winner. Actual ML1/TiN/CNT connectivity,
+strict physical checks, full-top electrical behavior and exact polygon fit
+gate ranking. Multirow placement is width-bounded, not a qualified site or an
+optimal placement proof; wrapped row origins are snapped back to the route
+lattice, and opposing-row rail spacing evidence is reported in µm. Complete
+A_core remains separate from frame/pad and power-source integration; failed
+routing, SPICE or frame fit stays ineligible.
+
+### Current closure boundary
+
+The latest all-fixture routed run has one eligible experimental result:
+`tiny_and/primitive/segmented_rails` at 116,644 µm² routed-core area, with exact
+measured-polygon fit, strict native-1M DRC/LVS/PEX, whole-core postlayout
+behavior, and zero route overflow/shorts. `inv_nand2_aoi21`, `mux4_decoder`,
+`counter`, and `shift_register4` remain failed by observed route or physical
+proof gates. ALU8 and ripple-adder8 are rejected by their accepted-cell
+lower-bound area before routing; this is not a process-wide impossibility
+claim. The comparison remains an experimental core result, not frame/pad,
+power-source, or I/O integration.
+
+The remaining blockers are explicit:
+
+* **Device and timing calibration:** the nominal BSIMSOI fit is only W=24 µm,
+  L=6 µm at 25 °C. No measured geometry scaling, PVT/corner, body/back-gate,
+  C–V, silicon, jitter, metastability, or qualified clock/timing library is
+  available. Reported storage bounds and cell arcs are feasibility evidence,
+  not fMAX or timing signoff.
+* **Physical implementation qualification:** accepted cells and routed cores
+  are checked against repository DRC/LVS/PEX/assembly decks, but no qualified
+  placement site, row/abutment contract, density, CTS, clock network, PDN,
+  IR-drop, EM, or application-scale routed sequential core exists. The
+  sequential evidence is leaf-cell evidence; counter and shift-register
+  routing did not close.
+* **Frame, I/O, and power delivery:** the measured frame Boolean polygon is a
+  geometric fit envelope only. There is no qualified pad-to-net assignment,
+  VDD/VSS source path, M3–M4/M5 I/O acceptance, ESD qualification, or assembled
+  frame/core DRC/LVS/PEX closure.
+* **Library and process contract:** no qualified Liberty, CDL, Verilog, site,
+  timing corners, or LibreLane/OpenROAD flow is shipped. Upper metals remain
+  outside the canonical 1M contract, and SRAM is deferred.
+
+ 
+The shared-diffusion gated latch and TG DFF separately passed both stored
+states and 10/1000µs stopped clocks at nominal 3V/25°C, 10fF, 2ns slew with
+explicit Gear integration. Their conservative tested setup/hold bounds are
+16/−4ns and 8/2ns; DFF high/low pulse bounds are 8/16ns. Six DFF aperture
+samples failed numerically and remain failed, never interpolated into passing
+bounds. These leaf experiments are not routed counter/shift-register closure,
+fMAX, PVT, metastability, retention qualification or measured model calibration.
 This is an experimental cell-generation and model-validation path, not a
 qualified standard-cell library or placed-core flow. Generated dimensions and
 route lengths are geometric candidate metrics; they do not establish a
@@ -225,8 +346,8 @@ wrappers and absolute-maximum voltages are not ESD ratings. SRAM is deferred.
 | Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, experimental stdcell and ALU contract, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD remains excluded because the SCL config is partial and has no usable site or timing library. |
 | Experimental stdcell pilot | H160 `AOI21_X1` (183 × 160 µm; 29,280 µm²): strict DRC/LVS/PEX and postlayout assembly passed; 8 truth rows and 5 model-based arcs passed. Not process or timing qualification. |
 | LibreLane configuration checks | LibreLane 3.0.11 loads the partial SCL. A normal invocation stops at PDK validation with missing timing/site/drive/tie/buffer, PDN/RC/CTS, and `MAGIC_PDK_SETUP` inputs; an isolated Classic config substituting Magic-dependent and selected KLayout/signoff steps removes the Magic setup prerequisite from that check but still stops on the remaining PDK inputs. No floorplan, placement, or routing ran; native KLayout DRC/LVS/PEX remains the independent verification path. CI remains non-LibreLane. |
-| ALU view and native route evidence | Accepted-view export validates the 161-instance ALU, three used cells, and 11 accepted-cell black boxes; Liberty/model metadata is refused. `test_alu.py` passes 7 tests; strict accepted-cell manifest verification passes. Native ML1 routing timed out on two attempts without routed GDS/evidence. |
-| Sequential geometry pilot | `LATCH_TG_X1` H210 geometry smoke (`route_channel=40`) pre-routes D, connects VDD through two TiN/ML1 transitions at `(101.5, 200.0)` and `(154.5, 200.0)`, and commits Q/N2/NCLK via routes; it then fails with no legal ML1 route for N1 between `(84.0, 65.0)` and `(224.5, 27.0)`. No strict sequential DRC/LVS/PEX/assembly or postlayout-state evidence exists. |
+| ALU view and native route evidence | Accepted-cell ALU4 mapping/export and reference semantics were exercised; its earlier native-route attempts timed out without completed area evidence. New RTL fixtures cover ALU8 and ripple-adder8. Neither a mapped instance-area sum nor a timeout is promoted to routed-core area. |
+| Sequential geometry pilot | Native sparse-channel TG/gated latch and DFF layouts passed strict DRC/LVS/PEX/assembly and real postlayout capture/hold without internal loads. Gated latch/DFF and TG DFF also passed nominal both-polarity setup/hold/pulse and 10/1000µs stopped-clock experiments. One TG-latch hold0ns sample failed ngspice convergence; no pass is claimed for that candidate. No row/application/PVT/metastability qualification follows. |
 
 ## Known limits
 

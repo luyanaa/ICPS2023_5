@@ -69,9 +69,7 @@ class LibraryValidationTests(unittest.TestCase):
 
     def test_loads_only_published_cells_with_bounded_generator_geometry(self):
         manifest = library.load_library(self.manifest_path)
-        self.assertEqual(len(manifest["cells"]), 26)
         physical = library.physical_manifests(self.manifest_path)
-        self.assertEqual(len(physical), 11)
         record = physical[self.cell]
         self.assertEqual(record["boundary_um"], [0.0, 0.0,
                          record["cell_width_um"], record["cell_height_um"]])

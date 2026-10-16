@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Pure contract tests for the sequential closure attempt recorder."""
+"""Contract tests for the sequential closure experiment runner."""
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,44 +17,25 @@ import sequential_closure
 
 
 class SequentialClosureTests(unittest.TestCase):
-    def test_parameter_sweep_is_fixed_ordered_and_preserves_native_dimensions(self):
-        specs = logic.cell_specs()
-        expected_count = (len(sequential_closure.SWEEP_HEIGHTS_UM) *
-                          len(sequential_closure.SWEEP_ROUTE_CHANNELS_UM) *
-                          len(sequential_closure.SWEEP_PIN_ORDER_VARIANTS) *
-                          len(sequential_closure.SWEEP_MIRRORS))
-        for name in sequential_closure.TARGET_CELLS:
-            with self.subTest(cell=name):
-                first = sequential_closure.parameter_sweep(specs[name])
-                self.assertEqual(first, sequential_closure.parameter_sweep(specs[name]))
-                self.assertEqual(len(first), expected_count)
-                self.assertEqual(len({
-                    sequential_closure._candidate_id(name, index, parameters)
-                    for index, parameters in enumerate(first, start=1)
-                }), expected_count)
-                self.assertEqual(first[0], {
-                    "height_um": sequential_closure.SWEEP_HEIGHTS_UM[0],
-                    "route_channel_um": sequential_closure.SWEEP_ROUTE_CHANNELS_UM[0],
-                    "pin_order_variant": "declared",
-                    "pin_order": list(specs[name]["pins"]),
-                    "mirror": False,
-                    "fingers": 1,
-                    "mos_dimensions_changed": False,
-                })
-                self.assertEqual({item["height_um"] for item in first},
-                                 set(sequential_closure.SWEEP_HEIGHTS_UM))
-                self.assertEqual({item["route_channel_um"] for item in first},
-                                 set(sequential_closure.SWEEP_ROUTE_CHANNELS_UM))
-                self.assertEqual({item["pin_order_variant"] for item in first},
-                                 set(sequential_closure.SWEEP_PIN_ORDER_VARIANTS))
-                self.assertEqual({item["mirror"] for item in first},
-                                 set(sequential_closure.SWEEP_MIRRORS))
-                for parameters in first:
-                    self.assertEqual(set(parameters["pin_order"]),
-                                     set(specs[name]["pins"]))
-                    self.assertEqual(len(parameters["pin_order"]),
-                                     len(specs[name]["pins"]))
-                    self.assertFalse(parameters["mos_dimensions_changed"])
+    def test_compact_selection_requires_explicit_height(self):
+        with self.assertRaises(ValueError):
+            sequential_closure.parameter_sweep(
+                logic.cell_specs()["LATCH_TG_X1"], architecture="compact_rows")
+
+
+    def test_postlayout_stage_rejects_incomplete_storage_evidence(self):
+        class IncompleteCharacterizer:
+            def characterize_storage(self, spec, postlayout, output_dir, **kwargs):
+                return {"passed": True}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = sequential_closure._run_postlayout_storage(
+                logic.cell_specs()["LATCH_TG_X1"], "LATCH_TG_X1_TEST",
+                root / "postlayout.spice", root / "state", root,
+                IncompleteCharacterizer())
+        self.assertEqual(stage["status"], "failed")
+
 
     def test_failed_stages_remain_not_accepted_and_candidates_are_never_ranked(self):
         parameters = sequential_closure.parameter_sweep(
@@ -83,6 +65,28 @@ class SequentialClosureTests(unittest.TestCase):
         self.assertEqual(verified["status"], "verified_unpublished_candidate")
         self.assertFalse(verified["accepted_for_publication"])
         self.assertNotIn("rank", verified)
+
+    def test_logical_model_failure_is_diagnostic_not_a_physical_gate(self):
+        parameters = sequential_closure.parameter_sweep(
+            logic.cell_specs()["DFF_TG_X1"])[0]
+        candidate = sequential_closure._new_candidate(
+            "DFF_TG_X1", "DFF_TG_X1_DIAGNOSTIC_TEST", parameters)
+        for stage in sequential_closure.STAGE_NAMES:
+            if stage == "logical_model_state":
+                sequential_closure._set_stage(
+                    candidate, stage, "failed",
+                    error="ideal logical-model convergence failure")
+            else:
+                sequential_closure._set_stage(candidate, stage, "passed")
+
+        self.assertEqual(candidate["status"], "verified_unpublished_candidate")
+        self.assertEqual(candidate["failed_stages"], ["logical_model_state"])
+        self.assertEqual(candidate["diagnostic_failures"], ["logical_model_state"])
+        self.assertEqual(candidate["gate_failures"], [])
+        self.assertEqual(candidate["incomplete_gate_stages"], [])
+        self.assertIsNone(candidate["failure_stage"])
+        self.assertFalse(candidate["accepted_for_publication"])
+        self.assertNotIn("rank", candidate)
 
     def test_output_root_rejects_source_and_published_artifact_trees(self):
         for relative in ("libs.tech/stdcell/sequential-output",

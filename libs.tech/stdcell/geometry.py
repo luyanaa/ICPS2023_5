@@ -666,16 +666,18 @@ def _island_wire_cost(placements):
 
 def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                pin_order: Sequence[str] | None = None, mirror: bool = False,
-               route_channel_um: float = 0.0):
+               route_channel_um: float = 0.0, architecture: str = "compact_rows"):
     """Build canonical MOS geometry with optional explicit routing whitespace.
 
     Requested heights are never enlarged silently. A 5T/6T/7T request below the
-    process/contact-derived minimum raises :class:`GeometryError` with the first
-    feasible geometric height. Shared active is formed only along an explicit
+    selected template's minimum raises :class:`GeometryError` with that template's
+    height bound, not a process-wide impossibility proof. Shared active follows an
     Euler path with electrically identical adjacent diffusion nets.
     """
     if not isinstance(spec, Mapping):
         raise GeometryError("cell specification must be a mapping")
+    if architecture not in {"compact_rows", "channel"}:
+        raise GeometryError("architecture must be compact_rows or channel")
     requested = _finite(height_um, "requested cell height")
     extension = _finite(route_channel_um, "route-channel width")
     if requested <= 0:
@@ -712,6 +714,11 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
 
     if not set(pins).issubset(used):
         raise GeometryError("declared top-level pins absent from the MOS network: %s" % sorted(set(pins)-used))
+    if architecture == "channel":
+        from channel_geometry import build_channel_cell
+        return build_channel_cell(
+            dict(spec), requested, fingers=nf, pin_order=ordered_pins,
+            mirror=mirror, route_channel_um=extension)
 
     rows = {}
     for polarity in ("p", "n"):
@@ -1816,7 +1823,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         _put_text(layout,top,text_layer,pin,unique[0])
         pin_windows[pin]=windows
     bbox=[0.0,0.0,_snap(cell_width),actual_height]
-    manifest={"name":name,"process_profile":"icps2023_5_1m","bbox_um":bbox,
+    manifest={"name":name,"process_profile":"icps2023_5_1m","architecture":"compact_rows","bbox_um":bbox,
         "width_um":bbox[2],"height_um":bbox[3],"area_um2":bbox[2]*bbox[3],
         "pins":pin_windows,"devices":device_records,"rows":row_records,
         "mos_count":len(device_records),"contacts_count":len(contact_records),
@@ -1829,7 +1836,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         "folding":{"requested_parallel_fingers":nf,"physical_parallel_devices":len(devices),
                    "total_width_preserved":True,
                    "shared_active_euler_rows":sum(r["euler_shared_active"] for r in row_records)},
-        "variant":{"fingers":nf,"mirror":bool(mirror),"pin_order":ordered_pins},
+        "variant":{"fingers":nf,"mirror":bool(mirror),"pin_order":ordered_pins,"architecture":"compact_rows"},
         "routing":{"local_conductors":["ML1","TiN"],"unrouted_nets":[],
                     "ML1_wire_length_um":_snap(ml1_route_length),
                     "TiN_wire_length_um":_snap(tin_route_length),

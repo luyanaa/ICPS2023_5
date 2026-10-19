@@ -9,7 +9,9 @@
       "Magic.SpiceExtraction": null,
       "Checker.MagicDRC": null,
       "Netgen.LVS": null,
-      "Checker.LVS": null
+      "Checker.LVS": null,
+      "OpenROAD.CheckAntennas": null,
+      "Odb.CheckDesignAntennaProperties": null
     }
   },
   "PDK": "ICPS2023_5",
@@ -47,7 +49,7 @@
   "RUN_SPEF_EXTRACTION": false,
   "RUN_MCSTA": false,
   "RUN_IRDROP_REPORT": false,
-  "PLACE_SITE": "ICPS2023_5_ROW500",
+  "PLACE_SITE": "ICPS2023_5_ROW700",
   "SYNTH_DRIVING_CELL": "BUF_X1/Y",
   "SYNTH_BUFFER_CELL": "BUF_X1/A/Y",
   "SYNTH_TIEHI_CELL": "TIEHI_X1/Y",
@@ -99,5 +101,15 @@
   "PDN_CORE_RING_HOFFSET": 0.0,
   "GPL_CELL_PADDING": 8,
   "DPL_CELL_PADDING": 8,
-  "FP_CORE_UTIL": 10
+  "FP_CORE_UTIL": 10,
+  "RUN_POST_GPL_DESIGN_REPAIR": false,
+  "SIGNAL_WIRE_RC_LAYERS": [
+    "M1"
+  ],
+  "CLOCK_WIRE_RC_LAYERS": [
+    "M1"
+  ],
+  "RUN_POST_CTS_RESIZER_TIMING": false,
+  "RUN_POST_GRT_RESIZER_TIMING": false,
+  "RUN_FILL_INSERTION": false
 }

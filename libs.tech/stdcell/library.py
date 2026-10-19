@@ -35,8 +35,8 @@ PHYSICAL_LAYERS = ((1, 0), (3, 0), (5, 0), (7, 0), (8, 0), (18, 0), (19, 0))
 # (libs.tech/librelane/experimental_1m/icps2023_5_1m.tech.lef declares the same
 # SITE).  Cells are height-normalised to it; a cell of another height declares
 # no site and is therefore not row-placeable rather than silently mis-declared.
-ROW_SITE_NAME = "ICPS2023_5_ROW500"
-ROW_SITE_HEIGHT_UM = 500.0
+ROW_SITE_NAME = "ICPS2023_5_ROW700"
+ROW_SITE_HEIGHT_UM = 700.0
 
 
 class LibraryValidationError(ValueError):

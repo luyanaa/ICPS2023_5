@@ -1,0 +1,89 @@
+{
+  "bias": {
+    "delta_v": 0.05,
+    "temperature_c": 25,
+    "vd_v": 1.0,
+    "vg_v": 1.5,
+    "vp_v": -1.0
+  },
+  "card": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/models/b4soi_unified_bridge_experimental.inc",
+  "card_sha256": "9557eee9c2faadc7a8e5c9f32379f452b540eb41534e926932635d201771be6e",
+  "geometry": {
+    "l_um": 6.0,
+    "w_um": 20.0
+  },
+  "limitations": [
+    "Local small-signal ratios at one bias point; not thresholds extracted from measured transfer curves.",
+    "Unified card parameters were fitted to zero-body-bias I-V data; a small gmb may reflect the fit or the equation, and the audit does not separate them by refitting.",
+    "Direct vs assembled compares one contact network; it does not characterize the physical N_CH body path.",
+    "Model capability only; no silicon body-bias or FD/PD conclusion."
+  ],
+  "resolution": {
+    "criterion": "same sign and spread <= 25% of max |slope|",
+    "relative_spread": 0.1923829507305749,
+    "same_sign": true,
+    "slope_values_a_per_v": [
+      2.1924500003033323e-09,
+      1.7706599999157274e-09,
+      2.1924500003033323e-09,
+      1.8582822580646598e-09,
+      1.8582822580646598e-09,
+      1.9101774193550607e-09,
+      1.949624999994954e-09,
+      1.885141129033718e-09
+    ],
+    "spread_a_per_v": 4.217900003876049e-10
+  },
+  "resolution_status": "NUMERICALLY_RESOLVED",
+  "schema_version": 1,
+  "selector": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/b4soi_unified_bridge_experimental.lib.spice",
+  "selector_sha256": "cec61be635c32990f41b288591df26fb15d1137829ea112d9b368aabd3b3e62a",
+  "sensitivity": {
+    "equivalent_dvth_dvp": -6.423989682039647e-06,
+    "ge_a_per_v": -1.7160000000000222e-05,
+    "gm_a_per_v": 0.00034129102144,
+    "gmb_assembled_a_per_v": 1.7706599999157274e-09,
+    "gmb_p_a_per_v": 2.1924500003033323e-09,
+    "gmb_tight_tolerances_a_per_v": 2.1924500003033323e-09,
+    "qb_at_vp0_c": -8.3497376955e-14
+  },
+  "status": "MODEL_CAPABILITY_ONLY_NOT_SILICON_QUALIFIED",
+  "sweep_matrix": {
+    "default": {
+      "id_max_a": 0.00027528841,
+      "id_min_a": 0.000275281346,
+      "points": 31,
+      "slope_a_per_v": 1.8582822580646598e-09,
+      "status": "observed"
+    },
+    "reltol_1e-4": {
+      "id_max_a": 0.00027528841,
+      "id_min_a": 0.000275281346,
+      "points": 31,
+      "slope_a_per_v": 1.8582822580646598e-09,
+      "status": "observed"
+    },
+    "reltol_1e-6": {
+      "id_max_a": 0.000275288932,
+      "id_min_a": 0.000275281346,
+      "points": 31,
+      "slope_a_per_v": 1.9101774193550607e-09,
+      "status": "observed"
+    },
+    "reltol_1e-8": {
+      "id_max_a": 0.000275288932,
+      "id_min_a": 0.000275281346,
+      "points": 31,
+      "slope_a_per_v": 1.949624999994954e-09,
+      "status": "observed"
+    },
+    "reverse_default": {
+      "id_max_a": 0.000275288932,
+      "id_min_a": 0.000275281346,
+      "points": 31,
+      "slope_a_per_v": 1.885141129033718e-09,
+      "status": "observed"
+    }
+  },
+  "tool": "audit_nmos4_body_bias_resolution.py"
+}

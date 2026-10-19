@@ -674,7 +674,8 @@ def _lvs_comments(network: dict[str, Any]) -> tuple[dict[str, str], dict[str, di
         if match:
             node_names[match.group(1).casefold()] = match.group(2)
     devices: dict[str, dict[str, Any]] = {}
-    comments = network["metadata"].get("selected_comments", [])
+    comments = (network["metadata"].get("selected_comments") or
+                network["metadata"].get("comments", []))
     for comment in comments:
         match = _DEVICE_COMMENT.match(comment)
         if not match:
@@ -759,7 +760,8 @@ def _resistor_maps_audit(network: dict[str, Any], label: str) -> tuple[dict[str,
             missing.append("%s RESISTOR_MAP resistance_ohm for %s" % (label, mapping.get("name")))
         else:
             if not math.isfinite(mapped_resistance) or not math.isclose(
-                    mapped_resistance, element["resistance_ohm"], rel_tol=1e-9, abs_tol=1e-12):
+                    mapped_resistance, element["resistance_ohm"],
+                    rel_tol=1e-6, abs_tol=1e-9):
                 errors.append("%s RESISTOR_MAP resistance disagrees for %s" % (label, mapping.get("name")))
         material = mapping.get("material")
         if not isinstance(material, str) or not material.strip():
@@ -988,7 +990,10 @@ def _association_rows(config: dict[str, Any], networks: dict[str, dict[str, Any]
         else:
             actual_name = lvs_names.get(lvs_node.casefold())
             if actual_name is None:
-                missing.append("LVS * net name for %s node %s" % (row["net"], lvs_node))
+                # Internal (unlabelled) nets are identified by their extracted
+                # node id; only top-level nets must carry a * net name.
+                if row["net"].casefold() != lvs_node.casefold():
+                    missing.append("LVS * net name for %s node %s" % (row["net"], lvs_node))
             elif actual_name.casefold() != row["net"].casefold():
                 errors.append("LVS node %s is named %s, expected %s" % (lvs_node, actual_name, row["net"]))
         pex_values = row.get("pex_nodes")

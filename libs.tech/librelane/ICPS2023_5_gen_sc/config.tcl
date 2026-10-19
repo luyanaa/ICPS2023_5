@@ -2,10 +2,11 @@
 # Layout follows the per-SCL organization used by icsprout55-pdk; no process
 # values, timing data, placement site, or routing data are copied from it.
 #
- # This registers only views that exist and are accepted by this PDK. The
- # library has no qualified placement site or row contract. The Liberty below
- # is an explicit, single-corner Xyce evidence artifact; it is not a process
- # signoff timing view and excludes sequential setup/hold arcs.
+ # This registers only views that exist and are accepted by this PDK. Cells
+ # use the ICPS2023_5_ROW700 placement site; no qualified filler/decap cells or
+ # signoff timing library exist. The Liberty below is an explicit, single-corner
+ # Xyce evidence artifact; it is not a process signoff timing view and excludes
+ # sequential setup/hold arcs.
 
 set scl_dir [file normalize [file join \
     $::env(PDK_ROOT) $::env(PDK) libs.ref $::env(STD_CELL_LIBRARY)]]

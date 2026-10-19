@@ -20,7 +20,7 @@ nix develop ../librelane --command librelane --manual-pdk \
 ```
 
 `inv_nand2_aoi21` is the single-row smoke design: three gates on the 1x1
-profile, whose core is only two 500 µm rows deep. A one-cell design
+profile, whose core is one 700 µm row deep. A one-cell design
 (`tiny_and`) degenerates RePlAce's Nesterov solver, so the smoke design keeps a
 few instances instead.
 
@@ -31,7 +31,7 @@ DEF template: the frame's 28/56 fixed pads carry no net assignment yet, and a
 DEF template whose pins do not exist in the design is refused by
 `OpenROAD.ApplyDEFTemplate`. The die areas stay inside the measured frame
 envelope (1340 × 1340 µm for 1x1, 2940 × 2940 µm for 2x2) with the core rounded
-to whole 500 µm rows, so the streamed layout can be translated onto the frame
+to whole 700 µm rows, so the streamed layout can be translated onto the frame
 overlay once a pad-to-net assignment exists.
 
 The RTL lives with the standard-cell tooling (`libs.tech/stdcell/alu4.v`,

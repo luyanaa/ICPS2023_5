@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import math
 import os
 from pathlib import Path
@@ -518,6 +519,154 @@ def _preflight(gds_path, top_name):
 
 
 
+def _erc_config(gds_path, top_name, lvs_path, pex_path, assembled_path):
+    """Build the post-layout ERC config from the cell's own extraction output.
+
+    Every MOS terminal net is anchored, including unlabelled internal nets
+    (identified by their extracted node id).  Without that, a series stack's
+    internal diffusion would be reported as an unassigned conductor island.
+    """
+    ports = _comment_records(pex_path, "PORT_MAP")
+    mos_maps = _comment_records(pex_path, "MOS_MAP")
+    maps = _comment_records(assembled_path, "ASSEMBLY_NODE_MAP")
+    pex_to_asm = {str(item.get("pex")): str(item.get("assembled")) for item in maps}
+    lvs_text = Path(lvs_path).read_text(encoding="utf-8")
+    node_to_name = {node: name for node, name in
+                    re.findall(r"^\* net (\S+) (\S+)", lvs_text, re.MULTILINE)}
+    instances = {}
+    for line in lvs_text.splitlines():
+        match = re.match(r"^(M\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+\S+\s+(NMOS|PMOS)\b",
+                         line, re.IGNORECASE)
+        if match:
+            instance = match.group(1)
+            key = instance[1:] if instance[:1].casefold() == "m" else instance
+            instances[key.casefold()] = {
+                "d": match.group(2), "g": match.group(3), "s": match.group(4)}
+    lvs_devices = {}
+    for match in re.finditer(
+            r"^\* device instance (\S+) \S+ \S+ ([+-]?[\d.]+),([+-]?[\d.]+) (NMOS|PMOS)",
+            lvs_text, re.MULTILINE | re.IGNORECASE):
+        instance, x_um, y_um, polarity = match.groups()
+        nets = instances.get(instance.casefold())
+        if nets is None:
+            raise ValueError("LVS device %s has no MOS instance line" % instance)
+        key = "%s@%.6f,%.6f" % (polarity.upper(), float(x_um), float(y_um))
+        lvs_devices[key.casefold()] = nets
+
+    rows_by_node = {}
+
+    def add(node, role, pex_node, assembled_node, anchor):
+        lvs_node = str(node)
+        entry = rows_by_node.setdefault(lvs_node, {
+            "net": node_to_name.get(lvs_node, lvs_node),
+            "lvs_node": lvs_node,
+            "pex_nodes": set(), "assembled_nodes": set(), "anchors": [],
+        })
+        if pex_node:
+            entry["pex_nodes"].add(str(pex_node))
+            if str(pex_node) in pex_to_asm:
+                entry["assembled_nodes"].add(pex_to_asm[str(pex_node)])
+        if anchor is not None:
+            entry["anchors"].append(anchor)
+
+    for mapping in mos_maps:
+        nets = lvs_devices.get(str(mapping.get("device", "")).casefold())
+        if nets is None:
+            raise ValueError("PEX MOS_MAP %s has no matching LVS device" %
+                             mapping.get("device"))
+        for role in ("drain", "gate", "source"):
+            pex_node = mapping.get(role)
+            if role == "gate":
+                anchor = {"kind": "pin", "name": nets["g"], "layer": "TIN",
+                          "point_um": [mapping.get("gate_x_um"),
+                                       mapping.get("gate_y_um")]}
+            else:
+                prefix = "source" if role == "source" else "drain"
+                anchor = {"kind": "pin", "name": nets["d" if role == "drain" else "s"],
+                          "layer": "ML1",
+                          "point_um": [mapping.get("%s_x_um" % prefix),
+                                       mapping.get("%s_y_um" % prefix)]}
+            add(nets["d" if role == "drain" else "g" if role == "gate" else "s"],
+                role, pex_node, pex_to_asm.get(str(pex_node)), anchor)
+
+    # Pin-only nets (if any) still need an anchor for the island screen.
+    for logical in sorted({str(item.get("logical")) for item in ports}):
+        node = next((key for key, name in node_to_name.items()
+                     if name.casefold() == logical.casefold()), None)
+        if node is None:
+            continue
+        for item in ports:
+            if item.get("logical") != logical:
+                continue
+            add(node, "pin", item.get("physical"), pex_to_asm.get(str(item.get("physical"))),
+                {"kind": "pin", "name": logical, "layer": item["layer"],
+                 "point_um": [item["x_um"], item["y_um"]]})
+
+    rows = []
+    for entry in rows_by_node.values():
+        entry["pex_nodes"] = sorted(entry["pex_nodes"])
+        entry["assembled_nodes"] = sorted(entry["assembled_nodes"])
+        # De-duplicate identical anchors.
+        unique, seen = [], set()
+        for anchor in entry["anchors"]:
+            key = (anchor["layer"], tuple(anchor["point_um"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(anchor)
+        entry["anchors"] = unique
+        if entry["pex_nodes"] and entry["assembled_nodes"] and entry["anchors"]:
+            rows.append(entry)
+    return {
+        "gds": str(gds_path), "gds_top": top_name,
+        "lvs": str(lvs_path), "pex": str(pex_path),
+        "assembled": str(assembled_path), "top": top_name,
+        "subcircuits": {"lvs": top_name, "pex": top_name + "_pex",
+                        "assembled": top_name},
+        "layer_mode": "design",
+        "contact_policy": "strict",
+        "expected_logical_associations": rows,
+    }
+
+
+def _run_postlayout_erc(config, output_dir):
+    tools_dir = ROOT / "libs.tech/ngspice/tools"
+    spec = importlib.util.spec_from_file_location(
+        "icps_check_postlayout_erc", tools_dir / "check_postlayout_erc.py")
+    module = importlib.util.module_from_spec(spec)
+    added = False
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+        added = True
+    try:
+        spec.loader.exec_module(module)
+        report = module.run_erc(config)
+    finally:
+        if added and sys.path and sys.path[0] == str(tools_dir):
+            sys.path.pop(0)
+    path = Path(output_dir) / "postlayout_erc.json"
+    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    required = ("gds_geometry", "illegal_contacts", "map_correspondence",
+                "expected_logical_associations", "logical_shorts_and_opens",
+                "body_state_and_local_ties", "unassigned_conductor_islands")
+    problems = [name for name in required
+                if report["checks"].get(name, {}).get("status") != "PASS"]
+    failed = [name for name, check in report["checks"].items()
+              if check.get("status") == "FAIL"]
+    if problems or failed:
+        raise RuntimeError("post-layout ERC is not clean: problems=%s failures=%s "
+                           "(overall %s); see %s"
+                           % (problems or [], failed or [],
+                              report.get("status"), path))
+    unconfigured = [name for name, check in report["checks"].items()
+                    if check.get("status") == "BLOCKED"]
+    return {"passed": True, "status": "CLEAN_REQUIRED_CHECKS",
+            "overall_status": report.get("status"),
+            "required_checks": list(required),
+            "unconfigured_screens": unconfigured,
+            "report": str(path)}
+
+
 def _record_reliability(evidence, output_dir, reliability_config, physical_artifacts):
     report_path = output_dir / "reliability.json"
     tools_dir = ROOT / "libs.tech/ngspice/tools"
@@ -755,6 +904,8 @@ def verify_physical(gds_path, reference_path, top_name, output_dir, *,
         evidence["pex_sha256"] = sha256(pex_path)
         evidence["pex_spice"] = str(pex_path)
         evidence["assembled_sha256"] = sha256(assembled)
+        erc_config = _erc_config(gds_path, top_name, extracted, pex_path, assembled)
+        evidence["postlayout_erc"] = _run_postlayout_erc(erc_config, output_dir)
 
         run_command(
             [sys.executable, PEX, "--input", fab_gds, "--top", top_name,

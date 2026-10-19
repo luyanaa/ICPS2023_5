@@ -242,7 +242,7 @@ class ModelBindingTests(unittest.TestCase):
 class RowSiteContractTests(unittest.TestCase):
     """Published cells must be row-placeable and share one power-rail geometry.
 
-    The LibreLane profiles select `PLACE_SITE ICPS2023_5_ROW500`, so every
+    The LibreLane profiles select `PLACE_SITE ICPS2023_5_ROW700`, so every
     published cell has to declare that site at exactly its height, and a
     row-rail PDN only powers every cell if the VDD and VSS pin bands are the
     same for all of them.

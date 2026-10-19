@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "routable": [
+    {
+      "id": "1m_inv_nand2_aoi21",
+      "status": "routable",
+      "profile": "configs/icps2023_5_1m_1x1.json",
+      "design": "designs/inv_nand2_aoi21.json",
+      "expected": {
+        "route__drc_errors": 0,
+        "klayout__drc_error__count": 0,
+        "design__disconnected_pin__count": 0,
+        "design__critical_disconnected_pin__count": 0,
+        "design__power_grid_violation__count": 0,
+        "design__instance__count": 3
+      }
+    }
+  ],
+  "excluded": [
+    {
+      "id": "2m_inv_nand2_aoi21",
+      "status": "excluded",
+      "profile": "configs/icps2023_5_2m_post2025_2x2.json",
+      "design": "designs/inv_nand2_aoi21.json",
+      "reason": "Detailed routing stops with [DRT-0218] Guide is not connected to design on every signal net; the 2M guide/tech contract is not closed."
+    },
+    {
+      "id": "2m_alu4",
+      "status": "excluded",
+      "profile": "configs/icps2023_5_2m_post2025_2x2.json",
+      "design": "designs/alu4.json",
+      "reason": "Global placement reports [GPL-0301] Utilization 205.967 % exceeds 100 %; ALU4 does not fit the 2x2 frame with the current cell library."
+    }
+  ]
+}

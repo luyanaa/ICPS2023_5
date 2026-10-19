@@ -57,7 +57,7 @@ set ::env(RUN_IRDROP_REPORT) false
 # Required Classic-flow inputs for the local experimental 1M profile. These
 # values are explicit and unqualified; the profile fragments override the
 # stack-specific layer, PDN, IO-pin, GRT, and RCX choices for the 2M experiment.
-set ::env(PLACE_SITE) "ICPS2023_5_ROW500"
+set ::env(PLACE_SITE) "ICPS2023_5_ROW700"
 set ::env(SYNTH_DRIVING_CELL) "BUF_X1/Y"
 set ::env(SYNTH_BUFFER_CELL) "BUF_X1/A/Y"
 set ::env(SYNTH_TIEHI_CELL) "TIEHI_X1/Y"

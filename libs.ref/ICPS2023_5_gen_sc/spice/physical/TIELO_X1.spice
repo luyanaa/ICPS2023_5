@@ -1,0 +1,5 @@
+* ICPS2023_5 canonical 1M standard-cell reference
+.GLOBAL SUB
+.SUBCKT TIELO_X1 Y VDD VSS
+MOTIELO Y VDD VSS SUB nch W=2.4e-05 L=6e-06
+.ENDS TIELO_X1

@@ -17,7 +17,7 @@ The 2x2 frame GDS remains an origin-fixed physical overlay. `FP_DEF_TEMPLATE`
 provides the 56 fixed pins and die area to the flow; it does not make the full
 macro. The standard-cell package now includes an experimental single-corner
 Liberty view and the `BUF_X1`, `TIEHI_X1`, and `TIELO_X1` utility cells. The
-profiles supply an unqualified `ICPS2023_5_ROW500` site and experimental PDN
+profiles supply an unqualified `ICPS2023_5_ROW700` site and experimental PDN
 and partial-RCX settings so PDK validation completes. They remain design
 fragments (not RTL/design configs) and make no PnR/signoff claim. Both select
 the Classic flow while removing Magic/Netgen steps; KLayout streamout/DRC and

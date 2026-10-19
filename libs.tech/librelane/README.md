@@ -60,9 +60,9 @@ The TiN/POLY gaps in the LEF are pitch minus width. These assumed submicron
 TiN/POLY geometries conflict with the checked-in micrometre-scale DRC limits;
 they are not DRC-clean, manufacturable, or signoff collateral. M1's 10 µm pitch
 is incompatible with a conventional compact 5-track cell. Both technology
-LEFs now declare the shared experimental `ICPS2023_5_ROW500` site (`1.0 ×
-500.0 µm`, `CLASS CORE`, `SYMMETRY Y`) to match the tallest published cell
-(`MUX4_STATIC_X1.lef`, `SIZE 1797 BY 500`).
+LEFs now declare the shared experimental `ICPS2023_5_ROW700` site (`1.0 ×
+700.0 µm`, `CLASS CORE`, `SYMMETRY Y`) to match the published cells' row
+height.
 
 `POLY` is assigned local engineering GDS 200/0 and the three synthetic via cuts
 201/0–203/0. These IDs are not canonical process layers or foundry mask
@@ -109,7 +109,7 @@ unless stated otherwise.
 
 | Variable | 1M profile | 2M profile | Source and basis |
 |---|---|---|---|
-| `PLACE_SITE` | `ICPS2023_5_ROW500` | `ICPS2023_5_ROW500` | Both technology LEFs declare `CLASS CORE`, `SYMMETRY Y`, and `SIZE 1.0 BY 500.0` (`libs.tech/librelane/experimental_1m/icps2023_5_1m.tech.lef`, `libs.tech/librelane/experimental_2m_post2025/icps2023_5_2m.tech.lef`); `libs.ref/ICPS2023_5_gen_sc/lef/MUX4_STATIC_X1.lef` is `1797 × 500` and uses the same site. |
+| `PLACE_SITE` | `ICPS2023_5_ROW700` | `ICPS2023_5_ROW700` | Both technology LEFs declare `CLASS CORE`, `SYMMETRY Y`, and `SIZE 1.0 BY 700.0` (`libs.tech/librelane/experimental_1m/icps2023_5_1m.tech.lef`, `libs.tech/librelane/experimental_2m_post2025/icps2023_5_2m.tech.lef`); the published cell LEFs use the same 700 µm height. |
 | `SYNTH_DRIVING_CELL` | `BUF_X1/Y` | `BUF_X1/Y` | `libs.tech/stdcell/logic.py` defines `BUF_X1` with input `A` and output `Y`; LibreLane's driver cell is the output pin. |
 | `SYNTH_BUFFER_CELL` | `BUF_X1/A/Y` | `BUF_X1/A/Y` | `libs.tech/stdcell/logic.py` defines `A → Y`; LibreLane requires `{cell}/{input}/{output}` (`../librelane/librelane/config/flow.py`). |
 | `SYNTH_TIEHI_CELL` | `TIEHI_X1/Y` | `TIEHI_X1/Y` | `libs.tech/stdcell/logic.py`: `TIEHI_X1`, output `Y=1`. |
@@ -130,11 +130,12 @@ unless stated otherwise.
 | `PDN_RAIL_LAYER` | `M1` | `M1` | Router alias for physical ML1 8/0 in `libs.tech/librelane/experimental_1m/icps2023_5_1m.tech.lef` and `libs.tech/librelane/experimental_2m_post2025/icps2023_5_2m.tech.lef`; standard-cell LEFs retain canonical `ML1`. |
 | `PDN_RAIL_WIDTH` | `12.0 µm` | `12.0 µm` | Full-width cell power-pin bands are 12 µm high in the published cell LEFs; ML1 DRC minimum is 6 µm. |
 | `PDN_RAIL_OFFSET` | `0.0 µm` | `0.0 µm` | `libs.tech/librelane/config.tcl` supplies the required legacy value; `../librelane/librelane/scripts/openroad/common/pdn_cfg.tcl` creates `-followpins` rails and does not use this offset for them. |
-| `PDN_VERTICAL_LAYER` | `M1` | `M2` | The 1M stack has a single low-resistance conductor, so a strap set on M1 would cross the M1 rails of the opposite polarity and short them; the layer is still declared as M1 and the pitch below is larger than the die, so no strap stripe lands inside the core and the profile is rails-only. The 2M profile runs its straps on vertical M2. |
-| `PDN_HORIZONTAL_LAYER` | `M1` | `M1` | The same profile technology LEFs define horizontal M1/ML1 in both stacks. |
+| `PDN_CFG` | `pdk_dir::libs.tech/librelane/experimental_1m/pdn_rails_only.tcl` | default OpenROAD PDN config | The 1M profile uses a rails-only grid: `-followpins` M1 rails and no strap/ring geometry. TiN is a gate material and is never a power conductor, so no TiN stripe, ring, or connect rule is generated. |
+| `PDN_VERTICAL_LAYER` | `M1` (unused by the 1M custom config) | `M2` | 1M power is M1-only; the custom `PDN_CFG` does not consume this variable. The 2M profile runs its straps on vertical M2. |
+| `PDN_HORIZONTAL_LAYER` | `M1` (unused by the 1M custom config) | `M1` | The same profile technology LEFs define horizontal M1/ML1 in both stacks. |
 | `PDN_VWIDTH`, `PDN_HWIDTH` | `6.0`, `6.0 µm` | `6.0`, `6.0 µm` | DRC minima: TiN width 6 µm, M1 width 6 µm, and provisional ML2 width 6 µm (`libs.tech/klayout/drc/icps2023_5.drc`). |
 | `PDN_VSPACING`, `PDN_HSPACING` | `6.0`, `4.0 µm` | `6.0`, `4.0 µm` | Strap/TiN and M2 space 6 µm, M1 space 4 µm, from `libs.tech/klayout/drc/icps2023_5.drc`. |
-| `PDN_VPITCH`, `PDN_HPITCH` | `4000.0`, `4000.0 µm` | `24.0`, `20.0 µm` | OpenROAD refuses a stripe pitch below twice width+spacing (`[PDN-0175] Pitch 12.0000 is too small ... must be atleast 24.0000`), so the 2M strap pitch is `2 × (6+6) = 24` and the M1 value is 20. The 1M pitch exceeds the 3200 µm die so the declared strap set produces no stripe inside the 2M/1M core. |
+| `PDN_VPITCH`, `PDN_HPITCH` | unused by the 1M custom config | `24.0`, `20.0 µm` | OpenROAD refuses a stripe pitch below twice width+spacing (`[PDN-0175] Pitch 12.0000 is too small ... must be atleast 24.0000`), so the 2M strap pitch is `2 × (6+6) = 24` and the M1 value is 20. The 1M custom config adds no vertical or horizontal strap. |
 | `PDN_VOFFSET`, `PDN_HOFFSET` | `0.0`, `0.0 µm` | `0.0`, `0.0 µm` | Both `libs.tech/librelane/experimental_1m/tracks.info` and `libs.tech/librelane/experimental_2m_post2025/tracks.info` specify 0.0 µm origins for TIN/M2 and M1. |
 | `PDN_CORE_RING_VWIDTH`, `PDN_CORE_RING_HWIDTH` | `6.0`, `6.0 µm` | `6.0`, `6.0 µm` | Dormant ring dimensions use the corresponding DRC minimum widths in `libs.tech/klayout/drc/icps2023_5.drc`. |
 | `PDN_CORE_RING_VSPACING`, `PDN_CORE_RING_HSPACING` | `6.0`, `4.0 µm` | `6.0`, `4.0 µm` | Dormant ring spacings use TiN/M2 6 µm and M1 4 µm minima in the same local DRC deck. |
@@ -192,15 +193,72 @@ data, do not represent the full RC stack, and must not be used for timing
 signoff. `RUN_SPEF_EXTRACTION` stays false; the supported post-layout extractor
 is the repository's KLayout PEX script.
 
+The 1M profile sets `SIGNAL_WIRE_RC_LAYERS` and `CLOCK_WIRE_RC_LAYERS` to
+`M1` only to carry the documented Al sheet resistance (`0.20 Ω/sq`, PDK p.8)
+into OpenROAD's estimator. The PDK supplies **no metal-wire capacitance per
+length**, so OpenROAD still reports zero wire capacitance (`EST-0018`) and the
+resulting timing numbers are structural place-and-route checks, not electrical
+closure. No invented `CAPACITANCE`/`LAYER_RC` coefficient is checked in.
+
 ### Classic flow substitutions
 
 Both profile `meta` objects select `flow: "Classic"` and remove
 `Magic.StreamOut`, `Magic.WriteLEF`, `Magic.DRC`, `Magic.SpiceExtraction`,
 `Checker.MagicDRC`, `Netgen.LVS`, and `Checker.LVS` through
-`meta.substituting_steps` (`null` substitutions). Synthesis, floorplan, PDN,
-placement, CTS, routing, KLayout streamout, and KLayout DRC remain in the
+`meta.substituting_steps` (`null` substitutions). The same mechanism removes
+`OpenROAD.CheckAntennas` (no qualified antenna model or diode cell) and
+`Odb.CheckDesignAntennaProperties` (it requires the removed Magic LEF). The
+profiles also set `RUN_POST_GPL_DESIGN_REPAIR`, `RUN_POST_CTS_RESIZER_TIMING`,
+and `RUN_POST_GRT_RESIZER_TIMING` false because the PDK has no metal-wire
+capacitance to support timing repair, and `RUN_FILL_INSERTION` false because
+the library publishes no filler cell. Synthesis, floorplan, PDN, placement,
+global and detailed routing, KLayout streamout, and KLayout DRC remain in the
 Classic flow. KLayout PEX remains the separate repository extraction path;
 no external Magic/Netgen setup is invented.
+
+The `inv_nand2_aoi21` 1x1 smoke run completes end-to-end with 0 detailed-route
+DRC errors, 0 KLayout DRC errors, 0 disconnected pins, and 0 PDN violations.
+Its `SPECIALNETS` contain only M1 followpin rails; no TiN power shape is
+generated. Timing, antenna, and fill results from this run are structural
+evidence only.
+
+The same smoke design under the 2M profile reaches detailed routing but stops
+with `[DRT-0218] Guide is not connected to design` on every signal net; the
+2M guide/tech contract is not closed. `alu4` in the 2x2 profile reports
+`[GPL-0301] Utilization 205.967 %` at the maximum row-aligned core, so that
+design does not fit the 2x2 frame with the current cell library. The 1M
+rails-only PDN is single-row by construction: across multiple rows it provides
+no legal M1 vertical strap (an M1 strap would cross opposite-polarity rails),
+and must not be described as a multi-row power grid.
+
+The 1M router technology LEF also omits the physical CNT contact cut: OpenROAD
+treats every declared cut layer as a via transition, and a 5 x 5 µm CNT layer
+with no via produced an empty pin-access vector. The standard-cell LEFs used by
+this flow have no CNT geometry, so the omission is safe here. A pad-ring design
+will need a pad-aware router overlay that declares CNT for macro obstruction
+without registering it as a routing via.
+
+### Routable regression
+
+The checked-in routable set is deliberately small:
+`icps2023_5_1m_1x1.json` + `inv_nand2_aoi21.json`. It is the only pair that
+completes placement, global/detailed routing, KLayout streamout, and KLayout
+DRC with zero routing DRC, zero disconnected pins, and zero PDN violations.
+The pair and its expected metrics live in `libs.tech/librelane/regression.json`.
+
+```sh
+# Contract-only check, usable in the minimal repository shell.
+python3 libs.tech/librelane/test_regression_contract.py
+
+# Executable regression; skips when no LibreLane runtime is installed.
+python3 libs.tech/librelane/run_smoke_regression.py
+
+# CI/release gate: fail instead of skipping when LibreLane is absent.
+python3 libs.tech/librelane/run_smoke_regression.py --require-librelane
+```
+
+The 2M entries are recorded as `excluded` with their exact failure codes; they
+are not part of the green set and are not run by `run_smoke_regression.py`.
 
 ## LibreLane integration
 
@@ -215,7 +273,7 @@ LEF/GDS/SPICE views and binds the explicit experimental single-corner Liberty
 view `libs.ref/ICPS2023_5_gen_sc/liberty/ICPS2023_5_gen_sc_experimental_xyce.lib`.
 That view is limited to Xyce 7.10 / BSIMSOI 4.5.0 at nominal 3 V / 25 °C,
 5 fF load and 2 ns input slew; it is not signoff timing. The shared experimental
-`ICPS2023_5_ROW500` site and utility cells, plus profile-specific PDN/RC/CTS
+`ICPS2023_5_ROW700` site and utility cells, plus profile-specific PDN/RC/CTS
 settings, are now provided by the root config and explicit profiles. The cell
 LEFs use canonical `ML1`, while the experimental router technology LEF uses
 alias `M1`; that mismatch remains unqualified.

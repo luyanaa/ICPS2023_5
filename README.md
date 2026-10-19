@@ -196,16 +196,26 @@ option is retained only as experimental separate N+ island geometry; it does
 not establish a PMOS body tie or a fourth electrical terminal. PMOS4 is excluded from the
 LVS/PEX device sets. NMOS4 extraction remains experimental and LVS-only.
 
-## Standard-cell redesign status and historical evidence
+## Standard-cell publication (all 26 cells)
 
-The published output directories under `libs.ref/ICPS2023_5_gen_sc/`
-(`gds/`, `lef/`, `liberty/`, `spice/`, `characterization/`, and `doc/`) now
-contain only `.gitkeep`; `tools/make_gen_sc.py` remains as source. There is no
-current standard-cell GDS, LEF, SPICE, Liberty, manifest, or characterization
-package. Prior generation, characterization, ALU, routing, and cell-area results
-describe historical experiments only; they are not current published views or
-qualification evidence. The verification table below documents the guarded
-publication checks and their NOT RUN status when the manifest is absent.
+`libs.ref/ICPS2023_5_gen_sc/` publishes **all 26 canonical cells** on the
+`ICPS2023_5_ROW700` row site (700 µm height, shared VSS/VDD rail bands). Each
+cell carries GDS, canonical LEF, the LibreLane `_librelane` LEF alias, and
+physical SPICE. Every published cell passed strict design and fab DRC, design
+and fab LVS, PEX, post-layout assembly, and the cell-level ERC checks
+(contacts, map correspondence, logical shorts/opens, body state, unassigned
+islands); pad/power/path screens that require board-level context remain
+unconfigured and are recorded as such.
+
+The experimental single-corner Liberty for these cells is
+`liberty/ICPS2023_5_gen_sc_experimental_xyce.lib` (Xyce 7.10 / BSIMSOI 4.5.0,
+3 V / 25 °C, 5 fF load, 2 ns slew). It contains the 22 combinational cells and
+the two tie cells; the four sequential cells are explicit exclusions (no
+setup/hold contract). It is evidence-scoped, not a signoff timing library.
+`tools/make_gen_sc.py` rebuilds and re-verifies cells; LibreLane can use the
+published LEF/GDS/SPICE/Liberty for routing designs.
+Historical cell-area and ALU experiments remain records, not current published
+views. The verification table below records the publication checks.
 
 The nominal PDK model remains the stage-1 `SOIMOD=0` BSIMSOI v4.4 card
 (`LEVEL=58`); the bridge candidates did not replace it. The separate
@@ -251,8 +261,10 @@ library, or a signoff claim.
 | Capacitance ownership | The single-owner matrix (`BSIMSOI` / LVS device / PEX) is in `libs.tech/klayout/pex/README.md`. The BOX diffusion return is `BOX_RETURN_ANALYTICALLY_SUPPORTED / MEASUREMENT_UNCONFIRMED` (`audit_box_capacitance.md`); implementation ownership is not a measured deembedding. |
 | Contact `RDSW`/`RCNT` | `libs.tech/ngspice/tools/audit_mos_contact_ownership.py` re-evaluates the frozen digitized curves for bare, explicit-`RCNT`, and full post-layout networks. Nominal evidence is `audit/mos_contact_ownership.md` (ngspice 44, stage-1 card); the version-isolated FD-card run is `audit/mos_contact_ownership_fd.md` (Xyce 7.10 / BSIMSOI 4.5.0, `--engine xyce-fd`). Both report `RDSW_RCNT_SEPARATION_UNCALIBRATED`; Kelvin/TLM data is still required. |
 | Joint contact verdict | `libs.tech/ngspice/tools/soi_contact_contract.py` binds actual DRC/LVS/PEX/ERC results into `PASS_SOI = DRC_PASS ∧ LVS_MATCH ∧ ERC_PASS ∧ PEX_COMPLETE`; a missing leg is BLOCKED. `LVS MATCH` alone is documented as a topology result, not contact legality. ERC's `contact_policy` (`strict`/`legacy`) mirrors the DRC contact-size policy. |
-| Standard-cell output state | The six published output directories under `libs.ref/ICPS2023_5_gen_sc/` contain only `.gitkeep`; see the redesign and historical-evidence section above. Source-level geometry regressions do not publish the withdrawn library views. |
-| CI and publication boundary | `.github/workflows/ci.yml` runs the six migration/SOI suites unconditionally (`test_fab_body_tie`, `test_pmos4_mask_contract`, `test_channel_length_pipeline`, `test_conversion_semantics`, `test_soi_edge_protection`, and `test_foundry_migration`), plus cross-engine partition, NCH mask audit, ERC, and assembly regressions. `test_stdcell.py` and `test_frame.py` remain unconditional; generated-library inverter simulation runs, while the absent published-library simulation is explicitly skipped. `make_gen_sc.py --check`, `test_library.py`, `test_mapping_views.py`, `test_alu.py`, and `array_acceptance.py` run only when `cell_manifest.json` exists; otherwise publication-dependent checks are NOT RUN. This is not a complete standard-cell publication or CI pass. |
+| NMOS4 post-layout | `libs.tech/klayout/pex/test_nmos4_postlayout.py` runs design/fab LVS→PEX→assembly for the bounded one-tie cell and proves the P node is anchored in the same LVS-net open/short checks as D/G/S (isolated body = open, body-to-source resistor = short, both rejected). PMOS stays MOS3; PMOS4 remains rejected. |
+| NMOS4 explicit-P capability | `audit_nmos4_body_bias_resolution.py` resolves the Unified response: `g_mb,P`≈2.2e-9 A/V vs `g_m`≈3.4e-4 A/V (`-g_mb/g_m`≈6.4e-6), spread 19% across RELTOL 1e-4…1e-8, forward/reverse sweeps, independent OPs, tightened tolerances and the assembled network → `NUMERICALLY_RESOLVED`. Xyce's FD configuration rejects a fifth P node (`IDEAL_FD_EXPLICIT_P_UNSUPPORTED`); the forward-bias blow-up stays a permanent `PHYSICAL_SANITY_FAIL` test. Artifacts: `audit/nmos4_body_bias*.{json,md}`. Not silicon qualification. |
+| Standard-cell output state | `libs.ref/ICPS2023_5_gen_sc/` publishes all 26 canonical cells (strict DRC/LVS/PEX/assembly/ERC) on the `ICPS2023_5_ROW700` row site, with GDS/LEF/SPICE and the experimental Xyce Liberty (22 cells; four sequential cells excluded). |
+| CI and publication boundary | `.github/workflows/ci.yml` runs the six migration/SOI suites unconditionally (`test_fab_body_tie`, `test_pmos4_mask_contract`, `test_channel_length_pipeline`, `test_conversion_semantics`, `test_soi_edge_protection`, and `test_foundry_migration`), plus cross-engine partition, NCH mask audit, ERC, and assembly regressions. `test_stdcell.py` and `test_frame.py` remain unconditional; the published-library inverter simulation runs against the published cells. `make_gen_sc.py --check`, `test_library.py`, `test_mapping_views.py`, `test_alu.py`, and `array_acceptance.py` run when `cell_manifest.json` exists (it does); otherwise publication-dependent checks are NOT RUN. This remains an experimental publication, not a full signoff library. |
 | Runtime boundary | The observed local `nix-shell ../librelane/shell.nix` runtime has KLayout 0.30.7, Python 3.13.9, and ngspice 47; the repository `nix develop` shell has the pinned KLayout/Python/ngspice 44/Ruby versions and skips the field-solver regression by default (scikit-fem comes from `requirements-fem.txt` in CI). |
 | FEM regression | `libs.tech/klayout/pex/test_fieldsolve_box.py` skips unless scikit-fem is importable; CI installs the pinned `numpy/scipy/scikit-fem` set and runs it. Its synthetic permittivities are not process coefficients. |
 | LibreLane/OpenROAD | The current partial SCL/configuration is not a qualified PnR flow; no placement, routing, or signoff claim follows from the experimental overlay. |

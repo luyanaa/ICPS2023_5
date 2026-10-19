@@ -1,0 +1,120 @@
+{
+  "cards": {
+    "ideal_fd_soimod2": {
+      "card": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/models/b4soi_fd_bridge_experimental.inc",
+      "card_sha256": "fbe1b8e858935a2414729c280a73049a3ab7cc4e8b9f8539528ccd312462a494",
+      "engine": "xyce-fd",
+      "points": [
+        {
+          "reason": "Xyce rejects an externally specified fifth P node for SOIMOD=2 with TNODEOUT=0 (log retained in the run work directory)",
+          "status": "IDEAL_FD_EXPLICIT_P_UNSUPPORTED",
+          "vds_v": 1.0,
+          "vgs_v": 1.5
+        },
+        {
+          "reason": "Xyce rejects an externally specified fifth P node for SOIMOD=2 with TNODEOUT=0 (log retained in the run work directory)",
+          "status": "IDEAL_FD_EXPLICIT_P_UNSUPPORTED",
+          "vds_v": 3.0,
+          "vgs_v": 3.0
+        }
+      ]
+    },
+    "unified_soimod1": {
+      "card_sha256": "9557eee9c2faadc7a8e5c9f32379f452b540eb41534e926932635d201771be6e",
+      "engine": "ngspice",
+      "forward_sweep_sanity": {
+        "expected_classification": "PHYSICAL_SANITY_FAIL",
+        "metrics": {
+          "body_terminal_current_max_abs_a": 1.19657918e+26,
+          "body_terminal_current_median_abs_a": 4.14010381e-17,
+          "drain_current_max_a": 8.96141496e+23,
+          "drain_current_min_a": 0.000275281346,
+          "drain_current_span_a": 8.96141496e+23,
+          "drain_current_span_relative": 3.2553658612233023e+27,
+          "drain_slope_a_per_v": 3.898451308350925e+22,
+          "p_sweep_v": [
+            -3.0,
+            3.0
+          ],
+          "physical_sanity": "implausible_or_nonconverged",
+          "points": 61
+        },
+        "p_sweep_v": [
+          -3.0,
+          3.0,
+          0.1
+        ],
+        "status": "observed"
+      },
+      "points": [
+        {
+          "metrics": {
+            "body_terminal_current_max_abs_a": 4.15010381e-17,
+            "body_terminal_current_median_abs_a": 4.00010381e-17,
+            "drain_current_max_a": 0.00027528841,
+            "drain_current_min_a": 0.000275281346,
+            "drain_current_span_a": 7.0639999999629055e-09,
+            "drain_current_span_relative": 2.566101954457497e-05,
+            "drain_slope_a_per_v": 1.8582822580646598e-09,
+            "p_sweep_v": [
+              -3.0,
+              1.52655666e-15
+            ],
+            "physical_sanity": "ok",
+            "points": 31
+          },
+          "status": "observed",
+          "vds_v": 1.0,
+          "vgs_v": 1.5
+        },
+        {
+          "metrics": {
+            "body_terminal_current_max_abs_a": 4.15010381e-17,
+            "body_terminal_current_median_abs_a": 4.00010381e-17,
+            "drain_current_max_a": 0.00120855189,
+            "drain_current_min_a": 0.00120853058,
+            "drain_current_span_a": 2.1309999999850893e-08,
+            "drain_current_span_relative": 1.763298368490675e-05,
+            "drain_slope_a_per_v": 5.657177419353739e-09,
+            "p_sweep_v": [
+              -3.0,
+              1.52655666e-15
+            ],
+            "physical_sanity": "ok",
+            "points": 31
+          },
+          "status": "observed",
+          "vds_v": 3.0,
+          "vgs_v": 3.0
+        }
+      ],
+      "selector": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/b4soi_unified_bridge_experimental.lib.spice",
+      "selector_sha256": "cec61be635c32990f41b288591df26fb15d1137829ea112d9b368aabd3b3e62a"
+    }
+  },
+  "geometry": {
+    "l_um": 6.0,
+    "temperature_c": 25,
+    "w_um": 20.0
+  },
+  "limitations": [
+    "A response (or lack of response) to the explicit P terminal is a property of the candidate card, not of the fabricated device.",
+    "The two cards run on different simulator versions (ngspice BSIMSOI 4.4 vs Xyce 4.5.0); their numbers must not be mixed or read as one model on two backends.",
+    "The FD card is experimental and remains non-nominal.",
+    "The N_CH body path from the P+ dot to the channel is not extracted; no body-access resistance or bias dependence is qualified here.",
+    "Body-bias/C-V and FD/PD assignment still require TEG data.",
+    "Xyce 7.10 / BSIMSOI 4.5.0 with SOIMOD=2 and TNODEOUT=0 rejects an external fifth P node, so the ideal-FD card cannot be exercised as a five-terminal device in its scoped engine configuration."
+  ],
+  "observations": [
+    "unified SOIMOD=1: sweeping P over -3..0 V changes ID by at most 2.57e-05 relative (max |IP| 4.15e-17 A); no meaningful body control is demonstrated in this window.",
+    "ideal-FD SOIMOD=2: Xyce 7.10 rejects an externally specified fifth P node when SOIMOD=2 and TNODEOUT=0 ('P node is not used in this mode'). The FD card's explicit-P body-bias capability is therefore untestable in its supported engine configuration; a five-terminal ngspice parse is not evidence of FD body control."
+  ],
+  "p_sweep_v": {
+    "start": -3.0,
+    "step": 0.1,
+    "stop": 0.0
+  },
+  "schema_version": 1,
+  "status": "MODEL_CAPABILITY_ONLY_NOT_SILICON_QUALIFIED",
+  "tool": "audit_nmos4_body_bias.py"
+}

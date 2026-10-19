@@ -552,6 +552,14 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
             anchors_by_lvs_net[device["nets"][lvs_index]].append(
                 ("mos:%s:%s" % (device["key"], role), node)
             )
+        if device["model"] == "NMOS4":
+            # The explicit P terminal is a first-class net anchor: the same
+            # component-level open/short checks must cover it, not just the
+            # D/G/S terminals. nets[3] is the extracted body tie net.
+            body_node = node_alias[mapping["body"]]
+            anchors_by_lvs_net[device["nets"][3]].append(
+                ("mos:%s:body" % device["key"], body_node)
+            )
     for device in lvs["tin_resistors"]:
         mapping = tin_maps_by_key[device["key"]]
         for index, endpoint in enumerate(mapping["endpoints"]):

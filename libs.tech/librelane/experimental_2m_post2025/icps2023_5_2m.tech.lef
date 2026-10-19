@@ -11,13 +11,13 @@ UNITS
   DATABASE MICRONS 1000 ;
 END UNITS
 MANUFACTURINGGRID 0.001 ;
-# The selected row origin matches the largest published standard cell (500 um
+# The selected row origin matches the largest published standard cell (700 um
 # high); the SCL cell LEFs use this exact site name.
-SITE ICPS2023_5_ROW500
+SITE ICPS2023_5_ROW700
   CLASS CORE ;
   SYMMETRY Y ;
-  SIZE 1.0 BY 500.0 ;
-END ICPS2023_5_ROW500
+  SIZE 1.0 BY 700.0 ;
+END ICPS2023_5_ROW700
 
 
 # Engineering-only POLY-Si horizontal jumper. No canonical POLY mask exists.

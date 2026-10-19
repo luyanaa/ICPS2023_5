@@ -1,0 +1,128 @@
+VERSION 5.8 ;
+MACRO NAND3_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 306 BY 700 ;
+  SITE ICPS2023_5_ROW700 ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M1 ;
+        RECT 5 130 15 140 ;
+        RECT 291 130 301 140 ;
+    END
+  END A
+  PIN B
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M1 ;
+        RECT 5 152 15 162 ;
+        RECT 291 152 301 162 ;
+    END
+  END B
+  PIN C
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M1 ;
+        RECT 5 174 15 184 ;
+        RECT 291 174 301 184 ;
+    END
+  END C
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M1 ;
+        RECT 5 196 15 206 ;
+        RECT 291 196 301 206 ;
+    END
+  END Y
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER M1 ;
+        RECT 0 688 306 700 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER M1 ;
+        RECT 0 0 306 12 ;
+    END
+  END VSS
+  OBS
+    LAYER M1 ;
+      RECT 20 39.5 33 52.5 ;
+      RECT 55 39.5 68 52.5 ;
+      RECT 90 39.5 103 52.5 ;
+      RECT 125 39.5 138 52.5 ;
+      RECT 37.5 16 50.5 29 ;
+      RECT 37.5 63 50.5 76 ;
+      RECT 37 16 51 76 ;
+      RECT 72.5 16 85.5 29 ;
+      RECT 72.5 63 85.5 76 ;
+      RECT 72 16 86 76 ;
+      RECT 107.5 16 120.5 29 ;
+      RECT 107.5 63 120.5 76 ;
+      RECT 107 16 121 76 ;
+      RECT 23.5 46 29.5 89 ;
+      RECT 21.5 84 31.5 94 ;
+      RECT 21.5 262 31.5 272 ;
+      RECT 58.5 46 64.5 89 ;
+      RECT 56.5 84 66.5 94 ;
+      RECT 56.5 196 66.5 206 ;
+      RECT 93.5 46 99.5 89 ;
+      RECT 91.5 84 101.5 94 ;
+      RECT 91.5 262 101.5 272 ;
+      RECT 128.5 46 134.5 89 ;
+      RECT 126.5 84 136.5 94 ;
+      RECT 126.5 196 136.5 206 ;
+      RECT 39 130 49 140 ;
+      RECT 74 152 84 162 ;
+      RECT 109 174 119 184 ;
+      RECT 158 39.5 171 52.5 ;
+      RECT 193 39.5 206 52.5 ;
+      RECT 228 39.5 241 52.5 ;
+      RECT 263 39.5 276 52.5 ;
+      RECT 175.5 16 188.5 29 ;
+      RECT 175.5 63 188.5 76 ;
+      RECT 175 16 189 76 ;
+      RECT 210.5 16 223.5 29 ;
+      RECT 210.5 63 223.5 76 ;
+      RECT 210 16 224 76 ;
+      RECT 245.5 16 258.5 29 ;
+      RECT 245.5 63 258.5 76 ;
+      RECT 245 16 259 76 ;
+      RECT 161.5 46 167.5 89 ;
+      RECT 159.5 84 169.5 94 ;
+      RECT 159.5 108 169.5 118 ;
+      RECT 196.5 46 202.5 89 ;
+      RECT 194.5 84 204.5 94 ;
+      RECT 194.5 218 204.5 228 ;
+      RECT 231.5 46 237.5 89 ;
+      RECT 229.5 84 239.5 94 ;
+      RECT 229.5 240 239.5 250 ;
+      RECT 266.5 46 272.5 89 ;
+      RECT 264.5 84 274.5 94 ;
+      RECT 264.5 196 274.5 206 ;
+      RECT 177 174 187 184 ;
+      RECT 212 152 222 162 ;
+      RECT 247 130 257 140 ;
+      RECT 10 110 296 116 ;
+      RECT 10 132 296 138 ;
+      RECT 10 154 296 160 ;
+      RECT 10 176 296 182 ;
+      RECT 10 198 296 204 ;
+      RECT 10 220 296 226 ;
+      RECT 10 242 296 248 ;
+      RECT 10 264 296 270 ;
+      RECT 161.5 3 167.5 92 ;
+      RECT 23.5 264 29.5 697 ;
+  END
+END NAND3_X1

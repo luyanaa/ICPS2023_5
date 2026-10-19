@@ -340,8 +340,12 @@ PEX component. That source-tied fourth node is not the BSIMSOI E terminal:
 every assembled MOS gets the separate `E_SUB` formal. The assembler supports
 ordinary MOS-only inverter/NAND extraction plus bounded NMOS4 body ties (one
 tie gate, one contacted P+ dot, emitted as `D G S E_SUB B nch` with
-`body_state=body_tied`). PMOS4/PCH4 body contacts remain rejected; body-access
-resistance and its model calibration are still unmeasured.
+`body_state=body_tied`). The NMOS4 P node is anchored into the same LVS-net
+open/short checks as D/G/S, so a body net that lands in a disconnected PEX
+component (open) or is joined to another LVS net through any resistor (short)
+is rejected; negative fixtures cover both. PMOS4/PCH4 body contacts remain
+rejected; body-access resistance and its model calibration are still
+unmeasured.
 
 ## Post-layout ERC
 
@@ -484,7 +488,7 @@ Evidence grades follow AGENTS.md §5; nothing below is foundry signoff.
 | `NSUB`, FD flatband/`K1B`/`K2B`/`VBSA`, back-gate work function | inherited/uncalibrated | No body/back-gate C–V measurement exists for this revision |
 | `SHMOD` self-heating, PVT, aging | uncalibrated | No thermal test data; no qualified local junction temperature or BOX thermal resistance |
 | Ordinary NMOS/PMOS 3-terminal DC/AC decks | regression-verified | L=6 µm/W=24 µm, 25 °C, 3 V; geometry scaling, other temperatures and other biases are extrapolation |
-| NMOS4 | `LVS_VERIFIED / PEX_ASSEMBLY_SUPPORTED (bounded) / BODY_ACCESS_UNQUALIFIED` | One tie gate + one contacted P+ dot; assembled as `D G S E_SUB B nch`; body-access resistance and model calibration remain unmeasured |
+| NMOS4 | `LVS_VERIFIED / PEX_ASSEMBLY_SUPPORTED (bounded) / BODY_ACCESS_UNQUALIFIED` | One tie gate + one contacted P+ dot; assembled as `D G S E_SUB B nch`; body net joins the same open/short anchors as D/G/S. Explicit-P audit: Unified `g_mb,P` ≈ 2.2e-9 A/V vs `g_m` ≈ 3.4e-4 A/V (`-g_mb/g_m` ≈ 6.4e-6), stable across RELTOL 1e-4…1e-8, forward/reverse sweeps, independent OPs, tightened tolerances and the assembled network (spread 19%, `NUMERICALLY_RESOLVED`); Xyce's FD configuration (`SOIMOD=2`, `TNODEOUT=0`) rejects a fifth P node (`IDEAL_FD_EXPLICIT_P_UNSUPPORTED`). Forward body bias remains a permanent `PHYSICAL_SANITY_FAIL` regression. See `audit/nmos4_body_bias*.md`; body access and model calibration remain unmeasured. |
 | PMOS4 | `EXCLUDED_FROM_LVS_PEX / PCELL_GEOMETRY_ONLY` | Body-contact references are rejected before output; only the PCh `experimental_nplus_island` geometry experiment remains |
 | `R_SOI` (250 MΩ/sq helper) | legacy compatibility | Available only where an explicit `RES` marker selects it; never a generic model for undoped SOI film conduction |
 | Contact resistance `RDSW` + explicit `RCNT` | implementation separated, physical separation **uncalibrated** | See `audit/mos_contact_ownership.md`; Kelvin/TLM contact-count measurements are required (TEG item 3) |

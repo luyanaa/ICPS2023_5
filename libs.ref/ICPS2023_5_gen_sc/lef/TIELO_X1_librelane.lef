@@ -1,0 +1,52 @@
+VERSION 5.8 ;
+MACRO TIELO_X1
+  CLASS CORE ;
+  ORIGIN 0 0 ;
+  SIZE 98 BY 700 ;
+  SITE ICPS2023_5_ROW700 ;
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER M1 ;
+        RECT 5 130 15 140 ;
+        RECT 83 130 93 140 ;
+    END
+  END Y
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER M1 ;
+        RECT 0 688 98 700 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER M1 ;
+        RECT 0 0 98 12 ;
+    END
+  END VSS
+  OBS
+    LAYER M1 ;
+      RECT 20 39.5 33 52.5 ;
+      RECT 55 39.5 68 52.5 ;
+      RECT 37.5 16 50.5 29 ;
+      RECT 37.5 63 50.5 76 ;
+      RECT 37 16 51 76 ;
+      RECT 23.5 46 29.5 89 ;
+      RECT 21.5 84 31.5 94 ;
+      RECT 21.5 108 31.5 118 ;
+      RECT 58.5 46 64.5 89 ;
+      RECT 56.5 84 66.5 94 ;
+      RECT 56.5 130 66.5 140 ;
+      RECT 39 152 49 162 ;
+      RECT 10 110 88 116 ;
+      RECT 10 132 88 138 ;
+      RECT 10 154 88 160 ;
+      RECT 23.5 3 29.5 92 ;
+      RECT 41 154 47 697 ;
+  END
+END TIELO_X1

@@ -1,0 +1,5 @@
+* ICPS2023_5 canonical 1M standard-cell reference
+.GLOBAL SUB
+.SUBCKT TIEHI_X1 Y VDD VSS
+MOTIEHI Y VSS VDD SUB pch W=2.4e-05 L=6e-06
+.ENDS TIEHI_X1

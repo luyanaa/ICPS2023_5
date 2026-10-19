@@ -127,5 +127,67 @@ class Nmos4PostlayoutTests(unittest.TestCase):
                 self.assertEqual(body_state[0]["e"], "E_SUB")
 
 
+    def test_nmos4_body_net_participates_in_open_and_short_checks(self):
+        lvs, pex, _assembled = self.chain("design")
+        base = pex.read_text(encoding="utf-8")
+        mapping = records(base, "* MOS_MAP ")[0]
+        body, source, drain = mapping["body"], mapping["source"], mapping["drain"]
+
+        def write_case(name, text):
+            path = self.work / (name + ".pex.spice")
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        def resistor_map(name, a, b, value):
+            return "* RESISTOR_MAP " + json.dumps({
+                "name": name, "a": a, "b": b, "resistance_ohm": value,
+                "material": "ML1", "a_location_um": None, "b_location_um": None,
+                "geometry_qualification": "deliberate negative topology fixture",
+            }, sort_keys=True, separators=(",", ":"))
+
+        def inject(text, anchor_name, extra):
+            out, injected = [], False
+            for line in text.splitlines():
+                if line.startswith("* MOS_MAP "):
+                    record = json.loads(line[len("* MOS_MAP "):])
+                    if anchor_name is not None:
+                        record["body"] = anchor_name
+                    line = "* MOS_MAP " + json.dumps(
+                        record, sort_keys=True, separators=(",", ":"))
+                if line.upper().startswith(".ENDS") and extra and not injected:
+                    out.append(extra)
+                    injected = True
+                out.append(line)
+            return "\n".join(out) + "\n"
+
+        # 1. Body points at an isolated node: the LVS body net now spans two
+        # disconnected PEX components and must be rejected as an open.
+        isolated = inject(
+            base, "FLOAT_BODY_A",
+            resistor_map("RBODYISO", "FLOAT_BODY_A", "FLOAT_BODY_B", 100.0)
+            + "\nRBODYISO FLOAT_BODY_A FLOAT_BODY_B 100")
+        path = write_case("nmos4_body_open", isolated)
+        result = run([sys.executable, str(ASSEMBLER), "--lvs", str(lvs),
+                      "--pex", str(path), "--schematic", str(self.reference),
+                      "--top", "nmos4_min", "--output",
+                      str(self.work / "nmos4_body_open.spice")])
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PEX open", result.stdout + result.stderr)
+
+        # 2. A finite resistor joins the body P network to the source N+
+        # network: that merges two LVS nets and must be rejected as a short.
+        shorted = inject(
+            base, None,
+            resistor_map("RBODYSHORT", body, source, 100.0)
+            + "\nRBODYSHORT %s %s 100" % (body, source))
+        path = write_case("nmos4_body_short", shorted)
+        result = run([sys.executable, str(ASSEMBLER), "--lvs", str(lvs),
+                      "--pex", str(path), "--schematic", str(self.reference),
+                      "--top", "nmos4_min", "--output",
+                      str(self.work / "nmos4_body_short.spice")])
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PEX short", result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

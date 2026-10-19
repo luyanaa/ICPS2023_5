@@ -86,7 +86,7 @@ flowchart LR
 | LVS | Requires a declared common `.GLOBAL SUB` E before projecting E out for ordinary MOS3 matching. It is not extracting the substrate/BOX physical structure. |
 | Optional P | Direct simulator syntax accepts fifth P; physical LVS maps only NMOS4↔NCH4 and rejects every PMOS body-contact reference before output. No PMOS4/PCH4 extraction path exists. |
 | PEX | MOS_MAP binds D/G/S geometry and declares `e=SUB`; SUB is a separate final return. Diffusion capacitance returned to SUB remains an explicit extraction assumption, not a measured BOX return. |
-| Assembly | Accepts ordinary NMOS/PMOS. The source-tied MOS4 fourth node in serialized LVS output is an extraction artifact, not E or a real body tie. Every emitted MOS uses the separate E_SUB formal; body-contact classes are not assembled. |
+| Assembly | Accepts ordinary NMOS/PMOS plus bounded NMOS4 body ties (D/G/S/E_SUB/B, `body_tied`). The source-tied MOS4 fourth node in serialized ordinary LVS output remains an extraction artifact, not E; every assembled MOS keeps the separate E_SUB formal. PMOS4 is not assembled. |
 | Simulation | New physical-style benches drive one explicit common substrate source and use four nodes. Fifth-P cases are separate syntax diagnostics only. |
 
 The native W/L=24/6 µm inverter/NAND DRC→LVS→PEX→assembly→ngspice regression passed, including pre/post-layout logic, delay and current checks. Three additional LVS cases rejected a wrong E net, heterogeneous E nets, and a missing global E declaration. These are endpoint/regression checks, not process qualification.

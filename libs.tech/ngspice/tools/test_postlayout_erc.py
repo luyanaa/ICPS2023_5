@@ -24,7 +24,8 @@ class PostlayoutERCTopologyTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def _write_gds(self, layer_mode: str, scenario: str, polarity: str = "NMOS",
-                   exclusion: str | None = None) -> Path:
+                   exclusion: str | None = None, cut_half: float = 2.5,
+                   ml1_half: float = 4.5) -> Path:
         layers = erc.DESIGN_LAYERS if layer_mode == "design" else erc.FAB_LAYERS
         layout = db.Layout()
         layout.dbu = 0.001
@@ -37,8 +38,10 @@ class PostlayoutERCTopologyTest(unittest.TestCase):
             top.shapes(layout.layer(*layers[layer_name])).insert(db.Box(*values))
 
         def contact(center_x: float):
-            add("CNT", center_x - 2.5, 7.5, center_x + 2.5, 12.5)
-            add("ML1", center_x - 4.5, 5.5, center_x + 4.5, 14.5)
+            add("CNT", center_x - cut_half, 10 - cut_half,
+                center_x + cut_half, 10 + cut_half)
+            add("ML1", center_x - ml1_half, 10 - ml1_half,
+                center_x + ml1_half, 10 + ml1_half)
 
         top.shapes(layout.layer(*layers["TEXT"])).insert(
             db.Text("ERC", db.Trans(db.Point(100_000, 100_000)))
@@ -99,8 +102,8 @@ class PostlayoutERCTopologyTest(unittest.TestCase):
         return path
 
     def _geometry(self, layer_mode: str, scenario: str, polarity: str = "NMOS",
-                  exclusion: str | None = None):
-        path = self._write_gds(layer_mode, scenario, polarity, exclusion)
+                  exclusion: str | None = None, cut_half: float = 2.5):
+        path = self._write_gds(layer_mode, scenario, polarity, exclusion, cut_half)
         return path, erc._layout_inputs(path, "TOP", None, layer_mode=layer_mode)
 
     @staticmethod
@@ -110,6 +113,33 @@ class PostlayoutERCTopologyTest(unittest.TestCase):
             geometry,
             None,
         )
+
+    def test_contact_policy_matches_the_drc_policy_it_claims(self):
+        for layer_mode in ("design", "fab"):
+            with self.subTest(layer_mode=layer_mode):
+                path = self._write_gds(layer_mode, "split", cut_half=2.0)
+                strict = erc._layout_inputs(path, "TOP", None, layer_mode=layer_mode)
+                legacy = erc._layout_inputs(path, "TOP", None, layer_mode=layer_mode,
+                                            contact_policy="legacy")
+                self.assertEqual([c["status"] for c in strict["contacts"]],
+                                 ["illegal", "illegal"])
+                self.assertTrue(all("exact 5x5" in " ".join(c["reason"])
+                                    for c in strict["contacts"]), strict["contacts"])
+                self.assertEqual([c["status"] for c in legacy["contacts"]],
+                                 ["legal", "legal"], legacy["contacts"])
+                self.assertEqual(legacy["contact_policy"], "legacy")
+                with self.assertRaisesRegex(erc.PostlayoutERCError, "contact_policy"):
+                    erc._layout_inputs(path, "TOP", None, layer_mode=layer_mode,
+                                       contact_policy="loose")
+                # A cut beyond the DRC perimeter limit stays illegal even in
+                # the legacy policy; ML1 is widened so only that limit fires.
+                wide = self._write_gds(layer_mode, "split", cut_half=3.0,
+                                       ml1_half=6.0)
+                wide_legacy = erc._layout_inputs(wide, "TOP", None,
+                                                 layer_mode=layer_mode,
+                                                 contact_policy="legacy")
+                self.assertEqual([c["status"] for c in wide_legacy["contacts"]],
+                                 ["illegal", "illegal"], wide_legacy["contacts"])
 
     def test_nmos_and_pmos_two_contacts_on_one_island_remain_separate(self):
         for layer_mode in ("design", "fab"):
@@ -138,6 +168,7 @@ class PostlayoutERCTopologyTest(unittest.TestCase):
                         self.assertEqual(body["status"], "BLOCKED", body)
                         self.assertTrue(body["unqualified_boundary"])
                     self.assertEqual(geometry["layer_mode"], layer_mode)
+                    self.assertEqual(geometry["contact_policy"], "strict")
                     if layer_mode == "design":
                         self.assertEqual(geometry["resolved_layers"]["DIFF"], [3, 0])
                         self.assertEqual(geometry["resolved_layers"]["CNT"], [7, 0])

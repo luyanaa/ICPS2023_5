@@ -1,5 +1,6 @@
 {
   "engine": {
+    "name": "ngspice",
     "path": "/nix/store/nr8xljnjvc7xpihsggwa5hcirlr7dnpa-ngspice-44/bin/ngspice",
     "version": "** ngspice-44 : Circuit level simulation program"
   },
@@ -22,6 +23,7 @@
   "polarities": {
     "nmos": {
       "baseline_cross_check": {
+        "applicable": true,
         "curves": [
           {
             "bare": 26.34630537181878,
@@ -319,15 +321,16 @@
       ],
       "provenance": {
         "assembled_sha256": "928a222c5af466cf4ba77d26d923302efa180cf4d8972363d8d3a6e17007a24e",
-        "design_gds_sha256": "680c7c7edbbe760a2a09f9ab5344c1af2f116d50917c322ab4a4eec3fff0db97",
-        "fab_gds_sha256": "e92b8409be34a65532e38f0701cb5910b67ee937b543126499fc8cf979904eb7",
+        "design_gds_sha256": "f72de3c51fb142c6869442c7cc2e5d90a7c91681831381e6cddea60ea19b20d2",
+        "fab_gds_sha256": "48bffb657793303f3636a4d5245f5e4d81e5701985f7c0488fd2fce80b71bc99",
         "lvs_extracted_sha256": "59cfc6c8ec08d49f1e3708416e5f8e1a3902768acbec084cb44175cfd48b9f08",
-        "pex_sha256": "ac9d617071454b231917912cfd57593d63cbdcf4c0d78fc07adec6691df4f682"
+        "pex_sha256": "65c7f5834875a849ab35361927031152137c5d58ddf34bb3fd064a7ad85206f7"
       },
       "top": "nmos_min_fit"
     },
     "pmos": {
       "baseline_cross_check": {
+        "applicable": true,
         "curves": [
           {
             "bare": 17.222255374059923,
@@ -625,10 +628,10 @@
       ],
       "provenance": {
         "assembled_sha256": "166bb6b92ca405d4db51e5ad9f4d58bed490ab8758c301fa98d6f382483f7202",
-        "design_gds_sha256": "28dc642260a0ec278d624516368fe44b5fbfa09d2d95f64674c1fb3b06e0568f",
-        "fab_gds_sha256": "9ba1513cef7feb520542346818083c9f76ee85dfb233982c91893cb69b49e4dc",
+        "design_gds_sha256": "8574e9cb44dd0e49d0a6b1c59b2a270b55a733ac32b48615fb601e4679fa2498",
+        "fab_gds_sha256": "0ffac546c7c0f5212a03544c3ad3d27c7b60d8976034bb8fdd940c5d0a34bf57",
         "lvs_extracted_sha256": "03e55f8083d5ae28644d63c35d8ccf53811916329c81d91fba47c987760646af",
-        "pex_sha256": "b873270a17e81aceb18f90299a3564709c2ba08e3beaa860780b8ac74a845ca1"
+        "pex_sha256": "54545aa87238df1a7c8b702280014eb21f155cf0cf706f5097e6671c71058352"
       },
       "top": "pmos_min_fit"
     }
@@ -642,7 +645,7 @@
     "measurements_sha256": "a2e13f591495705c49785f27471e85e44b602a701fcb79a8eaa01f72ad9876bd",
     "model_card_sha256": "52d3111cf8e0b21633ae9378659518f00493a675212e9d17fff35593d75eb7d3",
     "model_library_sha256": "6bdc302b17f604df6c13c9228c7c825f938fa890d763dc151158423949ebcbed",
-    "pex_deck_sha256": "383c219c19e41b69cbc4b76e39c51e55bbcade56ed0b41e7f71b93bd391a144a",
+    "pex_deck_sha256": "e3cd21853210abdfdf0dd4ac230829b7c97bb7a0126565aea0e549f9a190e310",
     "sweep_step_V": 0.001
   },
   "schema_version": 1,

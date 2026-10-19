@@ -7,9 +7,19 @@ import unittest
 
 import numpy as np
 
-from fieldsolve_box import solve_layered_cross_section, solve_strip
+try:
+    from fieldsolve_box import solve_layered_cross_section, solve_strip
+    HAVE_SKFEM = True
+except ImportError as error:  # scikit-fem lives in requirements-fem.txt
+    HAVE_SKFEM = False
+    IMPORT_ERROR = error
+
+SKIP_REASON = ("scikit-fem is supplied by the pinned pip FEM environment "
+               "(requirements-fem.txt, used in CI); the repository devShell "
+               "skips this regression by default")
 
 
+@unittest.skipUnless(HAVE_SKFEM, SKIP_REASON)
 class HomogeneousBoxTests(unittest.TestCase):
     def test_finite_strip_approaches_parallel_plate_limit(self):
         result = solve_strip(
@@ -44,6 +54,7 @@ class HomogeneousBoxTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(HAVE_SKFEM, SKIP_REASON)
 class LayeredCrossSectionTests(unittest.TestCase):
     def setUp(self):
         # Synthetic relative permittivities exercise caller-supplied weighting;

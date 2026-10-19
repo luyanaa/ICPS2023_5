@@ -40,6 +40,7 @@ FAB_LAYERS = {
     "NCH": (13, 0), "PAD": (10, 0), "EXCLUDE": (63, 63),
 }
 _LAYER_TABLES = {"design": DESIGN_LAYERS, "fab": FAB_LAYERS}
+_CONTACT_POLICIES = ("strict", "legacy")
 _ANCHOR_LAYERS = {"DIFF", "NPLUS", "PPLUS", "TIN", "ML1"}
 _UNSUPPORTED_METAL_LAYERS = ("VIA1", "ML2", "VIA2", "ML3")
 _CONDUCTOR_LAYERS = ("NPLUS", "PPLUS", "TIN", "ML1")
@@ -117,6 +118,16 @@ def _resolve_layer_mapping(layer_config: Any, layer_mode: Any) -> dict[str, tupl
     if len(set(resolved.values())) != len(resolved):
         raise PostlayoutERCError("resolved layer mapping assigns one GDS layer to multiple physical roles")
     return resolved
+
+
+def _resolve_contact_policy(value: Any) -> str:
+    if value is None:
+        return "strict"
+    if not isinstance(value, str) or value not in _CONTACT_POLICIES:
+        raise PostlayoutERCError(
+            "contact_policy must be 'strict' (exact 5x5 um cuts) or 'legacy' "
+            "(DRC-default >=4 um sides, perimeter <= 20 um); got %r" % (value,))
+    return value
 
 
 def _klayout_db():
@@ -212,7 +223,8 @@ def _sha256(path: Path) -> str:
 
 
 def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
-                   layer_mode: str) -> dict[str, Any]:
+                   layer_mode: str, contact_policy: Any = "strict") -> dict[str, Any]:
+    policy = _resolve_contact_policy(contact_policy)
     layer_ids = _resolve_layer_mapping(layer_config, layer_mode)
     db = _klayout_db()
     layout = db.Layout()
@@ -328,16 +340,30 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
 
     um = lambda value: _um_to_dbu(value, dbu_um, "physical contact dimension")
     cnt_size = um(5.0)
+    cnt_min_side = um(4.0)
+    cnt_perimeter_limit = um(20.0)
     route_enclosure = um(2.5)
     sd_enclosure = um(2.0)
     gate_core = regions["TIN"] & diff
+
+    def legal_cut_size(box: Any, area: int) -> bool:
+        """Mirror the DRC contact-size policy for this run.
+
+        strict  : exact 5x5 um cut (DRC strict=true CNT.G 5 um).
+        legacy  : the DRC default rule set - min side >= 4 um (CNT.G default)
+                  and rectangle perimeter <= 20 um (golden CNT.J).
+        """
+        if policy == "strict":
+            return (box.width() == cnt_size and box.height() == cnt_size and
+                    area == cnt_size * cnt_size)
+        return (box.width() >= cnt_min_side and box.height() >= cnt_min_side and
+                area == box.width() * box.height() and
+                2 * (box.width() + box.height()) <= cnt_perimeter_limit)
+
     contact_report: list[dict[str, Any]] = []
     for index, cut in enumerate(contacts):
         box = cut.bbox()
-        exact_size = (
-            box.width() == cnt_size and box.height() == cnt_size and
-            cut.area() == cnt_size * cnt_size
-        )
+        exact_size = legal_cut_size(box, cut.area())
         diff_hits = _intersecting_ids(cut, components["DIFF"])
         tin_hits = _intersecting_ids(cut, components["TIN"])
         ml1_hits = _intersecting_ids(cut, components["ML1"])
@@ -359,7 +385,10 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
             if gate_overlap:
                 reasons.append("CNT overlaps final TiN/DIFF MOS gate geometry")
             if not exact_size:
-                reasons.append("diffusion CNT is not an exact 5x5 um cut")
+                reasons.append("diffusion CNT is not an exact 5x5 um cut"
+                               if policy == "strict" else
+                               "diffusion CNT is not a legal legacy-size cut "
+                               "(min side >= 4 um, rectangle perimeter <= 20 um)")
             if len(ohmic_types) != 1:
                 reasons.append("diffusion CNT must overlap exactly one effective N+ or P+ ohmic domain")
             if mixed_overlap:
@@ -390,7 +419,10 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
         elif tin_hits or ml1_hits:
             kind = "tin_ml1_via"
             if not exact_size:
-                reasons.append("TiN/ML1 CNT is not an exact 5x5 um cut")
+                reasons.append("TiN/ML1 CNT is not an exact 5x5 um cut"
+                               if policy == "strict" else
+                               "TiN/ML1 CNT is not a legal legacy-size cut "
+                               "(min side >= 4 um, rectangle perimeter <= 20 um)")
             if not tin_hits or not ml1_hits:
                 reasons.append("TiN/ML1 CNT must physically touch both conductor layers")
             landing = cut.sized(route_enclosure)
@@ -473,6 +505,7 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
         "top_name": top.name,
         "dbu_um": dbu_um,
         "layer_mode": layer_mode,
+        "contact_policy": policy,
         "resolved_layers": {name: list(pair) for name, pair in sorted(layer_ids.items())},
         "regions": regions,
         "components": components,
@@ -1691,16 +1724,21 @@ def _contact_check(geometry: dict[str, Any] | None) -> dict[str, Any]:
         return _check("BLOCKED", "required native contact/conductor layers are absent", missing_layers=absent,
                       contacts=geometry["contacts"])
     bad = [item for item in geometry["contacts"] if item["status"] != "legal"]
+    policy = geometry.get("contact_policy", "strict")
     if bad:
         return _check("FAIL",
                       "an illegal CNT is present; only complete same-polarity diffusion landings or validated TiN/ML1 vias connect",
-                      illegal_contacts=bad, contacts=geometry["contacts"])
+                      contact_policy=policy, illegal_contacts=bad, contacts=geometry["contacts"])
     if geometry["unsupported_metal_layers"]:
         return _check("BLOCKED", "upper-metal connectivity is unsupported and cannot be qualified",
+                      contact_policy=policy,
                       unsupported_layers=geometry["unsupported_metal_layers"], contacts=geometry["contacts"])
     return _check("PASS",
                   "only validated same-polarity CNT landings connect N+/P+ domains to ML1; MOS channels are excluded",
-                  method="5x5 um contacts; ML1/TiN 2.5 um enclosure away from DIFF; diffusion/ML1 2.0 um complete landing",
+                  contact_policy=policy,
+                  method=("strict: exact 5x5 um cuts; " if policy == "strict" else
+                          "legacy: min side >= 4 um and rectangle perimeter <= 20 um; ") +
+                  "ML1/TiN 2.5 um enclosure away from DIFF; diffusion/ML1 2.0 um complete landing",
                   illegal_contacts=[], contacts=geometry["contacts"])
 
 
@@ -1728,6 +1766,7 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
         "tool": "check_postlayout_erc.py",
         "qualification": "research_PDK_screen_only_not_foundry_signoff",
         "layer_mode": config.get("layer_mode"),
+        "contact_policy": _resolve_contact_policy(config.get("contact_policy")),
         "checks": {},
         "inputs": {},
         "findings": [],
@@ -1797,8 +1836,10 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
             if gds_top is not None and not isinstance(gds_top, str):
                 raise PostlayoutERCError("gds_top must be a string when supplied")
             geometry = _layout_inputs(
-                gds_path, gds_top, config.get("layers"), layer_mode=config.get("layer_mode")
+                gds_path, gds_top, config.get("layers"), layer_mode=config.get("layer_mode"),
+                contact_policy=report["contact_policy"],
             )
+            report["contact_policy"] = geometry["contact_policy"]
             report["inputs"]["gds"].update({
                 "sha256": geometry["sha256"],
                 "top_cell": geometry["top_name"],

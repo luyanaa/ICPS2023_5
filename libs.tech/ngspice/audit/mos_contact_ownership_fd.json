@@ -1,0 +1,546 @@
+{
+  "engine": {
+    "card": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/models/b4soi_fd_bridge_experimental.inc",
+    "name": "xyce-fd",
+    "path": "/usr/local/XyceNF_OMPI_7.10/bin/Xyce",
+    "selector": "/Users/yanlu/Documents/ICPS2023_5/libs.tech/ngspice/b4soi_fd_bridge_experimental.lib.spice",
+    "version": "Xyce 7.10 / BSIMSOI 4.5.0 (LEVEL=70450)"
+  },
+  "geometry": {
+    "cells": "native nmos_min_fit / pmos_min_fit, fab masks",
+    "l_um": 6.0,
+    "temperature_c": 25,
+    "w_um": 24.0
+  },
+  "limitations": [
+    "No Kelvin/TLM or contact-count matrix exists, so the two series terms cannot be declared physically separate.",
+    "Xyce BSIMSOI 4.5.0 (LEVEL=70450) is a different model version from the ngspice 4.4 nominal path; these FD results must not be mixed with nominal-card results or read as two backends of one model.",
+    "The FD card itself is experimental and version-scoped; this run does not promote it to nominal.",
+    "full_postlayout carries PEX routing R/C in general; in these single-MOS benches it added no series element beyond the contact network, but on other topologies a shift is a combined confound.",
+    "Digitized curves carry the conflicts already recorded in the stage-1/bridge audits; they are the only available DC target."
+  ],
+  "original_measurement": {
+    "contact_count_used_in_fit": null,
+    "note": "The original W24/L6 measurement's contact configuration is unreported; a shift between cases cannot itself prove or disprove double-counting."
+  },
+  "polarities": {
+    "nmos": {
+      "baseline_cross_check": {
+        "applicable": false,
+        "reason": "the FD bridge card is a different, Xyce-scoped card; the stage-1 frozen baseline does not apply. The FD fit manifest's per-curve metrics were themselves computed with ngspice BSIMSOI 4.4, so they are not a cross-check for this Xyce 4.5.0 run either."
+      },
+      "cases": {
+        "bare": {
+          "n_out_vg15": {
+            "bias_V": 1.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 30.24648318161058,
+            "samples": 45
+          },
+          "n_out_vg2": {
+            "bias_V": 2.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 7.367472373570857,
+            "samples": 43
+          },
+          "n_out_vg25": {
+            "bias_V": 2.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 2.7163623053161534,
+            "samples": 44
+          },
+          "n_out_vg3": {
+            "bias_V": 3.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 4.372789492234193,
+            "samples": 41
+          },
+          "n_transfer_blue": {
+            "bias_V": 0.05,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.20342666561240388,
+            "samples": 32
+          },
+          "n_transfer_orange": {
+            "bias_V": 1.0,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.19825334329404276,
+            "samples": 29
+          }
+        },
+        "explicit_rcnt": {
+          "n_out_vg15": {
+            "bias_V": 1.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 19.534164592764064,
+            "samples": 45
+          },
+          "n_out_vg2": {
+            "bias_V": 2.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 8.226671123215294,
+            "samples": 43
+          },
+          "n_out_vg25": {
+            "bias_V": 2.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 15.586069434271426,
+            "samples": 44
+          },
+          "n_out_vg3": {
+            "bias_V": 3.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 20.070623790106488,
+            "samples": 41
+          },
+          "n_transfer_blue": {
+            "bias_V": 0.05,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.20387387821095787,
+            "samples": 32
+          },
+          "n_transfer_orange": {
+            "bias_V": 1.0,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.1936538036095063,
+            "samples": 29
+          }
+        },
+        "full_postlayout": {
+          "n_out_vg15": {
+            "bias_V": 1.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 19.534164592764064,
+            "samples": 45
+          },
+          "n_out_vg2": {
+            "bias_V": 2.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 8.226671123215294,
+            "samples": 43
+          },
+          "n_out_vg25": {
+            "bias_V": 2.5,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 15.586069434271426,
+            "samples": 44
+          },
+          "n_out_vg3": {
+            "bias_V": 3.0,
+            "bias_axis": "VGS",
+            "device": "nmos",
+            "family": "output",
+            "relative_rms_percent": 20.070623790106488,
+            "samples": 41
+          },
+          "n_transfer_blue": {
+            "bias_V": 0.05,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.20387387821095787,
+            "samples": 32
+          },
+          "n_transfer_orange": {
+            "bias_V": 1.0,
+            "bias_axis": "VDS",
+            "device": "nmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.1936538036095063,
+            "samples": 29
+          }
+        }
+      },
+      "counts": {
+        "drain": 1,
+        "source": 1
+      },
+      "deltas_vs_bare": {
+        "explicit_rcnt": {
+          "n_out_vg15": {
+            "bare": 30.24648318161058,
+            "case": 19.534164592764064,
+            "delta": -10.712318588846514,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg2": {
+            "bare": 7.367472373570857,
+            "case": 8.226671123215294,
+            "delta": 0.8591987496444364,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg25": {
+            "bare": 2.7163623053161534,
+            "case": 15.586069434271426,
+            "delta": 12.869707128955273,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg3": {
+            "bare": 4.372789492234193,
+            "case": 20.070623790106488,
+            "delta": 15.697834297872294,
+            "metric": "relative_rms_percent"
+          },
+          "n_transfer_blue": {
+            "bare": 0.20342666561240388,
+            "case": 0.20387387821095787,
+            "delta": 0.00044721259855398654,
+            "metric": "log10_current_rms_decades"
+          },
+          "n_transfer_orange": {
+            "bare": 0.19825334329404276,
+            "case": 0.1936538036095063,
+            "delta": -0.004599539684536469,
+            "metric": "log10_current_rms_decades"
+          }
+        },
+        "full_postlayout": {
+          "n_out_vg15": {
+            "bare": 30.24648318161058,
+            "case": 19.534164592764064,
+            "delta": -10.712318588846514,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg2": {
+            "bare": 7.367472373570857,
+            "case": 8.226671123215294,
+            "delta": 0.8591987496444364,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg25": {
+            "bare": 2.7163623053161534,
+            "case": 15.586069434271426,
+            "delta": 12.869707128955273,
+            "metric": "relative_rms_percent"
+          },
+          "n_out_vg3": {
+            "bare": 4.372789492234193,
+            "case": 20.070623790106488,
+            "delta": 15.697834297872294,
+            "metric": "relative_rms_percent"
+          },
+          "n_transfer_blue": {
+            "bare": 0.20342666561240388,
+            "case": 0.20387387821095787,
+            "delta": 0.00044721259855398654,
+            "metric": "log10_current_rms_decades"
+          },
+          "n_transfer_orange": {
+            "bare": 0.19825334329404276,
+            "case": 0.1936538036095063,
+            "delta": -0.004599539684536469,
+            "metric": "log10_current_rms_decades"
+          }
+        }
+      },
+      "observations": [
+        "full_postlayout reproduces explicit_rcnt on every curve (worst relative difference 0): for this single-MOS bench the only external series difference is the added contact network, so the bare-to-case shift is not PEX routing."
+      ],
+      "provenance": {
+        "assembled_sha256": "928a222c5af466cf4ba77d26d923302efa180cf4d8972363d8d3a6e17007a24e",
+        "design_gds_sha256": "89104b25d1124824eb764d2ba2d69c6def17d6b468cda1f04fba3a8a89306e78",
+        "fab_gds_sha256": "dba0ad1803a48d09b3acbb319d8d0cce9ce1dd310f1c669dbcaecca603b3162f",
+        "lvs_extracted_sha256": "59cfc6c8ec08d49f1e3708416e5f8e1a3902768acbec084cb44175cfd48b9f08",
+        "pex_sha256": "df7b9ea51cfb9820592090c399f4b7ba9ded109ec0bd903bdf7abb766e717561"
+      },
+      "top": "nmos_min_fit"
+    },
+    "pmos": {
+      "baseline_cross_check": {
+        "applicable": false,
+        "reason": "the FD bridge card is a different, Xyce-scoped card; the stage-1 frozen baseline does not apply. The FD fit manifest's per-curve metrics were themselves computed with ngspice BSIMSOI 4.4, so they are not a cross-check for this Xyce 4.5.0 run either."
+      },
+      "cases": {
+        "bare": {
+          "p_out_vg15": {
+            "bias_V": -1.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 21.762006138165333,
+            "samples": 43
+          },
+          "p_out_vg2": {
+            "bias_V": -2.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 3.6090159012392307,
+            "samples": 43
+          },
+          "p_out_vg25": {
+            "bias_V": -2.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 3.779396762828571,
+            "samples": 43
+          },
+          "p_out_vg3": {
+            "bias_V": -3.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 8.997319109842362,
+            "samples": 42
+          },
+          "p_transfer_blue": {
+            "bias_V": -0.05,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.29728310815675596,
+            "samples": 27
+          },
+          "p_transfer_orange": {
+            "bias_V": -1.0,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.2530650768295789,
+            "samples": 27
+          }
+        },
+        "explicit_rcnt": {
+          "p_out_vg15": {
+            "bias_V": -1.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 19.61164114137106,
+            "samples": 43
+          },
+          "p_out_vg2": {
+            "bias_V": -2.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 4.756128958560264,
+            "samples": 43
+          },
+          "p_out_vg25": {
+            "bias_V": -2.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 4.23053060257054,
+            "samples": 43
+          },
+          "p_out_vg3": {
+            "bias_V": -3.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 5.813273137827292,
+            "samples": 42
+          },
+          "p_transfer_blue": {
+            "bias_V": -0.05,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.2953189386169822,
+            "samples": 27
+          },
+          "p_transfer_orange": {
+            "bias_V": -1.0,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.2517934048915733,
+            "samples": 27
+          }
+        },
+        "full_postlayout": {
+          "p_out_vg15": {
+            "bias_V": -1.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 19.61164114137106,
+            "samples": 43
+          },
+          "p_out_vg2": {
+            "bias_V": -2.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 4.756128958560264,
+            "samples": 43
+          },
+          "p_out_vg25": {
+            "bias_V": -2.5,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 4.23053060257054,
+            "samples": 43
+          },
+          "p_out_vg3": {
+            "bias_V": -3.0,
+            "bias_axis": "VGS",
+            "device": "pmos",
+            "family": "output",
+            "relative_rms_percent": 5.813273137827292,
+            "samples": 42
+          },
+          "p_transfer_blue": {
+            "bias_V": -0.05,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.2953189386169822,
+            "samples": 27
+          },
+          "p_transfer_orange": {
+            "bias_V": -1.0,
+            "bias_axis": "VDS",
+            "device": "pmos",
+            "family": "transfer",
+            "log10_current_rms_decades": 0.2517934048915733,
+            "samples": 27
+          }
+        }
+      },
+      "counts": {
+        "drain": 1,
+        "source": 1
+      },
+      "deltas_vs_bare": {
+        "explicit_rcnt": {
+          "p_out_vg15": {
+            "bare": 21.762006138165333,
+            "case": 19.61164114137106,
+            "delta": -2.1503649967942735,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg2": {
+            "bare": 3.6090159012392307,
+            "case": 4.756128958560264,
+            "delta": 1.1471130573210337,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg25": {
+            "bare": 3.779396762828571,
+            "case": 4.23053060257054,
+            "delta": 0.45113383974196886,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg3": {
+            "bare": 8.997319109842362,
+            "case": 5.813273137827292,
+            "delta": -3.1840459720150696,
+            "metric": "relative_rms_percent"
+          },
+          "p_transfer_blue": {
+            "bare": 0.29728310815675596,
+            "case": 0.2953189386169822,
+            "delta": -0.0019641695397737413,
+            "metric": "log10_current_rms_decades"
+          },
+          "p_transfer_orange": {
+            "bare": 0.2530650768295789,
+            "case": 0.2517934048915733,
+            "delta": -0.0012716719380055919,
+            "metric": "log10_current_rms_decades"
+          }
+        },
+        "full_postlayout": {
+          "p_out_vg15": {
+            "bare": 21.762006138165333,
+            "case": 19.61164114137106,
+            "delta": -2.1503649967942735,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg2": {
+            "bare": 3.6090159012392307,
+            "case": 4.756128958560264,
+            "delta": 1.1471130573210337,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg25": {
+            "bare": 3.779396762828571,
+            "case": 4.23053060257054,
+            "delta": 0.45113383974196886,
+            "metric": "relative_rms_percent"
+          },
+          "p_out_vg3": {
+            "bare": 8.997319109842362,
+            "case": 5.813273137827292,
+            "delta": -3.1840459720150696,
+            "metric": "relative_rms_percent"
+          },
+          "p_transfer_blue": {
+            "bare": 0.29728310815675596,
+            "case": 0.2953189386169822,
+            "delta": -0.0019641695397737413,
+            "metric": "log10_current_rms_decades"
+          },
+          "p_transfer_orange": {
+            "bare": 0.2530650768295789,
+            "case": 0.2517934048915733,
+            "delta": -0.0012716719380055919,
+            "metric": "log10_current_rms_decades"
+          }
+        }
+      },
+      "observations": [
+        "full_postlayout reproduces explicit_rcnt on every curve (worst relative difference 0): for this single-MOS bench the only external series difference is the added contact network, so the bare-to-case shift is not PEX routing."
+      ],
+      "provenance": {
+        "assembled_sha256": "166bb6b92ca405d4db51e5ad9f4d58bed490ab8758c301fa98d6f382483f7202",
+        "design_gds_sha256": "13011e384fbe9084e0ead00b872ecaa668562b134d5f6b5d8217c19294667a2d",
+        "fab_gds_sha256": "2fffd3eb456364af54d99208e928c60113263fc8b41c5ddef849daa69e4d2870",
+        "lvs_extracted_sha256": "03e55f8083d5ae28644d63c35d8ccf53811916329c81d91fba47c987760646af",
+        "pex_sha256": "521db24284b315bebcfedd7f8d0ad750dda79422fd7edf62efa8bbd10b9f323c"
+      },
+      "top": "pmos_min_fit"
+    }
+  },
+  "provenance": {
+    "contact_resistance_ohm": {
+      "nmos": 150.0,
+      "pmos": 200.0
+    },
+    "fd_model_card_sha256": "fbe1b8e858935a2414729c280a73049a3ab7cc4e8b9f8539528ccd312462a494",
+    "fd_selector_sha256": "5ad1cff734e73d98ea5c52d0c4a9e6dfff86374242f50d3256978c91854446c3",
+    "lvs_deck_sha256": "1d88a7ad718697f0e4887c0013b9670addc6229d83d8ece8a24d77d0c3eedc93",
+    "measurements_sha256": "a2e13f591495705c49785f27471e85e44b602a701fcb79a8eaa01f72ad9876bd",
+    "nominal_card_sha256_read_only": "52d3111cf8e0b21633ae9378659518f00493a675212e9d17fff35593d75eb7d3",
+    "pex_deck_sha256": "e3cd21853210abdfdf0dd4ac230829b7c97bb7a0126565aea0e549f9a190e310",
+    "sweep_step_V": 0.001
+  },
+  "schema_version": 1,
+  "status": "RDSW_RCNT_SEPARATION_UNCALIBRATED",
+  "tool": "audit_mos_contact_ownership.py"
+}

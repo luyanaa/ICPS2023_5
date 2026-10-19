@@ -354,7 +354,7 @@ class PexRegressionTests(unittest.TestCase):
 
     def test_four_terminal_body_tie_geometry_fails_closed(self):
         cases = (
-            ("TINBLK", (5, 1), "NMOS4 body-tie geometry"),
+            ("TINBLK", (5, 1), "NMOS4 body-tie gate has no unique contacted P+ tie dot"),
             ("PWL_OUTSIDE_TIN", (21, 0), "body-tie route"),
         )
         for name, marker_layer, reason in cases:

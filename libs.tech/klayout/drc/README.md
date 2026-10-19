@@ -195,7 +195,10 @@ Report categories and evidence grades:
 
 All reports remain `REPORT_ONLY`, `UNQUALIFIED`, and not suitable for sign-off.
 Geometry-only evidence never promotes unknown size, spacing, exposure,
-overlay, coverage, or allowed-region requirements to `PASS`.
+overlay, coverage, or allowed-region requirements to `PASS`. The audit cannot
+substitute for a foundry-supplied N_CH rule set, and the unresolved
+explicit-vs-legacy recipe question remains a prerequisite for any NMOS FD/PD
+inference from this mask.
 
 Focused verification (run in an environment with `klayout.db` and `klayout`):
 

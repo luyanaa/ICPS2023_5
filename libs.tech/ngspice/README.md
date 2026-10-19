@@ -314,9 +314,11 @@ inside the bounded corridor) prevents an *implementation* duplicate; it does
 not establish *physical* separation. `assemble_postlayout.py` now emits this
 status in the deck comments and on every `RESISTOR_MAP` contact record.
 `tools/audit_mos_contact_ownership.py` re-evaluates the frozen digitized PDK
-curves with the same nominal card for the bare fit, the explicit-`RCNT`
+curves with one card and one engine per run for the bare fit, the explicit-`RCNT`
 network, and the full native post-layout network; see
-`audit/mos_contact_ownership.md`. Independent Kelvin/TLM contact-count
+`audit/mos_contact_ownership.md` (ngspice stage-1) and the version-isolated
+`audit/mos_contact_ownership_fd.md` (`--engine xyce-fd`, Xyce 7.10 / BSIMSOI
+4.5.0). Independent Kelvin/TLM contact-count
 measurements (TEG item 3) remain required before the two terms can be
 declared separate, and only then may the residual be read as
 access-resistance evidence rather than a model artifact.
@@ -336,8 +338,10 @@ LVS MOS4 body **serialization artifacts**, one physical component per logical
 LVS net, no resistive component joining distinct LVS nets, and no unanchored
 PEX component. That source-tied fourth node is not the BSIMSOI E terminal:
 every assembled MOS gets the separate `E_SUB` formal. The assembler supports
-ordinary MOS-only inverter/NAND extraction, not NMOS4/PCH4 body contacts or
-arbitrary LVS elements.
+ordinary MOS-only inverter/NAND extraction plus bounded NMOS4 body ties (one
+tie gate, one contacted P+ dot, emitted as `D G S E_SUB B nch` with
+`body_state=body_tied`). PMOS4/PCH4 body contacts remain rejected; body-access
+resistance and its model calibration are still unmeasured.
 
 ## Post-layout ERC
 
@@ -359,6 +363,38 @@ DIO N+/P+ sides remain separate. NCH is a mask, not blanket ohmic body
 conduction. Unsupported upper metal blocks topology claims; a local P+ contact
 alone does not qualify an assembled body path. This is a research screen, not
 foundry signoff.
+
+**Contact size policy.** The config key `"contact_policy"` selects the cut-size
+verdict and is recorded in the report:
+
+* `"strict"` (default) — exactly 5x5 µm cuts, matching DRC `strict=true`.
+* `"legacy"` — the DRC default rule set: min side ≥4 µm and rectangle
+  perimeter ≤20 µm (`CNT.G` default + golden `CNT.J`), still requiring one
+  same-polarity domain and the complete 2.0/2.5 µm landings.
+
+A 4x4 µm cut is therefore DRC-default-clean but ERC-illegal unless the ERC run
+declares `"contact_policy": "legacy"`. Do not weaken the policy silently: choose
+one policy for a layout set and use the same one at DRC and ERC. A bare
+`LVS MATCH` is a topology verdict only; it never certifies contact legality.
+
+**Joint SOI contact contract.** Bind the four actual tool results into one
+gate instead of reading any single tool as approval:
+
+```
+PASS_SOI = DRC_PASS and LVS_MATCH and ERC_PASS and PEX_COMPLETE
+```
+
+`tools/soi_contact_contract.py` implements this over real artifacts (KLayout
+`.lyrdb`, the LVS log, the PEX netlist, and the ERC JSON). A missing leg is
+BLOCKED and fails the joint verdict. This is how an illegal landing can keep
+LVS running to completion while PEX refuses to emit a network and ERC flags the
+contact: the joint result is still FAIL_SOI.
+
+```sh
+python3 libs.tech/ngspice/tools/soi_contact_contract.py \
+  --drc-report drc.lyrdb --lvs-log lvs.log \
+  --pex-output design.pex.spice --erc-report erc.json --out soi_contract.json
+```
 
 ```sh
 python3 libs.tech/ngspice/tools/check_postlayout_erc.py \
@@ -448,7 +484,7 @@ Evidence grades follow AGENTS.md §5; nothing below is foundry signoff.
 | `NSUB`, FD flatband/`K1B`/`K2B`/`VBSA`, back-gate work function | inherited/uncalibrated | No body/back-gate C–V measurement exists for this revision |
 | `SHMOD` self-heating, PVT, aging | uncalibrated | No thermal test data; no qualified local junction temperature or BOX thermal resistance |
 | Ordinary NMOS/PMOS 3-terminal DC/AC decks | regression-verified | L=6 µm/W=24 µm, 25 °C, 3 V; geometry scaling, other temperatures and other biases are extrapolation |
-| NMOS4 | `LVS_VERIFIED / PEX_UNSUPPORTED / BODY_ACCESS_UNQUALIFIED` | Geometry can match a fifth-terminal reference; PEX/assembly and physical body access are not implemented or measured |
+| NMOS4 | `LVS_VERIFIED / PEX_ASSEMBLY_SUPPORTED (bounded) / BODY_ACCESS_UNQUALIFIED` | One tie gate + one contacted P+ dot; assembled as `D G S E_SUB B nch`; body-access resistance and model calibration remain unmeasured |
 | PMOS4 | `EXCLUDED_FROM_LVS_PEX / PCELL_GEOMETRY_ONLY` | Body-contact references are rejected before output; only the PCh `experimental_nplus_island` geometry experiment remains |
 | `R_SOI` (250 MΩ/sq helper) | legacy compatibility | Available only where an explicit `RES` marker selects it; never a generic model for undoped SOI film conduction |
 | Contact resistance `RDSW` + explicit `RCNT` | implementation separated, physical separation **uncalibrated** | See `audit/mos_contact_ownership.md`; Kelvin/TLM contact-count measurements are required (TEG item 3) |

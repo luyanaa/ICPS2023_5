@@ -118,6 +118,22 @@ def make_single_mos(name, pcell)
   end
 end
 
+def make_single_mos4
+  new_design("nmos4_min") do |layout, top|
+    instantiate_mos(layout, top, $native_library, "Nch", 0.0, 0.0, 1,
+                    { "body_tie" => true })
+    sd_y = mos_sd_y(0.0)
+    dgl = [4.0, (22.0 - MOS_LENGTH) / 2.0, (22.0 - MOS_LENGTH) / 2.0, 8.0].max
+    total_x = 2.0 * CONTACT_SIZE + MOS_LENGTH + 2.0 * dgl
+    add_label(layout, top, "S", mos_terminal_x(0.0, 0), sd_y)
+    add_label(layout, top, "D", mos_terminal_x(0.0, 1), sd_y)
+    add_label(layout, top, "G", mos_gate_x(0.0), mos_gate_y(0.0))
+    # Nch body_tie: diffusion_contact at (total_x - 6.5, W + 13 + 6.5).
+    add_label(layout, top, "B", total_x - CONTACT_SIZE / 2.0,
+              MOS_WIDTH + CONTACT_SIZE + 6.5)
+  end
+end
+
 def make_inverter
   # Opposing 5 um gate cuts need 4 um separation: centres differ by 9 um.
   p_y = MOS_WIDTH + 32.0
@@ -280,6 +296,7 @@ end
 $native_library = library
 make_single_mos("nmos_min", "Nch")
 make_single_mos("pmos_min", "Pch")
+make_single_mos4
 make_inverter
 make_nand2
 make_multifinger_edge

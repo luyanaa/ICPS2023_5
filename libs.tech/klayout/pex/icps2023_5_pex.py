@@ -651,21 +651,39 @@ def main():
     mos_n_gate = n_channel_gap & tin
     mos_p_gate = p_channel_gap & tin
 
-    # The ordinary assembler only accepts four-terminal MOS devices. A
-    # TIN_BLK marker or a body-tie extension in the N-channel mask cannot be
-    # represented safely, so fail closed before mapping ordinary access.
+    # NMOS4 body ties: split the tie gate out of the ordinary NMOS set and
+    # require one contacted P+ dot. Bounded support: exactly one tie gate and
+    # one contacted dot per layout; anything else fails closed.
+    tie_dots = ((pwl & raw_parea & diff) - tin).merged()
+    contacted_dots = tie_dots.interacting(raw_contacts)
+    if args.layer_mode == "design":
+        bt_gate = mos_n_gate & design_tin.interacting(tin_blk)
+    else:
+        contacted_paths = pwl.interacting(contacted_dots)
+        bt_gate = mos_n_gate.interacting(contacted_paths)
+        if not (tie_dots - contacted_dots).is_empty():
+            sys.exit("ICPS2023_5 PEX: N-ch body path carries an uncontacted P+ tie dot")
+    tie_route = pwl - (design_tin & diff) if args.layer_mode == "design" else pwl - (tin & diff)
+    if not tie_route.is_empty() and (bt_gate.is_empty() or
+                                    len(region_polygons(contacted_dots)) != 1 or
+                                    len(region_polygons(bt_gate)) != 1):
+        sys.exit("ICPS2023_5 PEX: N-channel body-tie route is not a bounded single NMOS4 tie")
+    if bt_gate.is_empty() and not contacted_dots.is_empty():
+        sys.exit("ICPS2023_5 PEX: contacted P+ tie dot has no NMOS4 gate")
+    if not bt_gate.is_empty() and len(region_polygons(contacted_dots)) != 1:
+        sys.exit("ICPS2023_5 PEX: NMOS4 body-tie gate has no unique contacted P+ tie dot")
+    body_dot = None
+    if not bt_gate.is_empty():
+        body_dot = pya.Region(region_polygons(contacted_dots)[0])
+    mos_n_gate_ordinary = mos_n_gate - bt_gate
+
+    # PMOS body ties share the LVS physical signature: a contacted N+ dot inside
+    # a PMOS island. PMOS4 remains excluded; only NMOS4 gains a P terminal.
     if not (tin_blk & raw_parea).is_empty():
         sys.exit("ICPS2023_5 PEX: PMOS body-tie geometry is unsupported")
-    if not tin_blk.is_empty():
-        sys.exit("ICPS2023_5 PEX: NMOS4 body-tie geometry is unsupported by four-terminal assembly")
-    if not (pwl - (design_tin & diff)).is_empty():
-        sys.exit("ICPS2023_5 PEX: N-channel body-tie route is unsupported by four-terminal assembly")
-    # PMOS body ties use the same physical signature as the LVS rule: a
-    # contacted N+ dot inside a PMOS island. The assembler still has no P
-    # terminal, so fail closed instead of silently dropping the body.
     pmos_islands = mos_active.interacting(raw_parea)
     if not ((raw_narea & mos_active) & pmos_islands).is_empty():
-        sys.exit("ICPS2023_5 PEX: PMOS body-tie geometry is unsupported by four-terminal assembly")
+        sys.exit("ICPS2023_5 PEX: PMOS body-tie geometry is unsupported")
 
     tin_res_body = (tin & res) - cap - diff
     tin_res_anchors = tin_res_body & raw_contacts
@@ -674,16 +692,21 @@ def main():
         raw_narea + raw_parea + mos_n_gate + mos_p_gate
     )
     narea, mos_n_contacts, n_mos_devices, n_access = carve_mos_terminal_access(
-        mos_n_gate, raw_narea - mos_n_gate, raw_contacts, layout.dbu, "NAREA",
+        mos_n_gate_ordinary, raw_narea - mos_n_gate, raw_contacts, layout.dbu, "NAREA",
         other_active_region=raw_parea - mos_n_gate,
         unclassified_gate_region=unclassified_gate,
     )
+    bt_narea, bt_contacts, bt_devices, bt_access = carve_mos_terminal_access(
+        bt_gate, raw_narea - bt_gate, raw_contacts, layout.dbu, "NAREA",
+        other_active_region=raw_parea - bt_gate,
+        unclassified_gate_region=pya.Region(),
+    ) if not bt_gate.is_empty() else (pya.Region(), pya.Region(), [], None)
     parea, mos_p_contacts, p_mos_devices, p_access = carve_mos_terminal_access(
         mos_p_gate, raw_parea - mos_p_gate, raw_contacts, layout.dbu, "PAREA",
         other_active_region=raw_narea - mos_p_gate,
         unclassified_gate_region=unclassified_gate,
     )
-    access_reports = [n_access, p_access]
+    access_reports = [n_access, p_access] + ([bt_access] if bt_access else [])
     failed_access = [summary["layer"] for summary in access_reports
                      if not summary["passed"]]
     if failed_access:
@@ -693,10 +716,14 @@ def main():
     for polarity, bottom, records in (
         ("NMOS", "NAREA", n_mos_devices),
         ("PMOS", "PAREA", p_mos_devices),
+        ("NMOS4", "NAREA", bt_devices),
     ):
         for record in records:
             record["polarity"] = polarity
             record["bottom"] = bottom
+            if polarity == "NMOS4":
+                body_center = body_dot.bbox().center()
+                record["body_center"] = body_center
             record["device"] = "%s@%.6f,%.6f" % (
                 polarity,
                 record["device_x"] * layout.dbu,
@@ -708,6 +735,9 @@ def main():
         sys.exit("duplicate MOS device geometry keys in PEX terminal map")
     for index, record in enumerate(mos_devices, 1):
         record["gate_port"] = "MOS_GATE_%04d" % index
+        if record["polarity"] == "NMOS4":
+            record["body_port"] = "MOS_BODY_%04d" % index
+    narea = narea + bt_narea
     res_active = {
         "NAREA": raw_narea & res,
         "PAREA": raw_parea & res,
@@ -809,7 +839,7 @@ def main():
     mos_tie_counts = {"NAREA": 0, "PAREA": 0}
     seen_mos_tie_contacts = set()
     for bottom, terminal_contacts in (
-        ("NAREA", mos_n_contacts),
+        ("NAREA", mos_n_contacts + bt_contacts),
         ("PAREA", mos_p_contacts),
     ):
         for poly in terminal_contacts.each():
@@ -964,6 +994,8 @@ def main():
         if not contains_point(tin, record["gate_center"]):
             sys.exit("MOS gate center is outside TIN for %s" % record["device"])
         add_port(record["gate_port"], "TIN", record["gate_center"])
+        if record["polarity"] == "NMOS4":
+            add_port(record["body_port"], "PAREA", record["body_center"])
     for record in physical_labels:
         add_port(record["physical"], record["layer"], record["point"])
 
@@ -1100,27 +1132,28 @@ def main():
         if source_contact is None or drain_contact is None:
             sys.exit("MOS terminal contact is missing a PEX tie for %s" % record["device"])
         mapped_contact_ids.update((source_contact, drain_contact))
-        mos_map_records.append(
-            {
-                "device": record["device"],
-                "polarity": record["polarity"],
-                "axis": record["axis"],
-                "drain_side": "positive",
-                "drain": mapped_port_node(mos_tie_terminal_ports[drain_contact]),
-                "drain_contact": drain_contact,
-                "drain_contact_cuts": record["positive_cuts"],
-                "gate": mapped_port_node(record["gate_port"]),
-                "gate_x_um": round(record["gate_center"].x * layout.dbu, 6),
-                "gate_y_um": round(record["gate_center"].y * layout.dbu, 6),
-                "source_side": "negative",
-                "source": mapped_port_node(mos_tie_terminal_ports[source_contact]),
-                "source_contact": source_contact,
-                "source_contact_cuts": record["negative_cuts"],
-                "e": "SUB",
-                "x_um": round(record["device_x"] * layout.dbu, 6),
-                "y_um": round(record["device_y"] * layout.dbu, 6),
-            }
-        )
+        mapping_record = {
+            "device": record["device"],
+            "polarity": record["polarity"],
+            "axis": record["axis"],
+            "drain_side": "positive",
+            "drain": mapped_port_node(mos_tie_terminal_ports[drain_contact]),
+            "drain_contact": drain_contact,
+            "drain_contact_cuts": record["positive_cuts"],
+            "gate": mapped_port_node(record["gate_port"]),
+            "gate_x_um": round(record["gate_center"].x * layout.dbu, 6),
+            "gate_y_um": round(record["gate_center"].y * layout.dbu, 6),
+            "source_side": "negative",
+            "source": mapped_port_node(mos_tie_terminal_ports[source_contact]),
+            "source_contact": source_contact,
+            "source_contact_cuts": record["negative_cuts"],
+            "e": "SUB",
+            "x_um": round(record["device_x"] * layout.dbu, 6),
+            "y_um": round(record["device_y"] * layout.dbu, 6),
+        }
+        if record["polarity"] == "NMOS4":
+            mapping_record["body"] = mapped_port_node(record["body_port"])
+        mos_map_records.append(mapping_record)
     unowned_contacts = set(mos_tie_ids.values()) - mapped_contact_ids
     if unowned_contacts:
         sys.exit("MOS terminal ties have no MOS_MAP owner: %s" % sorted(unowned_contacts))

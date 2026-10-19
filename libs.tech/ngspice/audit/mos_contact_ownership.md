@@ -1,8 +1,8 @@
 # MOS contact ownership I-V audit
 
-Status: **RDSW_RCNT_SEPARATION_UNCALIBRATED**. Same nominal stage-1 card and engine for every case; no refit, no RDSW subtraction.
+Status: **RDSW_RCNT_SEPARATION_UNCALIBRATED**. Same card and engine for every case; no refit, no RDSW subtraction.
 
-** ngspice-44 : Circuit level simulation program
+ngspice (** ngspice-44 : Circuit level simulation program)
 
 | case | meaning |
 |---|---|

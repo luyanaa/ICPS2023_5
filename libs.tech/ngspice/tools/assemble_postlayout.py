@@ -20,7 +20,7 @@ CONTACT_RESISTANCE_OHM = {"NMOS": 150.0, "PMOS": 200.0}
 DEVICE_COMMENT = re.compile(
     r"^\*\s+device instance\s+\S+\s+(\S+)\s+\S+\s+"
     r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)),"
-    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+(NMOS|PMOS)\s*$",
+    r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+(NMOS4|NMOS|PMOS)\s*$",
     re.IGNORECASE,
 )
 NET_COMMENT = re.compile(r"^\*\s+net\s+(\S+)\s+(\S+)\s*$", re.IGNORECASE)
@@ -147,19 +147,24 @@ def read_lvs(path, top, reference_pins):
             require(len(fields) >= 7,
                     "LVS MOS %s does not have D/G/S/body/model/parameters" % fields[0])
             polarity = fields[5].upper()
-            require(polarity in ("NMOS", "PMOS"),
+            body_tied = polarity == "NMOS4"
+            require(polarity in ("NMOS", "PMOS", "NMOS4"),
                     "unsupported extracted MOS model %s" % fields[5])
-            require(polarity == current_device["polarity"],
+            require(polarity == current_device["polarity"] or
+                    (body_tied and current_device["polarity"] == "NMOS"),
                     "LVS MOS model and geometry comment disagree for %s" % fields[0])
             device = dict(current_device)
             device.update(
                 name=fields[0],
                 nets=fields[1:5],
-                model=polarity,
+                model="NMOS4" if body_tied else polarity,
                 parameters=fields[6:],
             )
+            if body_tied:
+                device["polarity"] = "NMOS4"
+                device["body"] = fields[4]
             device["key"] = "%s@%.6f,%.6f" % (
-                polarity, device["x_um"], device["y_um"]
+                device["polarity"], device["x_um"], device["y_um"]
             )
             devices.append(device)
             current_device = None
@@ -217,8 +222,16 @@ def read_lvs(path, top, reference_pins):
         require(device["orientation"] == "r0",
                 "unsupported MOS orientation %s for %s; D/S mapping is qualified for R0 golden cells"
                 % (device["orientation"], device["key"]))
-        require(device["nets"][3] == device["nets"][2],
-                "extracted MOS body node is not source-tied for %s" % device["key"])
+        if device["model"] == "NMOS4":
+            # Five-terminal schematic: LVS projects E out and keeps the body
+            # tie as the fourth serialized net; it must not equal the source.
+            require(device["body"] == device["nets"][3] and
+                    device["body"] != device["nets"][2],
+                    "NMOS4 body net is not the extracted fourth terminal for %s"
+                    % device["key"])
+        else:
+            require(device["nets"][3] == device["nets"][2],
+                    "extracted MOS body node is not source-tied for %s" % device["key"])
         params = {item.split("=", 1)[0].casefold(): item.split("=", 1)[1]
                   for item in device["parameters"] if "=" in item}
         require("l" in params and "w" in params,
@@ -312,6 +325,11 @@ def read_pex(path, top):
                 "unsupported MOS_MAP terminal axis/order for %s" % record.get("device"))
         require(record["e"].casefold() == "sub",
                 "MOS_MAP E terminal must remain distinct on PEX SUB")
+        if record.get("polarity", "").upper() == "NMOS4":
+            require(isinstance(record.get("body"), str) and record["body"],
+                    "NMOS4 MOS_MAP must name its PEX body node")
+        elif "body" in record:
+            require(False, "MOS_MAP body is supported only for NMOS4 devices")
         for field in ("drain_contact_cuts", "source_contact_cuts"):
             if field in record:
                 cuts = record[field]
@@ -405,6 +423,8 @@ def read_pex(path, top):
         nodes.update((element["a"], element["b"]))
     for record in mos_maps:
         nodes.update((record["drain"], record["gate"], record["source"]))
+        if isinstance(record.get("body"), str):
+            nodes.add(record["body"])
     for record in tin_resistor_maps:
         nodes.update(endpoint["node"] for endpoint in record["endpoints"])
     require(all(record["physical"] in nodes for record in port_maps),
@@ -584,10 +604,13 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
             {"pex": pex_node, "assembled": node_alias[pex_node]},
             sort_keys=True, separators=(",", ":")))
     for index, device in enumerate(lvs["devices"], 1):
+        record = {"name": "M%04d" % index, "layout_device": device["key"],
+                  "body_state": ("body_tied" if device["model"] == "NMOS4"
+                                 else "floating_body"), "e": substrate_pin}
+        if device["model"] == "NMOS4":
+            record["p"] = node_alias[maps_by_key[device["key"]]["body"]]
         lines.append("* MOS_DEVICE_MAP " + json.dumps(
-            {"name": "M%04d" % index, "layout_device": device["key"],
-             "body_state": "floating_body", "e": substrate_pin},
-            sort_keys=True, separators=(",", ":")))
+            record, sort_keys=True, separators=(",", ":")))
 
     assembled_resistor_maps = []
     for record in pex["resistor_maps"]:
@@ -648,9 +671,15 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
     contact_resistor_count = 0
     for index, device in enumerate(lvs["devices"], 1):
         mapping = maps_by_key[device["key"]]
-        model = "nch" if device["model"] == "NMOS" else "pch"
-        r_unit = CONTACT_RESISTANCE_OHM[device["model"]]
+        nmos4 = device["model"] == "NMOS4"
+        model = "nch" if device["model"] in ("NMOS", "NMOS4") else "pch"
+        r_unit = CONTACT_RESISTANCE_OHM["NMOS" if nmos4 else device["model"]]
         nodes = [node_alias[mapping[role]] for role in ("drain", "gate", "source")]
+        body_node = None
+        if nmos4:
+            body_node = node_alias[mapping["body"]]
+            require(body_node not in nodes,
+                    "NMOS4 body node aliases a D/G/S terminal for %s" % device["key"])
         # Explicit contact access: one lumped resistor per D/S terminal,
         # R_cnt = R_unit / N_cnt with N_cnt the parallel CNT cut count that
         # PEX reported for that terminal.  The MOS terminal moves onto a
@@ -670,7 +699,7 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
             )
             rcnt_name = "RCNT%04d" % contact_resistor_count
             rcnt_a = nodes[0 if role == "drain" else 2]
-            material = "CNT_NAREA" if device["model"] == "NMOS" else "CNT_PAREA"
+            material = "CNT_NAREA" if model == "nch" else "CNT_PAREA"
             lines.append("* RESISTOR_MAP " + json.dumps(
                 {
                     "name": rcnt_name,
@@ -691,9 +720,14 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
             lines.append("%s %s %s %.6g"
                          % (rcnt_name, rcnt_a, internal_node, r_cnt))
             nodes[0 if role == "drain" else 2] = internal_node
-        lines.append("%s %s %s %s %s %s %s" % (
-            "M%04d" % index, nodes[0], nodes[1], nodes[2], substrate_pin,
-            model, " ".join(device["parameters"])))
+        if nmos4:
+            lines.append("%s %s %s %s %s %s %s %s" % (
+                "M%04d" % index, nodes[0], nodes[1], nodes[2], substrate_pin,
+                body_node, model, " ".join(device["parameters"])))
+        else:
+            lines.append("%s %s %s %s %s %s %s" % (
+                "M%04d" % index, nodes[0], nodes[1], nodes[2], substrate_pin,
+                model, " ".join(device["parameters"])))
     lines.extend([".ENDS %s" % top, ""])
     Path(output_path).write_text("\n".join(lines), encoding="utf-8")
 

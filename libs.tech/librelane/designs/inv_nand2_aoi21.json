@@ -1,0 +1,32 @@
+{
+  "meta": {
+    "version": 2
+  },
+  "DESIGN_NAME": "inv_nand2_aoi21",
+  "VERILOG_FILES": [
+    "dir::../../stdcell/benchmarks/inv_nand2_aoi21.v"
+  ],
+  "PNR_SDC_FILE": "dir::combinational.sdc",
+  "SIGNOFF_SDC_FILE": "dir::combinational.sdc",
+  "CLOCK_PERIOD": 100,
+  "VDD_NETS": [
+    "VDD"
+  ],
+  "GND_NETS": [
+    "VSS"
+  ],
+  "FP_DEF_TEMPLATE": null,
+  "FP_SIZING": "absolute",
+  "DIE_AREA": [
+    0,
+    0,
+    1340,
+    1340
+  ],
+  "CORE_AREA": [
+    170,
+    0,
+    1170,
+    1000
+  ]
+}

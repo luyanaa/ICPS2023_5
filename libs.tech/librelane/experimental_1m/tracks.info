@@ -1,5 +1,3 @@
-# <layer> <axis> <offset_um> <pitch_um>
-# Both axes are entered because LibreLane converts these records to make_tracks.
 POLY X 0.0 0.32
 POLY Y 0.0 0.32
 TIN X 0.0 0.28

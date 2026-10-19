@@ -35,8 +35,10 @@ jobs:
             python3 libs.tech/klayout/pcells/test_1m_golden.py
             python3 libs.tech/klayout/pex/test_pex.py
             python3 libs.ref/ICPS2023_5_fd_base/tools/test_pad_views.py
+            python3 libs.ref/ICPS2023_5_fd_base_2x2/tools/test_pad_views_2x2.py
             python3 libs.tech/stdcell/test_stdcell.py
             python3 libs.tech/stdcell/test_alu.py
+            python3 libs.tech/stdcell/test_frame.py
             python3 libs.ref/ICPS2023_5_gen_sc/tools/make_gen_sc.py --check
             python3 libs.tech/stdcell/test_library.py
             python3 libs.tech/stdcell/test_mapping_views.py

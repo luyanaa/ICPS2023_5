@@ -220,6 +220,10 @@ def cell_specs() -> dict[str, dict[str, Any]]:
     def add(s: dict[str, Any]) -> None: out[s["name"]] = s
     add(_spec("INV_X1", ["A"], {"Y": "!A"}, _inv("INV", "A", "Y")))
     add(_spec("BUF_X1", ["A"], {"Y": "A"}, _inv("I0", "A", "N") + _inv("I1", "N", "Y")))
+    add(_spec("TIEHI_X1", [], {"Y": "1"},
+              [_m("MOTIEHI", "p", "Y", "VSS", "VDD")]))
+    add(_spec("TIELO_X1", [], {"Y": "0"},
+              [_m("MOTIELO", "n", "Y", "VDD", "VSS")]))
     add(_spec("NAND2_X1", ["A", "B"], {"Y": "!(A & B)"}, _nand("NAND", ["A", "B"], "Y")))
     add(_spec("NAND2_BA_X1", ["B", "A"], {"Y": "!(B & A)"}, _nand("NAND", ["B", "A"], "Y"), variants={"equivalent_to": "NAND2_X1", "input_order": ["B", "A"]}))
     add(_spec("NAND3_X1", ["A", "B", "C"], {"Y": "!(A & B & C)"}, _nand("NAND", ["A", "B", "C"], "Y")))
@@ -236,11 +240,6 @@ def cell_specs() -> dict[str, dict[str, Any]]:
     add(_spec("XNOR2_X1", ["A", "B"], {"Y": "!(A ^ B)"}, _xor_core("XNOR", "A", "B", "Y", True)))
     add(_spec("MUX2_TG6T_X1", ["A", "B", "S"], {"Y": "(S & A) | (!S & B)"}, _mux_tg("MUX", "A", "B", "S", "Y"), variants={"architecture": "transmission_gate_6t", "restore_inverter": None}))
     add(_spec("MUX2_STATIC_X1", ["A", "B", "S"], {"Y": "(S & A) | (!S & B)"}, _mux_static("MUX", "A", "B", "S", "Y"), variants={"architecture": "static_cmos", "restore_inverter": "included_in_complementary_network"}))
-    # MUX4 is retained as an area comparator; both levels are explicit cells.
-    m4tg = _mux_tg("M0", "A", "B", "S0", "N0") + _mux_tg("M1", "C", "D", "S0", "N1") + _mux_tg("M2", "N0", "N1", "S1", "Y")
-    m4st = _mux_static("M0", "A", "B", "S0", "N0") + _mux_static("M1", "C", "D", "S0", "N1") + _mux_static("M2", "N0", "N1", "S1", "Y")
-    add(_spec("MUX4_TG_X1", ["A", "B", "C", "D", "S0", "S1"], {"Y": "(S1 & ((S0 & A) | (!S0 & B))) | (!S1 & ((S0 & C) | (!S0 & D)))"}, m4tg, variants={"architecture": "three_TG6T_levels"}))
-    add(_spec("MUX4_STATIC_X1", ["A", "B", "C", "D", "S0", "S1"], {"Y": "(S1 & ((S0 & A) | (!S0 & B))) | (!S1 & ((S0 & C) | (!S0 & D)))"}, m4st, variants={"architecture": "three_static_mux_levels"}))
     add(_spec("HA_X1", ["A", "B"], {"SUM": "A ^ B", "COUT": "A & B"}, _xor_core("SUM", "A", "B", "SUM") + _nand("CARRY", ["A", "B"], "NC") + _inv("CARRYI", "NC", "COUT"), outputs=["SUM", "COUT"], variants={"comparator": "half_adder"}))
     add(_spec("FA_X1", ["A", "B", "CIN"], {"SUM": "A ^ B ^ CIN", "COUT": "(A & B) | (CIN & (A ^ B))"}, _xor_core("X0", "A", "B", "XAB") + _xor_core("X1", "XAB", "CIN", "SUM") + _nand("C0", ["A", "B"], "N0") + _nand("C1", ["CIN", "XAB"], "N1") + _nand("CO", ["N0", "N1"], "COUT"), outputs=["SUM", "COUT"], variants={"comparator": "full_adder"}))
     add(_spec("LATCH_TG_X1", ["D", "CLK"], {"Q": "D"}, _latch_tg("LATCH", "D", "CLK", "Q"), outputs=["Q"], sequential=_seq_meta("transmission_gate", transparent=True, clock_inverter_net="LATCH_NCLK")))

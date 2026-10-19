@@ -1,0 +1,52 @@
+# ICPS2023_5 experimental 1M OpenRCX model. This is intentionally partial.
+# OpenRCX's per-distance resistance table uses ohms per nanometre. The sheet
+# values are from libs.tech/klayout/pex/icps2023_5_pex.py: POLY is the one
+# exception, taken from the local experimental router tech LEF (25 ohm/sq).
+#
+# No metal wire capacitance, coupling, fringe, field-solver, or PEX return-path
+# term is qualified here. PEX's 0.086 fF/um^2 term belongs to NAREA/PAREA
+# diffusion-to-SUB, not POLY/TiN/ML1 interconnect. Do not use this as signoff.
+# PEX contact references per 25 um^2: Al-TiN 0.9 ohm, Al-N+ 150 ohm, and
+# Al-P+ 200 ohm. CAP_TO_SUB is 0.086 fF/um^2 for both N/P diffusion; it is
+# not a metal-wire term and is deliberately not mapped onto routing layers.
+
+#
+# The VIA_TIN_M1 entry converts the PEX Al-TiN contact (0.9 ohm for 5x5 um)
+# through R_A=0.9*25=22.5 ohm*um^2 to the local 0.08x0.08 um experimental
+# cut: R=22.5/0.0064=3515.625 ohm. This is an explicit inverse-area
+# extrapolation, not a measured 0.08 um contact.
+
+Extraction Rules for OpenRCX
+Version 1.2
+DIAGMODEL OFF
+LayerCount 3
+DensityRate 1 0
+Corners 1 : nom_xyce_3v_25c
+DensityModel 0
+
+Metal 1 RESOVER
+WIDTH Table 1 entries: 0.12
+Metal 1 RESOVER 0
+DIST count 1 width 0.12
+0.20 0.20 0 0 0.208333333333
+END DIST
+
+Metal 2 RESOVER
+WIDTH Table 1 entries: 0.14
+Metal 2 RESOVER 0
+DIST count 1 width 0.14
+0.14 0.14 0 0 0.142857142857
+END DIST
+
+Metal 3 RESOVER
+WIDTH Table 1 entries: 6.0
+Metal 3 RESOVER 0
+DIST count 1 width 6.0
+4.0 4.0 0 0 0.0000333333333333
+END DIST
+
+VIARES 1 Default LEF Vias:
+3515.625 VIA_TIN_M1 cuts 1 TopMetal 3 BotMetal 2 dx 80 dy 80
+END VIARES
+
+END DensityModel 0

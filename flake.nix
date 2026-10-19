@@ -8,7 +8,7 @@
       devShells = nix-eda.forAllSystems (system:
         let
           pkgs = nix-eda.legacyPackages.${system};
-          python = pkgs.python3.withPackages (ps: [ ps.klayout ]);
+          python = pkgs.python3.withPackages (ps: [ ps.klayout ps.numpy ps.scipy ]);
         in {
           default = pkgs.mkShell {
             packages = [ python pkgs.klayout pkgs.ngspice pkgs.ruby pkgs.yosys ];

@@ -13,13 +13,14 @@ ICPS2023_5/
 │   ├── klayout/    tech.lyt, layer properties, DRC / LVS / PEX decks, PCells, macros, cross sections
 │   ├── ngspice/    BSIMSOI v4.4 (LEVEL=58) fit, device subcircuits and fit data
 │   ├── xschem/     symbol library + xschemrc
-│   ├── librelane/  experimental 1M technology + pad config + partial SCL view config; no usable site/timing setup
+│   ├── librelane/  experimental 1M/2M LibreLane technology, PDK/SCL contracts and design fragments
 │   ├── kicad/      legacy EEschema symbol library (unmaintained)
 │   └── ...
 ├── libs.ref/
-│   ├── ICPS2023_5_fd_base/   frame overlay + pad views: gds/, lef/, def/, lib/
-│   ├── ICPS2023_5_fd_pr/     contacts, vias and pad primitives: gds/
-│   └── doc/                  PDK documents (PDF)
+│   ├── ICPS2023_5_fd_base/      frame overlay + pad views: gds/, lef/, def/, lib/
+│   ├── ICPS2023_5_fd_base_2x2/  same views for the derived 3200 × 3200 µm 2x2 die option
+│   ├── ICPS2023_5_fd_pr/        contacts, vias and pad primitives: gds/
+│   └── doc/                     PDK documents (PDF)
 ├── Samples/        design contest template and the NAND tutorial sample
 ├── grain.xml       KLayout (salt) package descriptor
 └── SOURCES         provenance of every artefact in this repository
@@ -154,6 +155,7 @@ source `libs.tech/xschem/xschemrc`).
 | Diodes, ESD devices | `dio_ndio`, `dio_pdio`, `nmos_esd`, `pmos_esd` | ESD pins: `PAD VSS SUB` / `PAD VDD SUB`; common `SUB` |
 | Local wiring | `bridge` (TiN), `nbridge` (N+ diffusion) | |
 | Pads / frame | `libs.ref/ICPS2023_5_fd_base` | 1600 × 1600 µm frame, 28 × 60 µm pads |
+| Pads / frame (2x2) | `libs.ref/ICPS2023_5_fd_base_2x2` | derived 3200 × 3200 µm frame, 56 × 60 µm pads; the foundry ships no 2x2 GDS |
 
 ## Experimental 1M standard cells
 
@@ -181,19 +183,65 @@ operation vectors:
 nix develop --command python3 libs.tech/stdcell/test_alu.py
 ```
 
+**Status: the generated standard-cell library was cleared for redesign.** The
+six output directories under `libs.ref/ICPS2023_5_gen_sc/` (`gds`, `lef`,
+`liberty`, `spice`, `characterization`, `doc`) now contain only `.gitkeep`;
+`tools/make_gen_sc.py` is retained. The paragraphs below describe the previous
+generation and the intended contract; regenerate the library before relying on
+any artifact path in them.
+
 The experimental reference package is `libs.ref/ICPS2023_5_gen_sc/`: its SPICE
 subcircuits cover all 26 canonical cell specifications, while GDS and LEF are
 published only for cells that pass strict native-1M DRC/LVS/PEX and postlayout
 assembly. See its `doc/README.md` and per-cell `doc/cell_manifest.json`.
-`libs.tech/stdcell/export_views.py` can emit structural Verilog and black-box
-declarations for accepted cells, but refuses Liberty because no qualified
-timing library exists.
+`libs.tech/stdcell/export_views.py` emits structural Verilog and black-box
+declarations for accepted cells, but its generic model-metadata path refuses
+Liberty. The explicit experimental Xyce Liberty artifact is
+`libs.ref/ICPS2023_5_gen_sc/liberty/ICPS2023_5_gen_sc_experimental_xyce.lib`; it is
+evidence-scoped and not a qualified timing library.
+### Version-scoped FD-bridge FO/RO planning evidence
 
-`frame.py` measures the actual 1600µm/28-pad frame polygons. With explicit
-20/10/10µm pad/frame/edge engineering reservations, the remaining Boolean
-polygon is 1,997,200µm²; this is not a process-qualified usable core or a
-bondout/power assignment. The two unverified “4×” interpretations keep unknown
-core capacity rather than scaling this result.
+The Xyce FD-bridge experiments are recorded separately from nominal stdcell
+feasibility arcs:
+
+* [`libs.tech/ngspice/audit/b4soi_fd_bridge_timing.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_timing.md)
+  reports the 2 ns-edge FO1/FO4 table with real inverter gate loads.
+* [`libs.tech/ngspice/audit/b4soi_fd_bridge_sweep_ro.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_sweep_ro.md)
+  reports DUT/load scaling and 5/11/21-stage closed-loop RO results. The
+  observed planning values are approximately 11.7, 5.3, and 2.8 MHz; the
+  closed-loop mean propagation delay is approximately 8.6 ns/stage. These are
+  Xyce 7.10 / BSIMSOI 4.5.0 FD-bridge simulations, not silicon measurements.
+* [`libs.tech/ngspice/audit/b4soi_fd_bridge_cin_definitions.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_cin_definitions.md)
+  separates dynamic charge-derived input capacitance, intrinsic Cgg, and the
+  energy-derived definition. The closure-consistent dynamic result is 2258.3
+  fF for the recorded edge-start window; the historical 2635 fF pairing and
+  `C_eff_energy` remain explicitly non-frozen quantities.
+
+The nominal `libs.tech/stdcell/characterize.py` transient bench remains a
+fixed-slew, ideal-lumped-load feasibility stimulus. It is not silently
+reinterpreted as the FD-bridge timing bench. The checked-in
+`ICPS2023_5_gen_sc_experimental_xyce.lib` is rendered only from complete
+Xyce 7.10 / BSIMSOI 4.5.0 evidence at nominal 3 V / 25 °C: 17 combinational
+cells have measured arcs, the two constant tie cells carry their function with
+no arcs, and the two sequential cells are explicitly excluded. The evidence
+itself is checked in under `libs.ref/ICPS2023_5_gen_sc/characterization/` and
+produced by `libs.tech/stdcell/xyce_characterization.py`, which re-runs strict
+physical verification whenever a published cell's layout changed. This artifact
+is experimental only; it has no PVT extrapolation, power model, sequential
+setup/hold model, or signoff claim.
+
+
+`frame.py` measures the actual frame polygons of a configured frame library.
+The canonical `config.json` measures the 1600 × 1600 µm / 28-pad 1x1 frame:
+with explicit 20/10/10 µm pad/frame/edge engineering reservations the Boolean
+available polygon is 1,997,200 µm², whose largest 10 µm-grid square routing
+envelope is 1340 × 1340 µm. `config_2x2.json` measures the derived
+3200 × 3200 µm / 56-pad library (`libs.ref/ICPS2023_5_fd_base_2x2/doc/README.md`)
+with the same reservations: 9,097,200 µm² available and a 2940 × 2940 µm
+envelope, 4.55× the 1x1 capacity. Neither is a process-qualified usable core or
+a bondout/power assignment. The two unverified “4×” interpretations stay
+attached to the 1x1 measurement only; the measured 2x2 frame supersedes them
+and reports no scaling scenario.
 
 `feasibility.py` compares INV/NAND2/AOI21 template heights and three physically
 drawn PDNs (`edge_rails`, `segmented_rails`, `local_clusters`) on one fixed
@@ -258,8 +306,11 @@ nix develop --command python3 libs.tech/stdcell/routed_benchmarks.py \
   --out build/tiny-routed --benchmark tiny_and
 ```
 
-Omit `--benchmark` to run all seven RTL fixtures. Outputs must be new
-directories. The flow retains both accepted-only area-oriented ABC and
+`--config libs.tech/stdcell/config.json` (default) routes inside the canonical
+1x1 frame; `--config libs.tech/stdcell/config_2x2.json` routes the same
+fixtures inside the measured 2x2 frame library with the same engineering
+reservations. Omit `--benchmark` to run all seven RTL fixtures. Outputs must be
+new directories. The flow retains both accepted-only area-oriented ABC and
 primitive covers: ABC is heuristic, so neither an ABC cover nor a smaller
 A_cell sum is declared the routed winner. Actual ML1/TiN/CNT connectivity,
 strict physical checks, full-top electrical behavior and exact polygon fit
@@ -271,15 +322,34 @@ routing, SPICE or frame fit stays ineligible.
 
 ### Current closure boundary
 
-The latest all-fixture routed run has one eligible experimental result:
-`tiny_and/primitive/segmented_rails` at 116,644 µm² routed-core area, with exact
-measured-polygon fit, strict native-1M DRC/LVS/PEX, whole-core postlayout
-behavior, and zero route overflow/shorts. `inv_nand2_aoi21`, `mux4_decoder`,
-`counter`, and `shift_register4` remain failed by observed route or physical
-proof gates. ALU8 and ripple-adder8 are rejected by their accepted-cell
-lower-bound area before routing; this is not a process-wide impossibility
-claim. The comparison remains an experimental core result, not frame/pad,
-power-source, or I/O integration.
+The all-fixture routed runs (same 16-cell private channel bank, all seven RTL
+fixtures, three physical PDNs) reproduce one eligible experimental result in
+both frames: `tiny_and/primitive/segmented_rails` at 116,644 µm² routed-core
+area, with exact measured-polygon fit, strict native-1M DRC/LVS/PEX, whole-core
+postlayout behavior, and zero route overflow/shorts; its two sibling PDN
+variants pass every gate as well and ranking selects one winner.
+`inv_nand2_aoi21`, `mux4_decoder`, `counter`, and `shift_register4` remain
+failed by observed route or physical-conductor gates. In the 1x1 frame the
+first, second and fourth occupy only 12–73% of the measured envelope, while
+`counter`'s 1298 × 2272 µm allocation exceeds the 1340 × 1340 µm envelope
+altogether; they fail with 4–30 unrouted or overflowing connections.
+
+Routing the same fixtures inside the measured 3200 × 3200 µm / 56-pad 2x2
+frame (`--config libs.tech/stdcell/config_2x2.json`: 9,097,200 µm² available,
+2940 × 2940 µm square envelope, 4.55× the 1x1 capacity) makes the two
+area-rejected fixtures route for the first time and resolves the
+placement-fit gate for `counter`, but closes nothing new. `alu8/area_abc`
+needs 2906 × 4932 µm after row packing — taller than the 2x2 die band of
+3080 µm — and fails with 154–178 overflowing connections; its primitive
+cover (9,777,420 µm²) is still rejected by the 2x2 capacity before routing.
+All six `ripple_adder8` candidates fit the envelope and fail with 49–80
+overflowing connections. The wider frame re-packs the rows, so three
+candidates gain and three lose the `power_connectivity` gate relative to the
+1x1 runs. The limiting resource is therefore single-layer ML1/TiN routing
+capacity and the allocated row geometry, not die area: closing these fixtures
+needs cheaper wiring demand (smaller cells, better row/channel strategy), not
+a larger die. The comparison remains an experimental core result, not
+frame/pad, power-source, or I/O integration.
 
 The remaining blockers are explicit:
 
@@ -340,6 +410,8 @@ wrappers and absolute-maximum voltages are not ESD ratings. SRAM is deferred.
 | PEX regression fixtures | 17 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, orphaned-gate rejection, and unqualified-coupling omission |
 | Layered FEM matrix fixtures | `libs.tech/klayout/pex/test_fieldsolve_box.py` checks matrix symmetry, passivity, charge conservation, material sensitivity, and layer-boundary validation; test permittivities are synthetic |
 | Pad LEF/DEF consistency | 28 fixed independent DEF pins match the frame GDS; LEF/Liberty remain physical-only |
+| 2x2 frame derivative | `ICPS2023_5_fd_base_2x2` holds by construction and by read-back: 3200 × 3200 µm die, 50 µm ring, 56 60 µm pads at 200 µm pitch; 56 fixed DEF pins match the GDS; 0 DRC markers on the bare overlay in default and strict 1M profiles; the foundry ships no 2x2 frame GDS |
+| 2x2 frame routing experiment | Same 16-cell bank and seven RTL fixtures routed inside the measured 2x2 frame (9,097,200 µm² available, 2940 µm envelope): the eligible set is unchanged (`tiny_and/primitive` at 116,644 µm², all three PDN variants), ALU8 and ripple-adder8 route for the first time and fail on 154–178 / 49–80 overflowing connections, and no new fixture closes |
 | ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
 | ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
 | xschem symbol validator | 45 symbols validated; ESD pin order checked against ngspice `.subckt` definitions |

@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -32,12 +33,35 @@ class FrozenIVRegressionTests(unittest.TestCase):
     def test_fitted_parameter_change_is_rejected(self):
         baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
         source = MODEL_CARD.read_text(encoding="utf-8")
-        changed = source.replace("VTH0=0.25", "VTH0=0.251", 1)
+        # Mutate the card's *first* numeric parameter rather than a hard-coded
+        # value, so this stays valid across nominal revisions.
+        changed = re.sub(r"(?m)^\+ (VTH0)=([0-9.eE+-]+)",
+                         lambda m: "+ %s=%.12g" % (m.group(1),
+                                                   float(m.group(2)) * 1.004),
+                         source, count=1)
         self.assertNotEqual(changed, source)
         with tempfile.TemporaryDirectory() as tempdir:
             changed_card = Path(tempdir) / "changed.inc"
             changed_card.write_text(changed, encoding="utf-8")
             with self.assertRaisesRegex(REGRESSION.RegressionError, "frozen nch.VTH0 changed"):
+                REGRESSION.verify_frozen_inputs(baseline, changed_card, MEASUREMENTS)
+
+    def test_selector_change_is_rejected(self):
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        source = MODEL_CARD.read_text(encoding="utf-8")
+        expected = float(baseline.get("expected_soimod", 0))
+        replacement = 1 if expected != 1 else 2
+        # SOIMOD may be written inline on a continuation line, so match it
+        # anywhere on the first line that carries it.
+        pattern = r"(?m)^(\+[^\n]*?)SOIMOD=%g" % expected
+        changed = re.sub(pattern,
+                         lambda m: "%sSOIMOD=%d" % (m.group(1), replacement),
+                         source, count=1)
+        self.assertNotEqual(changed, source)
+        with tempfile.TemporaryDirectory() as tempdir:
+            changed_card = Path(tempdir) / "changed.inc"
+            changed_card.write_text(changed, encoding="utf-8")
+            with self.assertRaisesRegex(REGRESSION.RegressionError, "SOIMOD changed"):
                 REGRESSION.verify_frozen_inputs(baseline, changed_card, MEASUREMENTS)
 
     @unittest.skipUnless(shutil.which("ngspice"), "ngspice is required for IV regression")

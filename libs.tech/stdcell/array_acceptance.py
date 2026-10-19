@@ -32,7 +32,9 @@ except ImportError:  # direct invocation from this directory
 _TOOL_DIR = Path(__file__).resolve().parent
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
+import bench_engine  # type: ignore
 import characterize  # type: ignore
+import model_binding  # type: ignore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -536,7 +538,7 @@ def _postlayout_logic_check(postlayout_path: str | Path, top_name: str,
                             physical_spec: dict[str, Any],
                             placements: list[dict[str, Any]],
                             port_records: list[dict[str, Any]],
-                            output_dir: Path) -> dict[str, Any]:
+                            output_dir: Path, *, bench=None) -> dict[str, Any]:
     postlayout_path = Path(postlayout_path).resolve()
     if not postlayout_path.is_file():
         return {"status": "failed", "failures": [
@@ -585,7 +587,8 @@ def _postlayout_logic_check(postlayout_path: str | Path, top_name: str,
         characterize_spec["name"] = wrapper_name
         try:
             truth = characterize.truth_table(
-                characterize_spec, wrapper_path, simulation_dir, logic.evaluate)
+                characterize_spec, wrapper_path, simulation_dir, logic.evaluate,
+                bench=bench)
             instance_evidence.append({
                 "instance": instance, "status": "passed",
                 "truth_row_count": len(truth), "truth_table": truth,
@@ -613,7 +616,7 @@ def _run_pattern(pattern: dict[str, Any], accepted: dict[str, Any],
                  source_layout: Any, source_cell: Any,
                  geometry: dict[str, Any], layer_shapes: list[dict[str, Any]],
                  output_dir: Path, gap_um: float,
-                 postlayout_logic_required: bool) -> dict[str, Any]:
+                 postlayout_logic_required: bool, bench=None) -> dict[str, Any]:
     record = accepted["record"]
     cell_name = record["cell"]
     top_name = _top_name(cell_name, pattern)
@@ -734,7 +737,7 @@ def _run_pattern(pattern: dict[str, Any], accepted: dict[str, Any],
                 logic_check = _postlayout_logic_check(
                     evidence.get("postlayout_spice", ""), top_name,
                     record["physical_spec"], placements, port_records,
-                    candidate_dir / "postlayout_logic")
+                    candidate_dir / "postlayout_logic", bench=bench)
             except Exception as error:
                 logic_check = {"status": "failed", "failures": [
                     {"stage": "postlayout_boolean_logic", "error": str(error)}],
@@ -774,7 +777,8 @@ def _run_pattern(pattern: dict[str, Any], accepted: dict[str, Any],
 
 def run_array_acceptance(cell_name: str, output_dir: str | Path, *,
                          manifest_path: str | Path | None = None,
-                         placement_gap_um: float = PLACEMENT_GAP_UM) -> dict[str, Any]:
+                         placement_gap_um: float = PLACEMENT_GAP_UM,
+                         bench=None) -> dict[str, Any]:
     """Create deterministic 2x2/4x4 array artifacts and their strict evidence."""
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -817,7 +821,7 @@ def run_array_acceptance(cell_name: str, output_dir: str | Path, *,
             report["candidates"].append(_run_pattern(
                 pattern, accepted, source_layout, source_cell,
                 geometry, layer_shapes, output_dir, placement_gap_um,
-                logic_required))
+                logic_required, bench=bench))
     except Exception as error:
         report["status"] = "input_failed"
         report["input_failure"] = {"stage": "accepted_cell_manifest_or_gds", "error": str(error)}
@@ -842,10 +846,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="directory for deterministic array GDS, references, evidence, and JSON")
     parser.add_argument("--placement-gap-um", type=float, default=PLACEMENT_GAP_UM,
                         help="0 for exact boundary abutment; positive spacing for isolation experiments (default: 0 um)")
+    parser.add_argument("--bench-engine", choices=bench_engine.ENGINES, default="ngspice",
+                        help="bench engine; xyce requires the configured FD card and a local Xyce")
+    parser.add_argument("--bench-binding", choices=("nominal", "configured"), default="nominal",
+                        help="nominal stage-1 card, or the config's model binding (FD card)")
     args = parser.parse_args(argv)
+    binding = (model_binding.load() if args.bench_binding == "configured"
+               else model_binding.nominal())
+    bench = bench_engine.bench_for(binding=binding, engine=args.bench_engine,
+                                   work=args.output_dir.expanduser().resolve() / "bench")
     report = run_array_acceptance(args.cell, args.output_dir,
                                   manifest_path=args.manifest,
-                                  placement_gap_um=args.placement_gap_um)
+                                  placement_gap_um=args.placement_gap_um, bench=bench)
     print(json.dumps({"report": report["report_path"],
                       "status": report["status"],
                       "rankable_candidate_count": report["rankable_candidate_count"]},

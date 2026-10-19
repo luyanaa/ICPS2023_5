@@ -1,0 +1,146 @@
+{
+  "devices": {
+    "nch": {
+      "evaluations": 1143,
+      "metrics": {
+        "n_out_vg15": {
+          "relative_rms_percent": 23.711735127975313,
+          "samples": 45
+        },
+        "n_out_vg2": {
+          "relative_rms_percent": 2.147634660603251,
+          "samples": 43
+        },
+        "n_out_vg25": {
+          "relative_rms_percent": 3.8900305697442223,
+          "samples": 44
+        },
+        "n_out_vg3": {
+          "relative_rms_percent": 5.48026994245697,
+          "samples": 41
+        },
+        "n_transfer_blue": {
+          "log10_current_rms_decades": 0.1931580728741522,
+          "samples": 32
+        },
+        "n_transfer_orange": {
+          "log10_current_rms_decades": 0.173491522084745,
+          "samples": 29
+        }
+      },
+      "values": {
+        "A0": 0.9364683593750001,
+        "AGS": 0.2656,
+        "CAPMOD": 2,
+        "CGDO": 5e-09,
+        "CGSO": 5e-09,
+        "K1": 0.07914352921155103,
+        "K2": 0.0,
+        "KETA": -0.059994791666666665,
+        "LEVEL": 58,
+        "MOBMOD": 1,
+        "NCH": 1000000000000000.0,
+        "NFACTOR": 5.209687499999998,
+        "NGATE": 0.0,
+        "PCLM": 2.7348622395833315,
+        "PDIBLC2": 0.0031308944010416673,
+        "RDSW": 4.618527782440651e-14,
+        "SOIMOD": 1,
+        "TBOX": 4e-07,
+        "TNOM": 25,
+        "TOX": 1.5e-08,
+        "TOXM": 1.5e-08,
+        "TSI": 9.5e-08,
+        "U0": 545.0000000000001,
+        "UA": 1.4166666666666665e-09,
+        "UB": 5.87e-19,
+        "UC": -9.962500000000003e-11,
+        "VOFF": -0.23846500000000007,
+        "VSAT": 1039974.0314,
+        "VTH0": 0.21145833333333341,
+        "XJ": 5e-08
+      }
+    },
+    "pch": {
+      "evaluations": 1123,
+      "metrics": {
+        "p_out_vg15": {
+          "relative_rms_percent": 10.842195543879933,
+          "samples": 43
+        },
+        "p_out_vg2": {
+          "relative_rms_percent": 6.748533037013221,
+          "samples": 43
+        },
+        "p_out_vg25": {
+          "relative_rms_percent": 6.339622730074714,
+          "samples": 43
+        },
+        "p_out_vg3": {
+          "relative_rms_percent": 7.903000187269832,
+          "samples": 42
+        },
+        "p_transfer_blue": {
+          "log10_current_rms_decades": 0.28544601537585124,
+          "samples": 27
+        },
+        "p_transfer_orange": {
+          "log10_current_rms_decades": 0.23324037370993236,
+          "samples": 27
+        }
+      },
+      "values": {
+        "A0": 0.7523200000000001,
+        "AGS": 0.1971,
+        "CAPMOD": 2,
+        "CGDO": 6.8e-09,
+        "CGSO": 6.8e-09,
+        "K1": 0.07914352921155103,
+        "K2": 0.0,
+        "KETA": -0.05533333333333334,
+        "LEVEL": 58,
+        "MOBMOD": 1,
+        "NCH": 1000000000000000.0,
+        "NFACTOR": 2.080986328124999,
+        "NGATE": 0.0,
+        "PCLM": 11.9189,
+        "PDIBLC2": 0.0010427215333333334,
+        "RDSW": 197.31766666666667,
+        "SOIMOD": 1,
+        "TBOX": 4e-07,
+        "TNOM": 25,
+        "TOX": 1.5e-08,
+        "TOXM": 1.5e-08,
+        "TSI": 9.5e-08,
+        "U0": 93.93883333333335,
+        "UA": -5.7647e-10,
+        "UB": 5.0269e-19,
+        "UC": -4.833333333333248e-12,
+        "VOFF": -0.22506378906250002,
+        "VSAT": 1299949.0,
+        "VTH0": -0.49157552083333317,
+        "XJ": 5e-08
+      }
+    }
+  },
+  "nominal_model": "libs.tech/ngspice/models/icps2023_5_b4soi.inc",
+  "objective_weights": {
+    "output_per_percent": 0.03,
+    "swing_per_V_per_decade": 5000.0,
+    "transfer_per_decade": 1.0
+  },
+  "p7_table": {
+    "nch": {
+      "idsat_uA_per_um": 62.5,
+      "ss_mV_per_dec": 71.0,
+      "vth": 0.25
+    },
+    "pch": {
+      "idsat_uA_per_um": 12.9,
+      "ss_mV_per_dec": 65.0,
+      "vth": -0.71
+    }
+  },
+  "soimod": 1,
+  "variant": "unified"
+}

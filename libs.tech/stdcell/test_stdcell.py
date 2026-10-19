@@ -2,6 +2,8 @@
 """Executable standard-cell checks; model results are not process qualification."""
 from __future__ import annotations
 
+import json
+import math
 import re
 import sys
 import tempfile
@@ -11,10 +13,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import bench_engine
 import characterize
+import core_router
 import geometry
 import logic
 import mapping
+import model_binding
 import verify
 
 
@@ -64,15 +69,297 @@ class StandardCellTests(unittest.TestCase):
                 self.assertLessEqual(right, width, pin)
                 self.assertLessEqual(top, height, pin)
 
+
+
     def test_pin_window_manifests_cover_pins_within_cell_bounds(self):
         specs = logic.cell_specs()
         for name in ("INV_X1", "NAND2_X1"):
             with self.subTest(cell=name):
                 spec = specs[name]
+                # 500um is the experimental row height the library publishes:
+                # the NMOS row starts clear of the full-width VSS rail band, so
+                # the pre-rail 160um probe no longer builds.
                 _layout, _top, manifest = geometry.build_cell(
-                    spec, 160, route_channel_um=40)
+                    spec, 500, route_channel_um=40)
                 self._assert_pin_windows_are_bounded(spec, manifest)
 
+
+    def test_soi_edge_straps_are_physical_route_obstacles_in_both_architectures(self):
+        spec = logic.cell_specs()["INV_X1"]
+        for architecture, mirror in (("compact_rows", False), ("channel", True)):
+            with self.subTest(architecture=architecture):
+                layout, top, manifest = geometry.build_cell(
+                    spec, 500, architecture=architecture, mirror=mirror)
+                records = manifest["soi_edge_protection"]["devices"]
+                straps = [shape for shape in manifest["routing"]["shapes"]["ML1"]
+                          if shape[2] == "soi_edge_strap"]
+
+                actual = geometry.soi_edge_protection(layout, top)
+                self.assertTrue(actual["passed"])
+                self.assertEqual(actual["gate_count"], len(spec["mos"]))
+                self.assertEqual(actual["single_edge_breaks_checked"],
+                                 2 * len(spec["mos"]))
+                self.assertTrue(actual["single_edge_breaks_passed"])
+                self.assertTrue(all(
+                    contact["off_diffusion"]
+                    for device in actual["devices"]
+                    for contact in device["contacts"]))
+                self.assertTrue(all(
+                    len(device["single_edge_faults"]) == 2
+                    and all(fault["tin_continuity_passed"]
+                            for fault in device["single_edge_faults"])
+                    for device in actual["devices"]))
+
+                rect = tuple(straps[0][0])
+                clearance = geometry.ML1_WIDTH/2 + geometry.ML1_SPACE
+                y = (rect[1] + rect[3]) / 2
+                route = geometry._route_ml1(
+                    (rect[0] - clearance - 5.0, y),
+                    (rect[2] + clearance + 5.0, y),
+                    "__PROTECTION_ROUTE_PROBE__",
+                    [(rect, "__PROTECTION_NET__", "soi_edge_strap")],
+                    manifest["width_um"], manifest["height_um"])
+                for x, y in route:
+                    self.assertFalse(
+                        rect[0] - clearance <= x <= rect[2] + clearance
+                        and rect[1] - clearance <= y <= rect[3] + clearance)
+
+                record = records[0]
+                upper_contact = next(
+                    contact for contact in record["contacts"]
+                    if contact["edge"] == "upper")
+                source = tuple(upper_contact["center_um"])
+                target = (source[0] + 25.0, source[1])
+                target_pad = (
+                    target[0] - geometry.GATE_CONTACT / 2.0,
+                    target[1] - geometry.GATE_CONTACT / 2.0,
+                    target[0] + geometry.GATE_CONTACT / 2.0,
+                    target[1] + geometry.GATE_CONTACT / 2.0)
+                same_net_shapes = [
+                    (tuple(upper_contact["landing_um"]), "__SAME_GATE__", "pad"),
+                    (tuple(record["strap_um"]), "__SAME_GATE__",
+                     "soi_edge_strap"),
+                    (target_pad, "__SAME_GATE__", "pad")]
+                path = geometry._route_ml1(
+                    source, target, "__SAME_GATE__", same_net_shapes,
+                    manifest["width_um"], manifest["height_um"])
+                self.assertEqual(path[0], source)
+                self.assertEqual(path[-1], target)
+
+    def test_actual_edge_checker_rejects_a_deleted_off_island_endpoint(self):
+        spec = logic.cell_specs()["INV_X1"]
+        layout, top, manifest = geometry.build_cell(spec, 500)
+        cut = manifest["soi_edge_protection"]["devices"][0]["contacts"][0]["cut_um"]
+        target = tuple(round(value / layout.dbu) for value in cut)
+        layer = layout.find_layer(geometry.db.LayerInfo(geometry.CNT, 0))
+        shapes = top.shapes(layer)
+        boxes = [tuple(value for value in
+                       (shape.box.left, shape.box.bottom,
+                        shape.box.right, shape.box.top))
+                 for shape in shapes.each() if shape.is_box()]
+        self.assertIn(target, boxes)
+        shapes.clear()
+        for box in boxes:
+            if box != target:
+                shapes.insert(geometry.db.Box(*box))
+        with self.assertRaisesRegex(ValueError, "one off-DIFF CNT endpoint"):
+            geometry.soi_edge_protection(layout, top)
+
+    def test_geometry_checker_covers_non_mos_crossings_and_ignores_nearby_tin(self):
+        def layout_with_crossing(layer_mode, covered):
+            layout = geometry.db.Layout()
+            layout.dbu = geometry.DBU
+            top = layout.create_cell("non_mos_crossing")
+            diff_layer, ml1_layer = (
+                (3, 8) if layer_mode == "design" else (4, 7)
+            )
+
+            def box(layer_number, bounds):
+                layer = layout.layer(geometry.db.LayerInfo(layer_number, 0))
+                ticks = [round(value / layout.dbu) for value in bounds]
+                top.shapes(layer).insert(geometry.db.Box(*ticks))
+
+            box(diff_layer, (0.0, 0.0, 40.0, 40.0))
+            tin_bounds = (
+                (10.0, -5.0, 16.0, 5.0) if layer_mode == "design"
+                else (8.0, -5.0, 18.0, 7.0)
+            )
+            box(5, tin_bounds)
+            if covered:
+                box(ml1_layer, (6.0, -4.0, 20.0, 4.0))
+            return layout, top
+
+        for layer_mode in ("design", "fab"):
+            with self.subTest(layer_mode=layer_mode):
+                layout, top = layout_with_crossing(layer_mode, covered=True)
+                result = geometry.soi_edge_protection(
+                    layout, top, layer_mode=layer_mode
+                )
+                self.assertEqual(result["crossing_count"], 1)
+                self.assertEqual(result["gate_count"], 0)
+
+                damaged_layout, damaged_top = layout_with_crossing(
+                    layer_mode, covered=False
+                )
+                with self.assertRaisesRegex(ValueError, "TiN crossing"):
+                    geometry.soi_edge_protection(
+                        damaged_layout, damaged_top, layer_mode=layer_mode
+                    )
+
+        for layer_mode in ("design", "fab"):
+            layout = geometry.db.Layout()
+            layout.dbu = geometry.DBU
+            top = layout.create_cell("adjacent_tin_only")
+            diff_layer = 3 if layer_mode == "design" else 4
+            tin_bounds = (
+                ((10.0, 3.0, 36.0, 9.0), (10.0, -9.0, 36.0, -3.0))
+                if layer_mode == "design"
+                else ((10.0, 1.0, 36.0, 7.0), (10.0, -7.0, 36.0, -1.0))
+            )
+            for layer_number, bounds in (
+                (diff_layer, (0.0, 0.0, 40.0, 40.0)),
+                *((5, bounds) for bounds in tin_bounds),
+            ):
+                layer = layout.layer(geometry.db.LayerInfo(layer_number, 0))
+                ticks = [round(value / layout.dbu) for value in bounds]
+                top.shapes(layer).insert(geometry.db.Box(*ticks))
+            result = geometry.soi_edge_protection(
+                layout, top, layer_mode=layer_mode
+            )
+            self.assertEqual(result["crossing_count"], 0)
+            self.assertEqual(result["gate_count"], 0)
+
+
+    def test_connected_off_island_arm_does_not_expand_local_crossing(self):
+        def layout_with_arm(covered):
+            layout = geometry.db.Layout()
+            layout.dbu = geometry.DBU
+            top = layout.create_cell("connected_tin_arm")
+
+            def box(layer_number, bounds):
+                layer = layout.layer(geometry.db.LayerInfo(layer_number, 0))
+                ticks = [round(value / layout.dbu) for value in bounds]
+                top.shapes(layer).insert(geometry.db.Box(*ticks))
+
+            box(4, (0.0, 0.0, 40.0, 40.0))
+            box(5, (10.0, -10.0, 16.0, 10.0))
+            box(5, (14.0, -7.0, 36.0, -1.0))
+            if covered:
+                box(7, (8.0, -4.0, 18.0, 4.0))
+            return layout, top
+
+        layout, top = layout_with_arm(covered=True)
+        result = geometry.soi_edge_protection(layout, top, layer_mode="fab")
+        self.assertEqual(result["crossing_count"], 1)
+        self.assertEqual(result["gate_count"], 0)
+
+        damaged_layout, damaged_top = layout_with_arm(covered=False)
+        with self.assertRaisesRegex(ValueError, "TiN crossing"):
+            geometry.soi_edge_protection(
+                damaged_layout, damaged_top, layer_mode="fab"
+            )
+
+    def test_fab_geometry_checks_gate_bypass_with_fab_dopants(self):
+        layout = geometry.db.Layout()
+        layout.dbu = geometry.DBU
+        top = layout.create_cell("prepared_nmos_gate")
+
+        def box(layer_number, bounds):
+            layer = layout.layer(geometry.db.LayerInfo(layer_number, 0))
+            ticks = [round(value / layout.dbu) for value in bounds]
+            top.shapes(layer).insert(geometry.db.Box(*ticks))
+
+        box(4, (0.0, 0.0, 48.0, 20.0))
+        box(3, (-2.0, -2.0, 50.0, 22.0))
+        for bounds in (
+            (19.0, -8.0, 29.0, 28.0),
+            (17.5, -18.0, 30.5, -5.0),
+            (17.5, 25.0, 30.5, 38.0),
+        ):
+            box(5, bounds)
+        for y in (-11.5, 31.5):
+            box(6, (21.5, y - 2.5, 26.5, y + 2.5))
+        box(7, (17.0, -22.0, 31.0, 42.0))
+
+        result = geometry.soi_edge_protection(layout, top, layer_mode="fab")
+        self.assertEqual(result["gate_count"], 1)
+
+        cnt_layer = layout.layer(geometry.db.LayerInfo(6, 0))
+        cnt_shapes = top.shapes(cnt_layer)
+        cut_to_remove = geometry.db.Box(
+            round(21.5 / layout.dbu), round(-14.0 / layout.dbu),
+            round(26.5 / layout.dbu), round(-9.0 / layout.dbu),
+        )
+        remaining = [
+            shape.box for shape in cnt_shapes.each()
+            if shape.is_box() and shape.box != cut_to_remove
+        ]
+        cnt_shapes.clear()
+        for cut in remaining:
+            cnt_shapes.insert(cut)
+        with self.assertRaisesRegex(ValueError, "one off-DIFF CNT endpoint"):
+            geometry.soi_edge_protection(layout, top, layer_mode="fab")
+
+    def test_separate_supply_pads_reach_rails_without_crossing_gate_straps(self):
+        for name in ("NAND2_X1", "NOR2_X1"):
+            with self.subTest(cell=name):
+                layout, top, manifest = geometry.build_cell(
+                    logic.cell_specs()[name], 500.0)
+                boxes = {
+                    (number, 0): [shape.box for shape in
+                                  top.shapes(layout.layer(number, 0)).each()]
+                    for number in (3, 5, 7, 8)}
+                graph = core_router._electrical_components(boxes, layout.dbu)
+                components = graph["components_by_layer"][(8, 0)]
+                electrical = graph["electrical_ids_by_layer"][(8, 0)]
+
+                def component_at(x, y):
+                    point = geometry.db.Point(
+                        round(x / layout.dbu), round(y / layout.dbu))
+                    ids = core_router._component_ids_at(components, point)
+                    self.assertEqual(len(ids), 1)
+                    return electrical[ids[0]]
+
+                rail_ids = {}
+                for net, rail in manifest["power_rails_um"].items():
+                    rail_ids[net] = component_at(
+                        (rail[0] + rail[2]) / 2, (rail[1] + rail[3]) / 2)
+                self.assertNotEqual(rail_ids["VDD"], rail_ids["VSS"])
+                for contact in manifest["contacts"]:
+                    if contact["kind"] != "diffusion" or contact["net"] not in rail_ids:
+                        continue
+                    cut = contact["cut_um"]
+                    self.assertEqual(
+                        component_at((cut[0] + cut[2]) / 2,
+                                     (cut[1] + cut[3]) / 2),
+                        rail_ids[contact["net"]])
+
+    def test_l6_edge_geometry_uses_native_channel_formula(self):
+        layout, top, _manifest = geometry.build_cell(
+            logic.cell_specs()["INV_X1"], 500.0, fingers=1)
+        diff = geometry._physical_region(layout, top, geometry.DIFF)
+        tin = geometry._physical_region(layout, top, geometry.TIN)
+        cnt = geometry._physical_region(layout, top, geometry.CNT)
+        ml1 = geometry._physical_region(layout, top, geometry.ML1)
+        crossing = next((tin & diff).merged().each())
+        box = crossing.bbox()
+        active = diff.interacting(geometry.db.Region(crossing)).bbox()
+        dbu = layout.dbu
+        self.assertAlmostEqual(active.width() * dbu, 48.0)
+        self.assertAlmostEqual(
+            ((box.left + box.right) / 2.0 - active.left) * dbu, 24.0)
+        self.assertAlmostEqual(box.width() * dbu, 6.0)
+        edge_strip = geometry.db.Region(geometry.db.Box(
+            active.left, box.bottom - 1, active.right, box.bottom + 1))
+        gate_metal = ml1.interacting(geometry.db.Region(crossing))
+        self.assertAlmostEqual((gate_metal & edge_strip).bbox().width() * dbu, 14.0)
+        active_cuts = cnt.interacting(geometry.db.Region(active))
+        contact_centers = sorted(
+            ((cut.bbox().left + cut.bbox().right) / 2.0 - active.left) * dbu
+            for cut in active_cuts.each())
+        self.assertEqual(len(contact_centers), 2)
+        self.assertAlmostEqual(contact_centers[0], 6.5)
+        self.assertAlmostEqual(contact_centers[1], 41.5)
 
     def test_all_combinational_reference_truth_tables(self):
         specs = logic.cell_specs()
@@ -255,11 +542,30 @@ class StandardCellTests(unittest.TestCase):
                 else:
                     self.assertLess(actual, 0.3)
 
+    def test_design_fab_pex_resistance_disagreement_is_not_correspondence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            summaries = [
+                {"layer": layer, "gates": 0, "bounded": 0, "unbounded": 0,
+                 "ambiguous": 0, "orphaned": 0, "failures": [], "passed": True}
+                for layer in ("NAREA", "PAREA")
+            ]
+            prefix = "".join("* MOS_ACCESS_RESULT " + json.dumps(row) + "\n"
+                             for row in summaries)
+            design = root / "design.spice"
+            fab = root / "fab.spice"
+            design.write_text(prefix + ".SUBCKT TOP_pex A B SUB\nR1 A B 10\n.ENDS TOP_pex\n")
+            fab.write_text(prefix + ".SUBCKT TOP_pex A B SUB\nR1 A B 20\n.ENDS TOP_pex\n")
+            comparison = verify.compare_pex_modes(design, fab, "TOP")
+        self.assertEqual(comparison["status"], "DIFFERENT")
+        self.assertNotEqual(comparison["rc_summary"]["design"],
+                            comparison["rc_summary"]["fab"])
+
     def test_aoi21_strict_physical_pex_and_characterization(self):
         spec = logic.cell_specs()["AOI21_X1"]
         with tempfile.TemporaryDirectory(prefix="icps_stdcell_physical_") as temporary:
             root = Path(temporary)
-            layout, top, manifest = geometry.build_cell(spec, 160)
+            layout, top, manifest = geometry.build_cell(spec, 500)
             layout.rename_cell(top.cell_index(), spec["name"])
             gds = root / (spec["name"] + ".gds")
             reference = root / (spec["name"] + ".spice")
@@ -273,12 +579,33 @@ class StandardCellTests(unittest.TestCase):
             self.assertEqual(manifest["area_um2"], manifest["width_um"] * manifest["height_um"])
             self._assert_pin_windows_are_bounded(spec, manifest)
             self.assertFalse(manifest["routing"]["direct_tin_diff_contact"])
+            # The assembled postlayout netlist is bound to the configured model
+            # (the experimental ideal-FD bridge card, Xyce-scoped), so it is
+            # characterized on that engine.  The nominal stage-1/ngspice bench
+            # covers the logical references in the other tests.
+            binding = model_binding.load()
+            if not bench_engine.available(binding["engine"]):
+                self.skipTest("postlayout evidence is bound to %s, which is unavailable"
+                              % binding["engine"])
+            bench = bench_engine.bench_for(binding=binding, engine=binding["engine"],
+                                           work=root / "bench")
+            # Engine-port evidence on the bound FD card: the translated deck must
+            # reproduce the same strict truth-table criteria as the nominal leg
+            # (0.9/0.1 VDD per row).  CI without Xyce skips this leg (skipTest above).
             truth = characterize.truth_table(spec, evidence["postlayout_spice"],
-                                            root / "truth", logic.evaluate)
+                                             root / "truth", logic.evaluate,
+                                             bench=bench, strict=False)
             arcs = characterize.characterize_arcs(spec, evidence["postlayout_spice"],
-                                                   root / "arcs", logic.evaluate)
+                                                  root / "arcs", logic.evaluate, bench=bench)
             self.assertEqual(len(truth), 8)
             self.assertEqual(len(arcs), 5)
+            self.assertTrue(all(math.isfinite(row["voltage_v"][pin])
+                                for row in truth for pin in row["expected"]))
+            mismatches = [{"inputs": row["inputs"], "expected": row["expected"],
+                           "voltage_v": row["voltage_v"]}
+                          for row in truth if not row["passed"]]
+            self.assertEqual(mismatches, [], "FD-card truth-table mismatch: %s"
+                             % json.dumps(mismatches[:2]))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,103 @@
+{
+  "meta": {
+    "version": 2,
+    "flow": "Classic",
+    "substituting_steps": {
+      "Magic.StreamOut": null,
+      "Magic.WriteLEF": null,
+      "Magic.DRC": null,
+      "Magic.SpiceExtraction": null,
+      "Checker.MagicDRC": null,
+      "Netgen.LVS": null,
+      "Checker.LVS": null
+    }
+  },
+  "PDK": "ICPS2023_5",
+  "STD_CELL_LIBRARY": "ICPS2023_5_gen_sc",
+  "PAD_CELL_LIBRARY": "ICPS2023_5_fd_base_2x2",
+  "TECH_LEFS": {
+    "*": "pdk_dir::libs.tech/librelane/experimental_2m_post2025/icps2023_5_2m.tech.lef"
+  },
+  "FP_TRACKS_INFO": "pdk_dir::libs.tech/librelane/experimental_2m_post2025/tracks.info",
+  "KLAYOUT_TECH": "pdk_dir::libs.tech/klayout/tech.lyt",
+  "KLAYOUT_PROPERTIES": "pdk_dir::libs.tech/klayout/icps2023_5.lyp",
+  "KLAYOUT_DEF_LAYER_MAP": "pdk_dir::libs.tech/librelane/experimental_2m_post2025/icps2023_5_2m.map",
+  "RT_MIN_LAYER": "POLY",
+  "RT_MAX_LAYER": "M2",
+  "RT_CLOCK_MIN_LAYER": "POLY",
+  "RT_CLOCK_MAX_LAYER": "M1",
+  "FP_DEF_TEMPLATE": "pdk_dir::libs.ref/ICPS2023_5_fd_base_2x2/def/ICPS2023_5_fd_base_2x2_librelane.def",
+  "PL_TARGET_DENSITY_PCT": 65.0,
+  "GRT_ALLOW_CONGESTION": false,
+  "RUN_ANTENNA_REPAIR": false,
+  "RUN_MAGIC_STREAMOUT": false,
+  "RUN_MAGIC_WRITE_LEF": false,
+  "RUN_MAGIC_DRC": false,
+  "RUN_KLAYOUT_STREAMOUT": true,
+  "RUN_KLAYOUT_XOR": false,
+  "RUN_KLAYOUT_DRC": true,
+  "KLAYOUT_DRC_RUNSET": "pdk_dir::libs.tech/klayout/drc/icps2023_5.drc",
+  "KLAYOUT_DRC_DEFINES": {
+    "layer_mode": "design",
+    "strict": "true",
+    "edge_redundancy": "true",
+    "soi_edge_margin": "2.0",
+    "process_profile": "icps2023_5_multimetal_experimental"
+  },
+  "RUN_SPEF_EXTRACTION": false,
+  "RUN_MCSTA": false,
+  "RUN_IRDROP_REPORT": false,
+  "PLACE_SITE": "ICPS2023_5_ROW500",
+  "SYNTH_DRIVING_CELL": "BUF_X1/Y",
+  "SYNTH_BUFFER_CELL": "BUF_X1/A/Y",
+  "SYNTH_TIEHI_CELL": "TIEHI_X1/Y",
+  "SYNTH_TIELO_CELL": "TIELO_X1/Y",
+  "CTS_ROOT_BUFFER": "BUF_X1",
+  "CTS_CLK_BUFFERS": [
+    "BUF_X1"
+  ],
+  "IO_PIN_H_LAYER": "M1",
+  "IO_PIN_V_LAYER": "M2",
+  "OUTPUT_CAP_LOAD": 5.0,
+  "IO_DELAY_CONSTRAINT": 0.0,
+  "MAX_FANOUT_CONSTRAINT": 1,
+  "CLOCK_UNCERTAINTY_CONSTRAINT": 0.0,
+  "CLOCK_TRANSITION_CONSTRAINT": 2.0,
+  "TIME_DERATING_CONSTRAINT": 0.0,
+  "TIMING_VIOLATION_CORNERS": [
+    "nom_xyce_3v_25c"
+  ],
+  "GRT_LAYER_ADJUSTMENTS": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "RCX_RULESETS": {
+    "nom_xyce_3v_25c": "pdk_dir::libs.tech/librelane/rcx/icps2023_5_2m.rules"
+  },
+  "PDN_MULTILAYER": false,
+  "PDN_CORE_RING": false,
+  "PDN_RAIL_OFFSET": 0.0,
+  "PDN_RAIL_LAYER": "M1",
+  "PDN_RAIL_WIDTH": 12.0,
+  "PDN_VERTICAL_LAYER": "M2",
+  "PDN_HORIZONTAL_LAYER": "M1",
+  "PDN_VWIDTH": 6.0,
+  "PDN_HWIDTH": 6.0,
+  "PDN_VSPACING": 6.0,
+  "PDN_HSPACING": 4.0,
+  "PDN_VPITCH": 24.0,
+  "PDN_HPITCH": 20.0,
+  "PDN_VOFFSET": 0.0,
+  "PDN_HOFFSET": 0.0,
+  "PDN_CORE_RING_VWIDTH": 6.0,
+  "PDN_CORE_RING_HWIDTH": 6.0,
+  "PDN_CORE_RING_VSPACING": 6.0,
+  "PDN_CORE_RING_HSPACING": 4.0,
+  "PDN_CORE_RING_VOFFSET": 0.0,
+  "PDN_CORE_RING_HOFFSET": 0.0,
+  "GPL_CELL_PADDING": 8,
+  "DPL_CELL_PADDING": 8,
+  "FP_CORE_UTIL": 10
+}

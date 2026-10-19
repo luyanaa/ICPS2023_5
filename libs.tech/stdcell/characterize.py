@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Model-based, postlayout logic levels and arcs; no silicon timing claim."""
+"""Model-based, postlayout logic levels and arcs; no silicon timing claim.
+
+Model scope: the ``.control``-based benches in this module execute the *nominal*
+stage-1 PDK card in ngspice (BSIMSOI 4.4, LEVEL=58).  They are functional
+geometry/logic checks, not model acceptance.  The library evidence path
+(``verify.verify_physical``) binds the experimental ideal-FD bridge card, which
+is version-limited to Xyce 7.10 / BSIMSOI 4.5.0; running that card here, or
+accepting its results from an ngspice run, is forbidden
+(``libs.tech/stdcell/model_binding.py``, AGENTS.md 1.2).
+
+The combinational arc bench deliberately keeps its fixed external PULSE slew
+and ideal lumped ``CLOAD`` as nominal feasibility stimuli.  Those stimuli are
+not the FD-bridge FO/RO timing definition and MUST NOT be promoted to a
+Liberty pin capacitance, a universal driver model, or a silicon frequency.
+The version-scoped FD-bridge FO/load and closed-loop RO evidence lives in
+``libs.tech/ngspice/tools/audit_b4soi_bridge_*`` and uses Xyce directly.
+"""
 from __future__ import annotations
 
 import itertools
@@ -10,10 +26,14 @@ import re
 import shutil
 import subprocess
 
-from verify import MODELS, run_command, sha256
+import model_binding
+import bench_engine
+from verify import run_command, sha256
 
 VDD = 3.0
-MODEL_CARD = MODELS.parent / "models/icps2023_5_b4soi.inc"
+NOMINAL = model_binding.nominal()
+MODELS = NOMINAL["library_path"]        # nominal bench selector (stage-1 card)
+MODEL_CARD = NOMINAL["include_path"]
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 
 
@@ -21,10 +41,22 @@ class CharacterizationError(ValueError):
     pass
 
 
-def _run(deck, output_dir):
+def _bench(output_dir, subcircuit, bench=None, *, integration_method="trap"):
+    """Resolve the bench: explicit binding, else pair the engine to the netlist's own card."""
+    if bench is None:
+        bench = bench_engine.bench_for_netlist(subcircuit, work=Path(output_dir),
+                                               method=integration_method)
+    return bench
+
+
+def _run(deck, output_dir, bench=None):
+    """Run a bench deck: bound engine (translated) or ngspice as before."""
+    if bench is not None and bench.engine != "ngspice":
+        return bench_engine.run_legacy_deck(bench, deck, name="bench",
+                                            output_dir=output_dir)
     ngspice = shutil.which("ngspice")
     if ngspice is None:
-        raise CharacterizationError("ngspice required; use root Nix devShell")
+        raise CharacterizationError("ngspice required; use root Nix DevShell")
     path = Path(output_dir) / "bench.cir"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(deck) + "\n", encoding="utf-8")
@@ -35,17 +67,16 @@ def _header(spec, subcircuit, *, integration_method="trap"):
     if integration_method not in {"trap", "gear"}:
         raise CharacterizationError("integration_method must be trap or gear")
     pins = spec["pins"]
-    return ["* ICPS2023_5 postlayout characterization; provisional nominal compact model",
-            '.include "%s"' % Path(subcircuit).resolve(),
-            ".options temp=25 tnom=25 method=%s reltol=1e-4 itl4=500" % integration_method,
+    return ['.include "%s"' % Path(subcircuit).resolve(),
             "VPOWER VDD 0 %.12g" % VDD, "VSUB SUB 0 0",
             "XDUT %s SUB %s" % (" ".join("0" if pin == "VSS" else pin for pin in pins), spec["name"])]
 
 
-def truth_table(spec, postlayout, output_dir, evaluate):
+def truth_table(spec, postlayout, output_dir, evaluate, *, bench=None, strict=True):
     """DC circuit operating points compared with independent Boolean truth."""
     if spec.get("sequential"):
         raise CharacterizationError("DC truth table is for combinational cells")
+    bench = _bench(output_dir, postlayout, bench)
     inputs, outputs = spec["inputs"], spec["outputs"]
     rows = list(itertools.product((0, 1), repeat=len(inputs)))
     deck = _header(spec, postlayout)
@@ -57,7 +88,7 @@ def truth_table(spec, postlayout, output_dir, evaluate):
         deck += ["print v(%s)" % pin for pin in outputs]
         deck += ["print i(VPOWER)"]
     deck += ["quit", ".endc", ".end"]
-    text = _run(deck, output_dir)
+    text = _run(deck, output_dir, bench)
     records = []
     for index, bits in enumerate(rows):
         match = re.search(r"TRUTH_ROW_%d\s*\n(.*?)(?=TRUTH_ROW_|\Z)" % index, text, re.S)
@@ -67,17 +98,21 @@ def truth_table(spec, postlayout, output_dir, evaluate):
                   re.findall(r"^\s*(v\([^)]+\)|i\([^)]+\))\s*=\s*(%s)" % NUMBER, match.group(1), re.M)}
         expected = evaluate(spec, dict(zip(inputs, bits)))
         observed = {}
+        logic_ok = {}
         for output in outputs:
             voltage = values.get("v(%s)" % output.casefold())
             if voltage is None or not math.isfinite(voltage):
                 raise CharacterizationError("missing/nonfinite output %s in truth row %d" % (output, index))
             good = voltage >= .9 * VDD if expected[output] else voltage <= .1 * VDD
-            if not good:
+            if not good and strict:
                 raise CharacterizationError("%s truth %s: %s=%.6g V expected %d" %
                                             (spec["name"], bits, output, voltage, expected[output]))
             observed[output] = voltage
+            logic_ok[output] = good
         records.append({"inputs": dict(zip(inputs, bits)), "expected": expected,
-                        "voltage_v": observed, "supply_current_a": values.get("i(vpower)")})
+                        "voltage_v": observed, "logic_ok": logic_ok,
+                        "passed": all(logic_ok.values()),
+                        "supply_current_a": values.get("i(vpower)")})
     return records
 
 
@@ -89,8 +124,10 @@ def _measurements(text):
     return result
 
 
-def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, slew_ns=2.0):
+def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, slew_ns=2.0,
+                       bench=None):
     """Sensitized truth-table arcs at explicit load/slew, including VTC noise margins."""
+    bench = _bench(output_dir, postlayout, bench)
     arcs = []
     if spec.get("sequential"):
         raise CharacterizationError("sequential timing needs a stateful bench")
@@ -118,22 +155,31 @@ def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, sl
                          (input_pin, VDD/2, output, VDD/2, first_edge),
                          ".measure tran d_down TRIG v(%s) VAL=%.12g FALL=1 TARG v(%s) VAL=%.12g %s=1 TD=450n" %
                          (input_pin, VDD/2, output, VDD/2, second_edge),
-                         ".measure tran out_rise TRIG v(%s) VAL=%.12g RISE=1 TARG v(%s) VAL=%.12g RISE=1" %
-                         (output, .2*VDD, output, .8*VDD),
-                         ".measure tran out_fall TRIG v(%s) VAL=%.12g FALL=1 TARG v(%s) VAL=%.12g FALL=1" %
-                         (output, .8*VDD, output, .2*VDD),
+                         ".measure tran out_rise_start TRIG v(%s) VAL=%.12g %s=1%s TARG v(%s) VAL=%.12g RISE=1" %
+                         (input_pin, VDD/2, first_edge, "" if first_edge == "RISE" else " TD=450n", output, .2*VDD),
+                         ".measure tran out_rise_end TRIG v(%s) VAL=%.12g %s=1%s TARG v(%s) VAL=%.12g RISE=1" %
+                         (input_pin, VDD/2, first_edge, "" if first_edge == "RISE" else " TD=450n", output, .8*VDD),
+                         ".measure tran out_fall_start TRIG v(%s) VAL=%.12g %s=1%s TARG v(%s) VAL=%.12g FALL=1" %
+                         (input_pin, VDD/2, second_edge, " TD=450n" if second_edge == "FALL" else "", output, .8*VDD),
+                         ".measure tran out_fall_end TRIG v(%s) VAL=%.12g %s=1%s TARG v(%s) VAL=%.12g FALL=1" %
+                         (input_pin, VDD/2, second_edge, " TD=450n" if second_edge == "FALL" else "", output, .2*VDD),
                          ".measure tran settled_high FIND v(%s) AT=%s" % (output, "50n" if invert else "350n"),
                          ".measure tran settled_low FIND v(%s) AT=%s" % (output, "350n" if invert else "50n"),
                          ".end"]
-                measured = _measurements(_run(deck, folder))
-                required = ("d_up", "d_down", "out_rise", "out_fall", "settled_high", "settled_low")
+                measured = _measurements(_run(deck, folder, bench))
+                required = ("d_up", "d_down", "out_rise_start", "out_rise_end",
+                            "out_fall_start", "out_fall_end", "settled_high", "settled_low")
                 if not all(name in measured for name in required):
                     raise CharacterizationError("missing timing measurement for %s -> %s %s" %
                                                 (input_pin, output, base))
                 if measured["settled_high"] < .9*VDD or measured["settled_low"] > .1*VDD:
                     raise CharacterizationError("unsettled or degraded logic swing")
-                if any(measured[name] <= 0 for name in required[:4]):
-                    raise CharacterizationError("nonpositive cell delay/transition")
+                if any(measured[name] <= 0 for name in ("d_up", "d_down")):
+                    raise CharacterizationError("nonpositive cell delay")
+                rise_transition = measured["out_rise_end"] - measured["out_rise_start"]
+                fall_transition = measured["out_fall_end"] - measured["out_fall_start"]
+                if rise_transition <= 0 or fall_transition <= 0:
+                    raise CharacterizationError("nonpositive cell transition")
                 rise_ns = measured["d_down" if invert else "d_up"] * 1e9
                 fall_ns = measured["d_up" if invert else "d_down"] * 1e9
                 vtc = _header(spec, postlayout)
@@ -141,7 +187,7 @@ def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, sl
                 vtc += ["V%s %s 0 0" % (input_pin, input_pin), ".control", "set noaskquit",
                         "dc V%s 0 %.12g .01" % (input_pin, VDD),
                         "wrdata transfer.dat v(%s)" % output, "quit", ".endc", ".end"]
-                _run(vtc, folder / "vtc")
+                _run(vtc, folder / "vtc", bench)
                 pairs = []
                 for line in (folder / "vtc/transfer.dat").read_text().splitlines():
                     fields = line.split()
@@ -167,18 +213,19 @@ def characterize_arcs(spec, postlayout, output_dir, evaluate, *, load_ff=5.0, sl
                 arcs.append({"input": input_pin, "output": output, "condition": base,
                              "sense": "negative_unate" if invert else "positive_unate",
                              "rise_delay_ns": rise_ns, "fall_delay_ns": fall_ns,
-                             "rise_transition_ns": measured["out_rise"]*1e9,
-                             "fall_transition_ns": measured["out_fall"]*1e9,
+                             "rise_transition_ns": rise_transition * 1e9,
+                             "fall_transition_ns": fall_transition * 1e9,
                              "noise_margin": margin, "load_ff": load_ff, "input_slew_ns": slew_ns})
     return arcs
 
 
 def sequential_state(spec, postlayout, output_dir, *, load_ff=10.0,
-                     integration_method="trap"):
+                     integration_method="trap", bench=None):
     """Exercise transparency/capture and hold without adding internal state loads."""
     state = spec.get("sequential")
     if not state or state["kind"] not in {"latch", "flip_flop"}:
         raise CharacterizationError("capture/hold requires a latch or flip-flop")
+    bench = _bench(output_dir, postlayout, bench, integration_method=integration_method)
     data, clock, output = state["data"], state["clock"], state["q"]
     deck = _header(spec, postlayout, integration_method=integration_method)
     deck += [
@@ -201,7 +248,7 @@ def sequential_state(spec, postlayout, output_dir, *, load_ff=10.0,
     deck += [".measure tran %s FIND v(%s) AT=%.12gu" % (label, output, time)
              for label, time, _ in samples]
     deck.append(".end")
-    measured = _measurements(_run(deck, output_dir))
+    measured = _measurements(_run(deck, output_dir, bench))
     records = []
     for label, time, expected in samples:
         voltage = measured.get(label)
@@ -212,7 +259,9 @@ def sequential_state(spec, postlayout, output_dir, *, load_ff=10.0,
                         "voltage_v": voltage})
     result = {"name": spec["name"], "kind": state["kind"], "samples": records,
               "load_ff": load_ff, "voltage_v": VDD, "temperature_c": 25,
-              "model_sha256": sha256(MODEL_CARD), "logic_levels_passed": True,
+              "model_sha256": sha256(bench.binding["include_path"] if bench else MODEL_CARD),
+              "bench_engine": bench.engine if bench else "ngspice",
+              "logic_levels_passed": True,
               "postlayout_sha256": sha256(Path(postlayout)),
               "integration_method": integration_method,
               "calibration": "model_based_unqualified_geometry_scaling_and_wire_coupling",
@@ -223,7 +272,7 @@ def sequential_state(spec, postlayout, output_dir, *, load_ff=10.0,
 
 def characterize_storage(spec, postlayout, output_dir, *, load_ff=10.0,
                          hold_times_us=(10.0, 1000.0), slew_ns=2.0,
-                         integration_method="trap"):
+                         integration_method="trap", bench=None):
     """Nominal-model static retention and bounded clock-aperture experiments.
 
     No internal capacitors, resistors, initial conditions, or forced state are
@@ -239,9 +288,10 @@ def characterize_storage(spec, postlayout, output_dir, *, load_ff=10.0,
     if not hold_times_us or any(not math.isfinite(time) or time < 10 for time in hold_times_us):
         raise CharacterizationError("stopped-clock hold times must be finite and at least 10us")
     output_dir = Path(output_dir)
+    bench = _bench(output_dir, postlayout, bench, integration_method=integration_method)
     data, clock, output = state["data"], state["clock"], state["q"]
     basic = sequential_state(spec, postlayout, output_dir / "capture", load_ff=load_ff,
-                             integration_method=integration_method)
+                             integration_method=integration_method, bench=bench)
 
     def waveform(pin, events):
         return "V%s %s 0 PWL(%s)" % (
@@ -256,7 +306,7 @@ def characterize_storage(spec, postlayout, output_dir, *, load_ff=10.0,
                  "CLOAD %s 0 %.12gf" % (output, load_ff),
                  ".tran 1n %.12gn 0 %.12gn" % (end_ns, maxstep_ns)]
         deck += measures + [".end"]
-        values = _measurements(_run(deck, folder))
+        values = _measurements(_run(deck, folder, bench))
         required = [measure.split()[2].casefold() for measure in measures]
         if any(name not in values for name in required):
             raise CharacterizationError("missing storage measurement in %s" % folder)
@@ -370,7 +420,9 @@ def characterize_storage(spec, postlayout, output_dir, *, load_ff=10.0,
         "retention": retention, "aperture_experiments": apertures, "timing_bounds": bounds,
         "preservation_correctness": True, "hold_correctness": True, "pulse_correctness": True,
         "passed": True, "load_ff": load_ff, "input_slew_ns": slew_ns,
-        "voltage_v": VDD, "temperature_c": 25, "model_sha256": sha256(MODEL_CARD),
+        "voltage_v": VDD, "temperature_c": 25,
+        "model_sha256": sha256(bench.binding["include_path"] if bench else MODEL_CARD),
+        "bench_engine": bench.engine if bench else "ngspice",
         "integration_method": integration_method,
         "nonconverged_aperture_policy": "failed experiment; excluded from passing conservative bound",
         "simulation_failures_within_sweep": sum(
@@ -388,14 +440,18 @@ def characterize_storage(spec, postlayout, output_dir, *, load_ff=10.0,
     return result
 
 
-def characterize_cell(spec, postlayout, output_dir, evaluate):
+def characterize_cell(spec, postlayout, output_dir, evaluate, *, bench=None):
     output_dir = Path(output_dir)
-    truth = truth_table(spec, postlayout, output_dir / "truth", evaluate)
-    arcs = characterize_arcs(spec, postlayout, output_dir / "arcs", evaluate)
+    # A cell with no sensitizable arc (a tie cell) writes no bench artefacts, so
+    # the run directory has to exist before the record is written.
+    output_dir.mkdir(parents=True, exist_ok=True)
+    truth = truth_table(spec, postlayout, output_dir / "truth", evaluate, bench=bench)
+    arcs = characterize_arcs(spec, postlayout, output_dir / "arcs", evaluate, bench=bench)
     worst_ns = max((max(arc["rise_delay_ns"], arc["fall_delay_ns"]) for arc in arcs), default=None)
     result = {"name": spec["name"], "voltage_v": VDD, "temperature_c": 25,
               "truth": truth, "arcs": arcs, "worst_delay_ns": worst_ns,
-              "model_sha256": sha256(MODEL_CARD), "mode": "nominal_SOIMOD_0",
+              "model_sha256": sha256(bench.binding["include_path"] if bench else MODEL_CARD),
+              "bench_engine": bench.engine if bench else "ngspice", "mode": "nominal_SOIMOD_0",
               "calibration": "model_based_unqualified_geometry_scaling_and_wire_coupling",
               "logic_levels_passed": True, "timing_objective": "feasibility_only"}
     (output_dir / "characterization.json").write_text(json.dumps(result, indent=2) + "\n")

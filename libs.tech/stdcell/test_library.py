@@ -2,7 +2,9 @@
 """Structural tests for stdcell publication provenance and boundary eligibility."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -17,6 +19,7 @@ sys.path.insert(0, str(ROOT / "libs.ref/ICPS2023_5_gen_sc/tools"))
 import library
 import logic
 import make_gen_sc
+import model_binding
 
 
 class LibraryValidationTests(unittest.TestCase):
@@ -164,6 +167,129 @@ class LibraryValidationTests(unittest.TestCase):
         self._write_manifest(manifest)
         with self.assertRaisesRegex(library.LibraryValidationError, "boundary"):
             library.load_library(self.manifest_path)
+
+    def test_removing_edge_protection_is_rejected_even_with_refreshed_view_hashes(self):
+        manifest = self._manifest()
+        record = self._record(manifest)
+        gds = self.root / record["views"]["gds"]
+        layout = library.db.Layout()
+        layout.read(str(gds))
+        cell = layout.cell(self.cell)
+        diff = library.db.Region(cell.begin_shapes_rec(layout.find_layer(3, 0)))
+        island = next(diff.each_merged()).bbox()
+        gap = round(1.0 / layout.dbu)
+        low, high = island.top - gap, island.top + gap
+        ml1 = layout.find_layer(8, 0)
+        boxes = [shape.box for shape in cell.shapes(ml1).each()]
+        cell.shapes(ml1).clear()
+        for box in boxes:
+            if box.top <= low or box.bottom >= high:
+                cell.shapes(ml1).insert(box)
+                continue
+            if box.bottom < low:
+                cell.shapes(ml1).insert(
+                    library.db.Box(box.left, box.bottom, box.right, low))
+            if box.top > high:
+                cell.shapes(ml1).insert(
+                    library.db.Box(box.left, high, box.right, box.top))
+        layout.write(str(gds))
+        self._refresh_view_hashes(manifest, record)
+        self._write_manifest(manifest)
+        with self.assertRaisesRegex(library.LibraryValidationError, "SOI-edge protection"):
+            library.load_library(self.manifest_path)
+
+
+class ModelBindingTests(unittest.TestCase):
+    """The library evidence path and the benches must not silently mix engines."""
+
+    def test_library_provenance_matches_the_bound_model_files(self):
+        binding = model_binding.load()
+        provenance = library._current_provenance()
+        self.assertEqual(provenance["model_sha256"],
+                         hashlib.sha256(binding["library_path"].read_bytes()).hexdigest())
+        self.assertEqual(provenance["model_include_sha256"],
+                         hashlib.sha256(binding["include_path"].read_bytes()).hexdigest())
+        self.assertEqual(provenance["model_binding"]["engine"], binding["engine"])
+        self.assertEqual(provenance["model_binding"]["engine_level"], binding["engine_level"])
+        self.assertEqual(provenance["model_binding"]["library_sha256"],
+                         provenance["model_sha256"])
+        manifest = json.loads(library.DEFAULT_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["provenance"], provenance)
+
+    def test_config_binds_the_fd_bridge_card_to_xyce(self):
+        binding = model_binding.load()
+        self.assertEqual(binding["engine"], "xyce")
+        self.assertTrue(binding["library"].endswith("b4soi_fd_bridge_experimental.lib.spice"))
+        self.assertTrue(binding["include"].endswith("b4soi_fd_bridge_experimental.inc"))
+        self.assertEqual(binding["engine_level"], 70450)
+        self.assertEqual(binding["section"], "b4soi")
+        self.assertIn("Xyce", binding["engine_version"])
+        self.assertIn("ngspice", binding["provenance"])
+        second = json.loads(
+            (HERE / "config_2x2.json").read_text(encoding="utf-8"))
+        self.assertEqual(second["model"], json.loads(
+            (HERE / "config.json").read_text(encoding="utf-8"))["model"])
+
+    def test_characterization_benches_keep_the_nominal_card(self):
+        import characterize
+        nominal = model_binding.nominal()
+        self.assertEqual(characterize.MODELS, nominal["library_path"])
+        self.assertEqual(characterize.MODEL_CARD, nominal["include_path"])
+        self.assertNotEqual(characterize.MODELS, model_binding.load()["library_path"])
+        self.assertEqual(nominal["engine"], "ngspice")
+
+
+class RowSiteContractTests(unittest.TestCase):
+    """Published cells must be row-placeable and share one power-rail geometry.
+
+    The LibreLane profiles select `PLACE_SITE ICPS2023_5_ROW500`, so every
+    published cell has to declare that site at exactly its height, and a
+    row-rail PDN only powers every cell if the VDD and VSS pin bands are the
+    same for all of them.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.manifest = library.load_library(check=False)
+        cls.published = [record for record in cls.manifest["cells"]
+                         if record["status"] == "strict_physical_pass"]
+
+    def _pins(self, text: str, name: str) -> list[tuple[float, float, float, float]]:
+        match = re.search(r"^  PIN %s$.*?^  END %s$" % (name, name), text,
+                          re.S | re.M)
+        self.assertIsNotNone(match, f"{name} pin is missing")
+        return [tuple(float(value) for value in rect)
+                for rect in re.findall(r"^        RECT (\S+) (\S+) (\S+) (\S+) ;$",
+                                       match.group(0), re.M)]
+
+    def test_published_cells_declare_the_row_site_and_share_power_bands(self):
+        self.assertTrue(self.published, "no published cell")
+        bands: dict[str, tuple[float, float]] = {}
+        for record in self.published:
+            cell = record["cell"]
+            with self.subTest(cell=cell):
+                lef = (library.LIBRARY / record["views"]["lef"]).read_text(encoding="utf-8")
+                self.assertIn(f"  SITE {library.ROW_SITE_NAME} ;", lef)
+                self.assertIn(f"BY {library.ROW_SITE_HEIGHT_UM:g} ;", lef)
+                width = float(record["cell_width_um"])
+                for pin in ("VDD", "VSS"):
+                    rects = self._pins(lef, pin)
+                    self.assertTrue(rects, f"{pin} has no port geometry")
+                    low = min(rect[1] for rect in rects)
+                    high = max(rect[3] for rect in rects)
+                    self.assertGreaterEqual(high - low, 6.0, f"{pin} is narrower than ML1 minimum")
+                    self.assertGreaterEqual(low, 0.0)
+                    self.assertLessEqual(high, library.ROW_SITE_HEIGHT_UM)
+                    bands.setdefault(pin, (low, high))
+                    self.assertEqual((low, high), bands[pin],
+                                     f"{pin} band differs from the first published cell")
+                    left = min(rect[0] for rect in rects)
+                    right = max(rect[2] for rect in rects)
+                    self.assertLessEqual(left, 0.05, f"{pin} does not reach the left edge")
+                    self.assertGreaterEqual(right, width - 0.05,
+                                            f"{pin} does not reach the right edge")
+        self.assertLess(bands["VSS"][1], bands["VDD"][0],
+                        "the VSS and VDD rail bands overlap")
 
 
 if __name__ == "__main__":

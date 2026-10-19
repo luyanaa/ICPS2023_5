@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "qualification": "research_PDK_screen_only_not_foundry_signoff",
+  "manufacturing_acceptance": {
+    "status": "BLOCKED",
+    "accepted": false,
+    "reason": "Repository-rule geometry and numerical screening do not qualify the process, compact models, interconnect, or IO protection. Request-supplied limits and declarations cannot clear this policy."
+  },
+  "source_review": {
+    "reviewed_on": "2026-10-18",
+    "sources": [
+      {
+        "url": "https://smerl.jp/minimal-dt/",
+        "published": "2026-02-16",
+        "evidence_class": "independent design notes, not a foundry specification",
+        "accepted_context": [
+          "Non-self-aligned design L must agree with the dopant-gap channel length after mask conversion; TiN grows by 2 um on each side",
+          "Legacy Bridge resistor and optional body-terminal extraction can be incomplete despite displayed PCell values",
+          "VIA1/ML2 availability after 2025 depends on the specific fab"
+        ],
+        "not_transferred": [
+          "Ordinary-device FD claims do not determine either polarity's measured depletion mode",
+          "Changing schematic L to a seven-digit protrusion formula is not a substitute for correct extraction or a calibrated physical Leff",
+          "An observed permissive DRC spacing is not permission to relax the documented final-mask gate-to-contact distance"
+        ]
+      },
+      {
+        "url": "https://sasimi.jp/new/sasimi2022/files/archive/pdf/p190_C-4.pdf",
+        "published": "2022",
+        "evidence_class": "conference proceedings on process/tool methodology, pp.190-195",
+        "accepted_context": [
+          "Section III.B, pp.192-193 explicitly requires ML1 to cover TiN across the SOI step to avoid gate-material breakage",
+          "The discussed SOI example disables upper-metal VIA because only ML1 is available there",
+          "The PTS06 0.6 um example needed a fab-approved vendor final check because reused DRC omitted process-specific wide-metal rules"
+        ],
+        "not_transferred": [
+          "The paper specifies no numerical SOI-step strap margin; the repository 2 um minimum remains experimental",
+          "PTS06 bulk-CMOS signoff and thermal-shutdown examples do not qualify Minimal Fab rules or thermal parameters"
+        ]
+      },
+      {
+        "url": "https://doi.org/10.11348/reajshinrai.44.6_347",
+        "published": "2022-11-01",
+        "online": "2025-12-12",
+        "evidence_class": "historical SOI-CMOS logic demonstrator, pp.347-355",
+        "accepted_context": [
+          "The demonstrator used about 100 nm final silicon, 400 nm BOX, 6 nm gate oxide, 50 nm TiN, 300 nm Al and 300 nm P-TEOS, with two Al layers",
+          "Its core used L4/W28 PMOS and L4/W14 NMOS; IO used L4/W32 for both polarities; 1338 transistors and 80 by 80 um pads were reported",
+          "Process monitors included polarity-resolved IV, a via chain, TiN open checks, NAND and half-adder circuits at wafer corners",
+          "The 40 ohm measurement is a chain of 4 by 4 um vias, not a per-via resistance",
+          "The packaged shift-register SHMOO reported 357 kHz at 3 V and 204 kHz at 1.5 V using its stated test-rate definition",
+          "ESD-equipped IO was drawn, but ESD ratings were not supplied; TID/SEE tests, variability and lot-definition quality assurance remained open"
+        ],
+        "not_transferred": [
+          "The 6 nm-oxide, L4 demonstrator cannot calibrate the present 15 nm-oxide, W24/L6 model or its PVT and fMAX",
+          "Historical two-metal demonstration does not supply revision-specific ML2/VIA1 RC or universal fab availability",
+          "An ESD circuit drawing and SOI radiation rationale are not measured ESD or radiation qualification"
+        ]
+      }
+    ],
+    "retained_primary_document_conflicts": [
+      "PDK_minimalFabSOICMOS.pdf p.18 labels N/P diffusion resistor sheet values 200/400 ohm per square, while the measured p.8 table gives 180/1200; extraction retains the measured p.8 values",
+      "PDK_minimalFabSOICMOS.pdf p.18 specifies 300 nm TEOS for TiN-Al capacitors but no measured 0.115 fF/um2 density; that legacy value is analytically consistent with ideal 300 nm SiO2, not a qualified coupling rule",
+      "The historical 300 nm TEOS drawings do not resolve the separate 2021 cross-section's 250 nm value for the present process revision"
+    ]
+  },
+  "topics": {
+    "rc_coverage": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Measured metal-to-substrate, inter-metal coupling and fringe capacitance, with a validated extraction rule set",
+        "Independent MOS diffusion/access/contact resistance calibration separating the fitted RDSW contribution",
+        "Contact-size scaling characterization beyond the measured 5 by 5 um openings",
+        "Qualified upper-metal and via RC before any multimetal post-layout analysis"
+      ],
+      "evidence": [
+        {"path": "libs.tech/klayout/pex/README.md", "scope": "Measured sheet/contact terms, explicit extraction ownership, and missing RC terms"},
+        {"path": "libs.tech/ngspice/tools/analyze_power_integrity.py", "scope": "Current-driven linear R/RC screening; no nonlinear MOS droop feedback"}
+      ]
+    },
+    "body_backgate": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Polarity-resolved NMOS and PMOS body/back-gate bias and C-V measurements; depletion modes remain independently undecided",
+        "A validated physical substrate/back-gate connection and allowed-bias specification; a GLOBAL SUB declaration is not physical proof",
+        "Physically supported body-contact mapping and extraction beyond the diagnostic NMOS4 LVS path"
+      ],
+      "evidence": [
+        {"path": "libs.tech/ngspice/README.md", "scope": "Independent NMOS/PMOS depletion uncertainty and four-terminal common-E contract"},
+        {"path": "libs.tech/klayout/lvs/icps2023_5.lvs", "scope": "Diagnostic NMOS4 mapping, unsupported PMOS body ties"},
+        {"path": "libs.tech/klayout/pex/icps2023_5_pex.py", "scope": "Unsupported body-tie extraction is rejected"}
+      ]
+    },
+    "voltage_limits": {
+      "status": "BLOCKED",
+      "documented_absolute_maximum": {
+        "magnitude_v": 7.0,
+        "metrics": ["VDS", "VGD", "VGS"],
+        "source": "libs.ref/doc/PDK_reference_manual.pdf, p.4, absolute maximum ratings, 2023-11-01",
+        "table_polarity": {"NMOS": "+7 V maximum", "PMOS": "-7 V maximum"},
+        "scope": "Absolute-magnitude violation screen only. A value inside this envelope does not establish reverse-bias allowance, pulse duration, temperature applicability, E/back-gate limits, ESD immunity or a safe operating area."
+      },
+      "missing_prerequisites": [
+        "Revision- and polarity-specific terminal, oxide and back-gate limits with duration, duty-cycle and temperature applicability",
+        "Validated power-up, power-down, input-overdrive and pad-overshoot operating requirements; 3 V bench conditions are not absolute ratings"
+      ],
+      "evidence": [
+        {"path": "libs.tech/ngspice/tools/analyze_voltage_thermal.py", "scope": "Actual mapped terminal waveforms can be screened against explicitly sourced limits, not process qualification"},
+        {"path": "libs.tech/ngspice/README.md", "scope": "Experimental model operating scope is limited to the stated engine, geometry, 3 V and 25 C"}
+      ]
+    },
+    "pvt_timing": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Measured and validated process, voltage, temperature and geometry-dependent compact-model corners",
+        "Qualified dynamic charge and interconnect RC over those corners",
+        "Validated timing, slew and load coverage with design-specific timing constraints before any signoff Liberty use"
+      ],
+      "evidence": [
+        {"path": "libs.tech/ngspice/README.md", "scope": "Stage-1 nominal remains a research baseline; experimental bridge cards are version- and geometry-scoped"},
+        {"path": "libs.tech/librelane/config.tcl", "scope": "Experimental nominal corner only; SPEF, MCSTA and OpenROAD IR reports disabled"}
+      ]
+    },
+    "electromigration": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Revision-specific metal/via cross-sections, thickness and effective current-carrying geometry",
+        "Qualified DC, peak, RMS, temperature and duty-cycle current-density limits",
+        "A calibrated lifetime/acceleration model and mission profile"
+      ],
+      "evidence": [
+        {"path": "libs.tech/ngspice/tools/analyze_power_integrity.py", "scope": "Reports branch current and I-squared-R hotspots; no qualified current density or lifetime is inferred"}
+      ]
+    },
+    "electrothermal": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Measured die, BOX, package and boundary-condition thermal parameters and junction-temperature calibration",
+        "A validated temperature-coupled electrical model and coupled circuit reruns for delay and leakage",
+        "Device and interconnect power ownership that prevents counting supply power and local dissipation twice"
+      ],
+      "evidence": [
+        {"path": "libs.tech/ngspice/tools/analyze_voltage_thermal.py", "scope": "First-order Rth/Cth sensitivity with fixed measured currents, not a calibrated junction-temperature or coupled-SPICE result"}
+      ]
+    },
+    "antenna": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Manufacturing-sequence-specific exposed conductor/gate area and perimeter rules, including TiN, diffusion and metal processing",
+        "Qualified gate-oxide antenna limits and a characterized discharge/repair device or approved routing repair"
+      ],
+      "evidence": [
+        {"path": "libs.tech/klayout/drc/icps2023_5.drc", "scope": "Geometry and SOI-edge checks do not implement a process-qualified antenna rule"},
+        {"path": "libs.tech/librelane/config.tcl", "scope": "Automatic antenna repair is disabled rather than assuming a qualified diode"}
+      ]
+    },
+    "pad_esd_eos": {
+      "status": "BLOCKED",
+      "missing_prerequisites": [
+        "Qualified pad-opening enclosure, die-edge/seal-ring, bonding and probing specifications",
+        "Pad and rail current limits with applicable pulse duration and temperature",
+        "Verified pad-to-rail and rail-to-return discharge topology and measured HBM/CDM/TLP performance",
+        "Qualified EOS operating and fault envelopes; ESD declarations alone do not establish protection"
+      ],
+      "evidence": [
+        {"path": "libs.tech/stdcell/io_dfm.py", "scope": "PAD/ML1 geometry and explicit mapping are structural checks; manufacturing acceptance remains blocked"}
+      ]
+    }
+  }
+}

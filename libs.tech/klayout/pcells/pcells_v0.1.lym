@@ -49,6 +49,10 @@ module ICPS2023_5NativeGeometry
   CAP = 16
   PAREA = 18
   NAREA = 19
+  # The final TiN mask is biased outward by 2 um; with the 13 um contact pitch
+  # and 5 um S/D CNT, a 6 um bay preserves 8 um TiN/CNT clearance. The 8 um
+  # floor below also preserves ML1's 4 um spacing from the S/D ML1 pad.
+  MIN_GATE_BAY_UM = 8.0
 
   def layer_index(number, datatype = 0)
     layout.layer(RBA::LayerInfo.new(number, datatype))
@@ -62,6 +66,16 @@ module ICPS2023_5NativeGeometry
 
     raise "Process profile #{PROFILE_NAME} forbids VIA1/ML2 PCell geometry; " \
           "set ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental before launching KLayout"
+  end
+
+  # Single source for the parameter combinations the native PCells support.
+  # KLayout's PCell engine catches errors raised from coerce/produce and only
+  # logs them, so callers must run this check before add_pcell_variant to get
+  # an exception they can handle.
+  def self.validate_supported_parameters!(pcell_name, body_tie = false)
+    if pcell_name.to_s.downcase.start_with?("pch") &amp;&amp; body_tie
+      raise "PMOS body ties are unsupported; Pch body_tie=true is not implemented"
+    end
   end
 
   def add_box(number, x1, y1, x2, y2, datatype = 0)
@@ -81,6 +95,16 @@ module ICPS2023_5NativeGeometry
     half = width.to_f / 2.0
     add_box(number, [x1, x2].min - half, [y1, y2].min - half,
             [x1, x2].max + half, [y1, y2].max + half, datatype)
+  end
+  def add_resistor_segment(number, x1, y1, x2, y2, width, datatype = 0)
+    half = width.to_f / 2.0
+    if x1 == x2
+      add_box(number, x1 - half, [y1, y2].min, x1 + half, [y1, y2].max, datatype)
+    elsif y1 == y2
+      add_box(number, [x1, x2].min, y1 - half, [x1, x2].max, y1 + half, datatype)
+    else
+      add_segment(number, x1, y1, x2, y2, width, datatype)
+    end
   end
   def body_tie_path(channel_x, width, tie_x)
     route_y = width + 8.0
@@ -113,6 +137,17 @@ module ICPS2023_5NativeGeometry
     end
   end
 
+  # The off-island contact CNTs sit on explicit TiN landing pads and the
+  # continuous ML1 strap; overlap across the dielectric alone is not a tie.
+  def edge_gate_contact(x, y, via = false)
+    add_box(TIN, x - 6.5, y - 6.5, x + 6.5, y + 6.5)
+    add_box(CNT, x - 2.5, y - 2.5, x + 2.5, y + 2.5)
+    if via
+      add_box(VIA1, x - 2.5, y - 2.5, x + 2.5, y + 2.5)
+      add_box(ML2, x - 5.0, y - 5.0, x + 5.0, y + 5.0)
+    end
+  end
+
   def enclosure_box(number, x1, y1, x2, y2, enclosure)
     add_box(number, x1 - enclosure, y1 - enclosure,
             x2 + enclosure, y2 + enclosure)
@@ -130,7 +165,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
   def initialize
     super
     param(:w, TypeDouble, (mos_polarity == :p ? "Pch w" : "Nch w"), :default => (mos_polarity == :p ? 40.0 : 20.0), :unit => "um")
-    param(:l, TypeDouble, (mos_polarity == :p ? "Pch l" : "Nch l"), :default => 10.0, :unit => "um")
+    param(:l, TypeDouble, (mos_polarity == :p ? "Pch l" : "Nch l"), :default => 6.0, :unit => "um")
     param(:dg, TypeDouble, "Dumbbell gap", :default => 4.0, :unit => "um")
     param(:sdg, TypeDouble, "Source Drain gap", :default => 22.0, :unit => "um")
     param(:dsl, TypeDouble, "Minimum Dumbbell shaft length", :default => 22.0, :unit => "um")
@@ -139,6 +174,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
     param(:with_sdcont, TypeBoolean, "Use source/drain contact", :default => true)
     param(:wide_metal, TypeBoolean, "Wide metal entry?", :default => false, :hidden => true)
     param(:soi_bridge, TypeBoolean, "Bridge TiN gate over SOI edge?", :default => true)
+    param(:edge_metal_strap, TypeBoolean, "Protect TiN at both SOI edges?", :default => true)
     param(:body_tie, TypeBoolean, "Nch body tie?", :default => false, :hidden => (mos_polarity == :p))
     param(:n, TypeInt, "Number of fingers", :default => 1)
     param(:no_finger_conn, TypeBoolean, "No finger connections", :default => false)
@@ -146,7 +182,13 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
     param(:wtot, TypeDouble, "Total width", :default => 0.0, :hidden => true)
   end
 
+  def validate_body_tie!
+    ICPS2023_5NativeGeometry.validate_supported_parameters!(
+      mos_polarity == :p ? "Pch" : "Nch", body_tie)
+  end
+
   def coerce_parameters_impl
+    validate_body_tie!
     # PDK reference manual, device list: L >= 6 um and W >= 13 um.
     set_l(6.0) if l.to_f &lt; 6.0
     set_w(13.0) if w.to_f &lt; 13.0
@@ -163,14 +205,14 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
   end
 
   def produce_impl
+    validate_body_tie!
     validate_via_profile!(with_via)
     width = clamp_minimum(w, 13.0)
     length = clamp_minimum(l, 6.0)
     fingers = [n.to_i, 1].max
     contact_size = 13.0
     dgl = [dg.to_f, (sdg.to_f - length) / 2.0,
-           (dsl.to_f - length) / 2.0].max
-    dgl = 0.0 if dgl &lt; 0.0
+           (dsl.to_f - length) / 2.0, MIN_GATE_BAY_UM].max
     pitch = contact_size + length + 2.0 * dgl
     total_x = (fingers + 1) * contact_size +
               fingers * (length + 2.0 * dgl)
@@ -186,21 +228,31 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
       add_box(NWL, -2.0, -2.0, total_x + 2.0, width + 2.0) if use_nwell || with_nsubcont
     end
 
+    gate_centers = fingers.times.map do |finger|
+      contact_size + dgl + finger * pitch + length / 2.0
+    end
     fingers.times do |finger|
       gx = contact_size + dgl + finger * pitch
-      add_box(TIN, gx - 2.0, gate_y0, gx + length + 2.0, gate_y1)
+      add_box(TIN, gx, gate_y0, gx + length, gate_y1)
       add_box(NCH, gx, 0.0, gx + length, width) if mos_polarity == :n
-      add_box(TIN_BLK, gx - 2.0, gate_y0, gx + length + 2.0, gate_y1, 1) if body_tie &amp;&amp; mos_polarity == :n
+      add_box(TIN_BLK, gx, gate_y0, gx + length, gate_y1, 1) if body_tie &amp;&amp; mos_polarity == :n
     end
     if soi_bridge &amp;&amp; fingers &gt; 1
-      gate_centers = fingers.times.map do |finger|
-        contact_size + dgl + finger * pitch + length / 2.0
-      end
       gate_centers.each do |center|
         add_box(TIN, center - 3.0, -13.0, center + 3.0, 0.0)
       end
       add_box(TIN, gate_centers.first - 3.0, -13.0,
               gate_centers.last + 3.0, -5.0)
+    end
+
+    if edge_metal_strap
+      gate_centers.each do |center|
+        half_width = length / 2.0 + 4.0
+        add_box(ML1, center - half_width, -22.0,
+                center + half_width, width + 22.0)
+        edge_gate_contact(center, -11.5, with_via)
+        edge_gate_contact(center, width + 11.5, with_via)
+      end
     end
 
     if with_sdcont
@@ -211,7 +263,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
       end
     end
 
-    if with_pcont &amp;&amp; soi_bridge
+    if !edge_metal_strap &amp;&amp; with_pcont &amp;&amp; soi_bridge
       gx = contact_size + dgl + length / 2.0
       gate_contact(gx, width + 11.5, with_via, 13.0)
     end
@@ -473,16 +525,21 @@ class ICPS2023_5NativeDiffCap &lt; ICPS2023_5NativeCapacitor
     contact_size = 13.0
     grid = 4.0
     cap_ext = grid
-    # The dated helper uses a 4 um diffusion fringe and a 2 um area
-    # enclosure around the qualified TiN/diffusion capacitor body.
-    add_box(DIFF, 0.0, -cap_ext, width, length + contact_size + grid)
+    # Enclose the lower 5 um CNT by 4 um in SOI and keep 2 um area enclosure.
+    bottom_contact_y = length + grid * 2.0 + 5.0
+    diff_top = bottom_contact_y + 2.5 + 4.0
+    area_top = diff_top + 2.0
+    add_box(DIFF, 0.0, -cap_ext, width, diff_top)
     add_box(CAP, 0.0, 0.0, width, length)
-    add_box(polarity_layer, -2.0, -cap_ext - 2.0, width + 2.0,
-            length + contact_size + grid + 2.0)
+    add_box(polarity_layer, -2.0, -cap_ext - 2.0, width + 2.0, area_top)
 
     tin_x1 = polcnt_outside ? -2.0 * grid - contact_size : -grid
     tin_x2 = width + cap_ext
     add_box(TIN, tin_x1, 0.0, tin_x2, length)
+    # Keep ML1 over each TiN/SOI crossing; without CNT, overlap is not a
+    # connection to the diffusion plate.
+    add_box(ML1, -6.0, -2.0, 6.0, length + 2.0)
+    add_box(ML1, width - 6.0, -2.0, width + 6.0, length + 2.0)
     tin_contact_x = polcnt_outside ? -grid - contact_size / 2.0 : grid + contact_size / 2.0
     y = 4.5
     while y &lt;= length - 4.5
@@ -490,7 +547,7 @@ class ICPS2023_5NativeDiffCap &lt; ICPS2023_5NativeCapacitor
       y += contact_size + grid
     end
 
-    y = length + grid * 2.0
+    y = bottom_contact_y
     x = contact_size / 2.0
     while x &lt;= width - contact_size / 2.0
       contact_pad(x, y, true, false)
@@ -558,7 +615,18 @@ class ICPS2023_5NativeBridge &lt; RBA::PCellDeclarationHelper
   def coerce_parameters_impl
     set_l(25.0) if l.to_f &lt; 25.0
     set_w(10.0) if w.to_f &lt; 10.0
-    set_rval(sheet_resistance * l.to_f / w.to_f)
+    set_rval(sheet_resistance * bridge_path_length(l.to_f) / w.to_f)
+  end
+
+  def bridge_side_lengths
+    lengths = s.to_s.split(/[,\s]+/).map{|item| item.to_f}.reject{|item| item == 0.0}
+    lengths.empty? ? [20.0] : lengths
+  end
+
+  def bridge_path_length(length = nil)
+    bridge_side_lengths.inject(clamp_minimum(length || l, 25.0)) do |total, side|
+      total + side.abs
+    end
   end
 
   def sheet_resistance
@@ -566,18 +634,19 @@ class ICPS2023_5NativeBridge &lt; RBA::PCellDeclarationHelper
   end
 
   def display_text_impl
+    path_length = bridge_path_length(l)
     if mb
-      "ML2 bridge\r\n(L=#{l}um,W=#{w}um,s=#{s})"
+      "ML2 bridge\r\n(L=#{l}um,path=#{path_length}um,W=#{w}um,s=#{s})"
     else
-      "#{bridge_layer == TIN ? "TIN" : "Ndiff"} bridge\r\n(L=#{l}um,W=#{w}um,s=#{s} => R=#{rval.round(3)})"
+      "#{bridge_layer == TIN ? "TIN" : "Ndiff"} bridge\r\n(L=#{l}um,path=#{path_length}um,W=#{w}um,s=#{s} => R=#{rval.round(3)})"
     end
   end
 
   def produce_impl
+    validate_via_profile!(mb)
     length = clamp_minimum(l, 25.0)
     width = clamp_minimum(w, 10.0)
-    side_lengths = s.to_s.split(/[,\s]+/).map{|item| item.to_f}.reject{|item| item == 0.0}
-    side_lengths = [20.0] if side_lengths.empty?
+    side_lengths = bridge_side_lengths
     via_size = 13.0
     x = via_size / 2.0
     y = via_size / 2.0
@@ -587,9 +656,9 @@ class ICPS2023_5NativeBridge &lt; RBA::PCellDeclarationHelper
     previous = -length
     side_lengths.each_with_index do |side, index|
       if index.even?
-        endpoint_x += (previous > 0.0 ? -side : side)
+        endpoint_x += (previous &gt; 0.0 ? -side : side)
       else
-        endpoint_y += (previous * side > 0.0 ? side : -side)
+        endpoint_y += (previous * side &gt; 0.0 ? side : -side)
       end
       segments &lt;&lt; [segments[-1][2], segments[-1][3], endpoint_x, endpoint_y]
       previous = side
@@ -597,7 +666,7 @@ class ICPS2023_5NativeBridge &lt; RBA::PCellDeclarationHelper
 
     segments.each do |x1, y1, x2, y2|
       add_segment(mb ? ML2 : bridge_layer, x1, y1, x2, y2, width)
-      add_segment(RES, x1, y1, x2, y2, width)
+      add_resistor_segment(RES, x1, y1, x2, y2, width)
       add_segment(NAREA, x1, y1, x2, y2, width + 4.0) if bridge_layer == DIFF &amp;&amp; !mb
       add_segment(VIA1, x1, y1, x2, y2, width) if mb
     end

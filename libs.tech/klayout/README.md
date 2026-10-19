@@ -109,6 +109,78 @@ unqualified upper-metal geometry, and validates the emitted physical-terminal
 It is explicitly logic-only: its 10 um MOS width and 16 um resistor length are
 below the native PCell minima, so it is not a 1M DRC-clean golden layout.
 
+## Independent Pad/IO/ESD evidence gate
+
+`libs.tech/stdcell/io_dfm.py` checks actual PAD-opening containment in ML1,
+process-profile upper-layer exclusion, explicit pad-function assignments, and
+exact design-to-fab PAD/ML1 geometry after MASK/EXCLUDE subtraction. Design
+PAD `50/0` maps to fab PAD `10/0`; fab `10/0` must not be mistaken for design
+ML2. The checker never generates openings or infers pad functions from labels.
+
+Run from the repository root in the supported KLayout environment:
+
+```bash
+env NIX_BUILD_SHELL=/bin/bash nix-shell ../librelane --run \
+  'python3 libs.tech/stdcell/io_dfm.py --mode manufacturing --out /tmp/io_dfm.json'
+```
+
+Structural inspection and manufacturing acceptance are separate. Structural
+mode exits `0` only for complete, passing geometry, otherwise `1`;
+manufacturing mode exits `3` and reports `BLOCKED` because official opening
+dimensions/enclosures, die-edge/seal-ring clearances, bond/probe current limits,
+and ESD qualification are unavailable. The existing 28-pad frame has no PAD
+opening polygons and therefore reports structural `INCOMPLETE`. Its 60 µm ML1
+pads and configured keepouts are engineering reservations, not process rules.
+An explicit ESD-device declaration is not HBM/CDM/TLP or clamp qualification.
+
+Pass `--gds <design.gds> --fab-gds <actual_fab.gds>` to compare an actual
+fab-prep result, and `--pad-mapping <JSON_FILE>` for explicit physical-pad
+assignments. The Users' Manual v1.05's struck-through PAD70/PAD100 entries do
+not establish current pad rules. Its recommendation to use N-diffusion power
+bridges also means existing experimental TiN power risers remain an open
+manufacturing constraint; SOI-edge protection does not qualify that PDN.
+
+## Foundry-mask (mask-first) status
+
+The flow artifacts are mask-numbered. `drc/icps2023_5_fab_prep.drc` is the only
+place drawing layers are interpreted; nothing downstream converts a layout.
+
+* The shipped frames (`libs.ref/ICPS2023_5_fd_base*`) and the NAND sample
+  (`Samples/Semicon2023/NAND/nand_sample.GDS`) are mask-numbered in place and
+  keep their structure. Frame conversion uses
+  `drc/make_mask_view.py`, which preserves the cell hierarchy (the LEF/DEF
+  views are emitted per macro) and refuses to write a view that differs from a
+  real fab-prep conversion of the same input.
+* DRC/LVS/PEX run `layer_mode=fab` on those files directly
+  (`drc/test_foundry_migration.py`, `lvs/test_lvs_contract.py`). The
+  mask-numbered NAND reproduces the reference netlist: 16 NCH (L=10/W=10) +
+  16 PCH (L=10/W=40), `MATCH (mismatches=0)` with the documented legacy
+  compatibility filters; strict comparison stays `NO MATCH` because of the
+  unmodelled pad parasitics.
+* The three conversion derivations that change manufacturing geometry - the
+  derived doping windows, the whole-polygon TiN bias and the N-ch mask source
+  (`legacy_pwell`) - are pinned by `drc/test_conversion_semantics.py`.
+* Native PCell MOS: drawing TiN is `L`, the final mask is `L+4` um, the physical
+  dopant window is `L`, and both LVS modes extract `L`
+  (`lvs/test_channel_length_pipeline.py`).
+* Fab-mode body ties are identified physically - a channel in an N-ch body-dope
+  component that reaches a contacted P+ dot; `TIN_BLK` has no fab mask
+  (`lvs/test_fab_body_tie.py`).
+* A hand-built foundry reference cell, its equality with the fab-prep conversion
+  of the native PCell, fab-mode PEX, and post-layout assembly bound to the
+  nominal card (ngspice smoke) and to the ported FD/unified bridge cards, both
+  run on Xyce 7.10 (`lvs/test_fab_reference.py`).
+
+Two drawing-numbered inputs remain: the vendor template
+`Samples/Semicon2023/base_contest2023.GDS` is the frame generators' authoring
+source, and the salt-package `ICPS2023_5_Basic.gds` (upstream) is the
+authoring original of the now flat, mask-numbered primitive library
+`libs.ref/ICPS2023_5_fd_pr/gds/`. That library was converted with
+`make_mask_view.py --flat-library`: fab prep flattens, so its internal `DCNT`
+child is gone and its ten primitive names survive as flattened tops. The DM_*
+dummy-fill marks (101/0-105/0) have no mask mapping in the original conversion
+deck either, and the original DRC's only dummy rule is commented out.
+
 ## Layer numbering
 
 See `doc/layers.md`. In short: design numbering is canonical for everything in

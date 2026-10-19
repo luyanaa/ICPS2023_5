@@ -187,7 +187,7 @@ def _characterize_bounded_combinational(name: str, spec: dict[str, Any], postlay
         deck.append(".measure tran i%04d FIND i(VPOWER) AT=%.12gn" % (index, sample_time))
 
     deck += [".end"]
-    text = characterize._run(deck, output_dir)
+    text = characterize._run(deck, output_dir, bench)
     values = characterize._measurements(text)
     records: list[dict[str, Any]] = []
     result_by_index: dict[int, dict[str, float]] = {}
@@ -305,7 +305,7 @@ def _sequential_functional(name: str, spec: dict[str, Any], postlayout: str | Pa
     measures, expected = _schedule_pulse_samples(name, rises, cycle_inputs, spec["outputs"])
     final_time = rises[-1] + STATE_HALF_PERIOD_NS + STATE_SAMPLE_NS + 100.0
     deck += [".tran 5n %.12gn 0 5n" % final_time, *measures, ".end"]
-    text = characterize._run(deck, output_dir / "functional")
+    text = characterize._run(deck, output_dir / "functional", bench)
     samples = _verify_state_samples(text, expected, spec["outputs"])
     return {
         "cycles_checked": len(rises),
@@ -378,7 +378,7 @@ def _retention_experiment(name: str, spec: dict[str, Any], postlayout: str | Pat
     deck += [".tran 20n %.12gn 0 10000n" % (hold_end_1000 + 100.0), ".end"]
 
     folder = output_dir / ("retain_%s_clk%d" % ("ones" if stored_bit else "zeros", stopped_clock))
-    text = characterize._run(deck, folder)
+    text = characterize._run(deck, folder, bench)
     values = characterize._measurements(text)
     setup_samples = []
     for measure, (pin, expected) in final_measurements.items():
@@ -455,7 +455,8 @@ def _characterize_sequential(name: str, spec: dict[str, Any], postlayout: str | 
 
 
 def characterize_benchmark(name: str, spec: dict[str, Any], postlayout: str | Path,
-                           output_dir: str | Path, evaluate: Callable[..., Any]) -> dict[str, Any]:
+                           output_dir: str | Path, evaluate: Callable[..., Any], *,
+                           bench=None) -> dict[str, Any]:
     """Characterize a routed benchmark top and write ``characterization.json``.
 
     ``spec['pins']`` is the assembly's formal pin order (excluding the separately

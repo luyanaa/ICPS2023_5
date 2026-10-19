@@ -15,8 +15,11 @@
 #           -rd input=layout.gds \
 #           [-rd layer_mode=design|fab]   (default: design)
 #           [-rd report=drc.lyrdb]        (default: <input>_drc.lyrdb)
-#           [-rd strict=true]             (enable document-limit rules that
-#                                          the reference layouts do not meet)
+#
+#           [-rd strict=true]             (enable document-limit rules and
+#                                          dual-edge redundancy checks)
+#           [-rd edge_redundancy=true]    (enable bypass checks without strict)
+#
 #           [-rd top=CELLNAME]            (default: top cell of the file)
 #
 # Rule IDs follow the PDK documents (W1/W2/S1/m1..m7/d1 for device layers,
@@ -56,6 +59,23 @@ ICPS2023_5ProcessProfile.reject_unpermitted_layers!(
   probe, selected_top, layer_mode, profile_name, "ICPS2023_5 DRC"
 )
 STRICT = $strict.to_s == "true" || $strict.to_s == "1"
+EDGE_REDUNDANCY =
+  STRICT || $edge_redundancy.to_s == "true" || $edge_redundancy.to_s == "1"
+# TIN.SOIEDGE is an experimental topography-dependent geometry screen, not a
+# process limit or qualification. The explicit minimum is kept in sync with
+# the standard-cell geometry generator and verifier.
+SOI_EDGE_MARGIN_UM = begin
+  raw_margin = $soi_edge_margin.to_s
+  margin = raw_margin.empty? ? 2.0 : Float(raw_margin)
+  raise ArgumentError unless margin.finite? && margin >= 2.0
+  margin
+rescue ArgumentError, TypeError
+  raise "soi_edge_margin must be a finite number >= 2.0 um"
+end
+SOI_EDGE_FAB_TIN_BIAS_UM = 2.0
+# Half-thickness of the band straddling the island boundary.
+SOI_EDGE_BAND_UM = 2.0
+SOI_EDGE_TOPOLOGY_EPS_UM = 0.001
 
 # The default report goes to the current directory (absolute path): KLayout
 # resolves relative paths against the input layout's directory, which would
@@ -114,6 +134,7 @@ end
 diff  = lay(DIFF, exc, msk)
 tin   = lay(TIN, exc, msk)
 cnt   = lay(CNT, exc, msk)
+tinblk= lay(TINBLK, exc, msk)
 ml1   = lay(ML1, exc, msk)
 via1  = lay(VIA1, exc, msk)
 ml2   = lay(ML2, exc, msk)
@@ -135,11 +156,99 @@ ndiff = diff & narea - res            # N+ source/drain
 # TiN gate: TiN interacting with a source/drain, excluding capacitor plates.
 tin_gate = tin.interacting(pdiff) + tin.interacting(ndiff) - (tin & cap)
 # The native N/P diffusion-capacitor plate extends 4 um beyond its CAP window.
-tin_gate_d1 = tin_gate - (tin & cap.sized(4.0.um))
 # TiN with the gate region enlarged by 2 um -- the golden deck's `tinA`; used so
 # that the minimum-width rules see gate + local interconnect as one conductor.
 bb = (diff + tin_gate).extents
 tinA = tin + (tin_gate.sized(2.0.um) & bb)
+
+# Mirror fab prep's gate-only TiN bias exactly in design mode. Fab-mode DRC
+# consumes the already-prepared mask and must not apply that bias again.
+if layer_mode == "design"
+  prep_tin_gate = tin.interacting(diff) - (tin & cap.sized(4.0.um))
+  prep_bb = (diff + prep_tin_gate).extents
+  edge_tin = tin + (prep_tin_gate.sized(SOI_EDGE_FAB_TIN_BIAS_UM.um) & prep_bb) + tinblk
+else
+  edge_tin = tin + tinblk
+end
+edge_tin_gate_d1 =
+  (edge_tin.interacting(pdiff) + edge_tin.interacting(ndiff)) -
+  (edge_tin & cap.sized(4.0.um))
+
+# Every actual TiN mask crossing is subject to the experimental strap screen,
+# independent of whether it belongs to a MOS gate. Requiring positive-area TiN
+# on both sides of DIFF prevents a merely adjacent/off-island polygon from
+# becoming a false target. `edge_tin` is the effective final-mask geometry in
+# design mode (including fab-prep's gate bias) and the already-biased geometry
+# in fab mode, so both modes check the same physical TiN extent.
+soi_step_band = diff.sized(SOI_EDGE_BAND_UM) - diff.sized(-SOI_EDGE_BAND_UM)
+tin_inside_diff = edge_tin & diff
+tin_outside_diff = edge_tin - diff
+tin_crossings =
+  edge_tin.interacting(tin_inside_diff).interacting(tin_outside_diff)
+# Localize each obligation to TiN that actually reaches the DIFF boundary.
+# Anisotropic sizing preserves crossing width along the boundary while extending
+# across the 2um step band and then the experimental strap margin.
+topology_eps = SOI_EDGE_TOPOLOGY_EPS_UM.um
+horizontal_boundary_band =
+  diff.sized(0.0.um, topology_eps) - diff.sized(0.0.um, -topology_eps)
+vertical_boundary_band =
+  diff.sized(topology_eps, 0.0.um) - diff.sized(-topology_eps, 0.0.um)
+horizontal_local_overlap =
+  tin_inside_diff.sized(0.0.um, topology_eps) &
+  tin_outside_diff.sized(0.0.um, topology_eps)
+vertical_local_overlap =
+  tin_inside_diff.sized(topology_eps, 0.0.um) &
+  tin_outside_diff.sized(topology_eps, 0.0.um)
+horizontal_crossing_seed =
+  tin_crossings & horizontal_boundary_band & horizontal_local_overlap
+vertical_crossing_seed =
+  tin_crossings & vertical_boundary_band & vertical_local_overlap
+normal_reach = SOI_EDGE_BAND_UM + SOI_EDGE_MARGIN_UM - SOI_EDGE_TOPOLOGY_EPS_UM
+required_ml1_at_step =
+  horizontal_crossing_seed.sized(SOI_EDGE_MARGIN_UM, normal_reach) +
+  vertical_crossing_seed.sized(normal_reach, SOI_EDGE_MARGIN_UM)
+r = required_ml1_at_step - ml1
+r.output("TIN.SOIEDGE TiN crossing an SOI edge lacks ML1 edge protection")
+
+# Opt-in bypass checks use full TiN gate components, not fab dopant strips.
+# Every gate branch needs a CNT tied to ML1, and one continuous ML1 component
+# must connect CNTs on every opposite branch of that same gate.
+if EDGE_REDUNDANCY
+  mos_gate_tin = edge_tin.interacting(diff) - (edge_tin & cap.sized(4.0.um))
+  mos_gate_core = mos_gate_tin & diff
+  mos_gate_outside = mos_gate_tin - diff
+  mos_gate_cross_edges = mos_gate_core.edges & mos_gate_outside.edges
+  mos_gate_branches = mos_gate_outside.interacting(mos_gate_cross_edges)
+  mos_gate_cnt = cnt.not_interacting(diff) & mos_gate_tin & ml1
+  # `secondary` needs a polygon layer, and the count that matters is the number
+  # of separate off-island gate branches: one above and one below the island.
+  # Counting raw boundary edges would split a single crossing into segments.
+  gate_cores_without_two_crossings =
+    mos_gate_core.drc(if_any(secondary(mos_gate_branches).count < 2))
+  gate_branches_without_cnt = mos_gate_branches.not_interacting(mos_gate_cnt)
+  branches = mos_gate_branches.data.merged
+  cuts = mos_gate_cnt.data.merged
+  metal_components = ml1.data.merged.each.map do |polygon|
+    RBA::Region.new(polygon)
+  end
+  gates_without_connected_dual_edge = polygon_layer
+  mos_gate_core.data.merged.each do |core|
+    core_region = RBA::Region.new(core)
+    local_branches = branches.interacting(core_region)
+    next if local_branches.count < 2
+    connected_opposite_edges = metal_components.any? do |metal|
+      (local_branches.not_interacting(cuts & metal)).is_empty?
+    end
+    gates_without_connected_dual_edge.data.insert(core) unless connected_opposite_edges
+  end
+  (gate_cores_without_two_crossings + gate_branches_without_cnt +
+   gates_without_connected_dual_edge).output(
+    "TIN.SOIBYPASS MOS gate lacks two connected edge crossings and a dual-edge ML1/CNT bypass"
+  )
+  channel_gate_cnt = cnt & mos_gate_core
+  channel_gate_cnt.output("CNT.SOIGATE MOS gate has an illegal channel CNT")
+end
+
 
 # Contacts: source/drain contacts sit on the island, gate contacts on TiN.
 cnt_sd   = cnt & diff
@@ -172,7 +281,7 @@ r = ndiff.space(5.0.um);           r.output("NDIFF.D NDiff space < 5 um (golden 
 # =============================================================================
 puts "Check TiN and contacts"
 # W1: TiN gate width (PDK ref. manual). Gate = TiN over the island.
-r = (tin & diff).width(10.0.um);   r.output("TIN.W1 TiN gate width < 10 um")
+r = (edge_tin & diff).width(10.0.um); r.output("TIN.W1 final TiN gate width < 10 um")
 # TiN (gate enlarged) minimum width / space (golden TiN-A/B)
 r = tinA.width(6.0.um);            r.output("TIN.W4 TiN width < 6 um (golden TiN-A)")
 r = tinA.space(4.0.um);            r.output("TIN.S3 TiN space < 4 um (golden TiN-B)")
@@ -191,7 +300,7 @@ r = tinA.enclosing(ndiff, 4.0.um); r.output("TIN.m2 TiN fringe over NDiff < 4 um
 r = (tin & pdiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of PDiff < 2 um (golden PMOS-B)")
 r = (tin & ndiff).width(2.0.um);   r.output("TIN.m1 TiN overlap of NDiff < 2 um (golden NMOS-E)")
 # d1: gate edge to source/drain contact; the gate contact itself is excluded.
-r = tin_gate_d1.separation(cnt_sd, 8.0.um); r.output("TIN.d1 gate TiN to S/D Cnt distance < 8 um")
+r = edge_tin_gate_d1.separation(cnt_sd, 8.0.um); r.output("TIN.d1 final gate TiN to S/D Cnt distance < 8 um")
 
 # =============================================================================
 # 3. Contacts

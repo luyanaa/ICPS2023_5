@@ -8,9 +8,10 @@
 # Usage:
 #   klayout -b -r icps2023_5.lvs \
 #     -rd input=layout.gds -rd schematic=reference.cir \
-#     [-rd top=CELL] [-rd layer_mode=design|fab] \
-#     [-rd report=out.lyrdb] [-rd output=extracted.cir] [-rd substrate=SUB] [-rd filters=legacy] \
-#     [-rd gate_overlap_um=2.0]
+#     [-rd top=CELL] [-rd layer_mode=design|fab] [-rd process_profile=NAME] \
+#     [-rd report=out.lyrdb] [-rd output=extracted.cir] [-rd substrate=SUB] [-rd filters=legacy]
+# =============================================================================
+require "json"
 # =============================================================================
 
 # `source` aborts when a GDS has more than one top cell.  Probe first so the
@@ -217,9 +218,10 @@ text_labels = labels(*TEXT_LAYER)
 # Special empty layer retained from the legacy deck for substrate/bulk hooks.
 bulk = polygon_layer
 
-# Computed layers.  The design branch is the original `&` implementation.  In
-# fab mode the old product deck used overlapping() for the mask-derived dopant
-# regions and represented channel as SOI outside the dopant mask.
+# Computed layers. In fab mode the dopant masks are the physical source of
+# channel geometry. In design mode, reproduce the exact dopant derivation
+# performed by fab prep so design and final-mask LVS measure the same
+# dopant-free channel without assuming a fixed TiN overlap.
 diode_region = diff.overlapping(dio)
 cnt_d = cnt_a & diode_region
 cnt = cnt_a - cnt_d
@@ -227,35 +229,72 @@ diff_nores = diff - res - cap - diode_region
 if layer_mode == "design"
   ndiff = diff_nores & narea
   pdiff = diff_nores & parea
+  dio2 = dio.sized(2.0.um) - (parea + narea)
+  design_n_dope = (narea & diff).sized(2.0.um) - (tin - cap + dio2)
+  design_p_dope = (parea & diff).sized(2.0.um) - (tin - cap + dio2)
+  n_channel_gap = ndiff - design_n_dope
+  p_channel_gap = pdiff - design_p_dope
 else
   ndiff = diff_nores.overlapping(narea)
   pdiff = diff_nores.overlapping(parea)
+  n_channel_gap = ndiff - narea
+  p_channel_gap = pdiff - parea
 end
 
-if layer_mode == "design"
-  pgate = pdiff & tin
-  psd = pdiff - pgate
-  ngate = ndiff & tin
-  bt_ngate = ndiff & tin.interacting(tin_blk)
-  ngate = ngate - bt_ngate
-  bt_ndiff = ndiff.interacting(bt_ngate)
-  ndiff = ndiff - bt_ndiff
-  nsd = ndiff - ngate
-  bt_nsd = bt_ndiff - bt_ngate
-else
-  # Preserve the fab legacy's mask interpretation while retaining the same
-  # TIN_BLK body-tie split when a fab data set contains that marker.
-  ngate = ndiff - narea
-  pgate = pdiff - parea
-  nsd = ndiff - ngate
-  psd = pdiff - pgate
-  bt_ngate = ngate & tin.interacting(tin_blk)
-  ngate = ngate - bt_ngate
-  bt_ndiff = ndiff.interacting(bt_ngate)
-  ndiff = ndiff - bt_ndiff
-  nsd = ndiff - ngate
-  bt_nsd = bt_ndiff - bt_ngate
+# A gate candidate is a dopant-free SOI region with TiN over it, and the channel
+# geometry is taken from the dopant gap itself rather than from the TiN outline.
+# A TiN edge fracture thins the gate but leaves the dopant-defined channel
+# unchanged, and whether the broken edge still drives the gate is a topography
+# reliability question that DRC owns (TIN.SOIEDGE / TIN.SOIBYPASS) -- a
+# connectivity check cannot establish it.  Measuring the gap therefore keeps L/W
+# stable and keeps a single-edge fracture that the opposite edge still bypasses
+# LVS-matching instead of aborting the whole extraction.
+ngate = n_channel_gap.overlapping(tin)
+pgate = p_channel_gap.overlapping(tin)
+bt_marker_gate = ngate & tin.interacting(tin_blk)
+unless (pgate & tin.interacting(tin_blk)).is_empty?
+  raise "ICPS2023_5 LVS: PMOS body-tie marker TIN_BLK is unsupported"
 end
+
+# Design TIN_BLK is the explicit NMOS4 selector and has no fab mask: fab prep
+# merges the marker into TiN. Fab mode therefore identifies the NMOS body tie
+# physically: the dopant-free channel must lie in an N-ch (body dope) component
+# that reaches a contacted P+ dot inside the SOI. A plain NMOS island carries no
+# such dot even when its N-ch dope band is wider than the gate, and an N-ch
+# path whose P+ dot has no contact fails closed instead of matching a
+# three-terminal schematic.
+if layer_mode == "fab"
+  tie_dots = pwl & parea & diff
+  contacted_dots = tie_dots.interacting(cnt)
+  contacted_paths = pwl.interacting(contacted_dots)
+  orphan_paths = pwl.interacting(tie_dots - contacted_dots) - contacted_paths
+  unless orphan_paths.is_empty?
+    raise "ICPS2023_5 LVS: N-ch body path carries an uncontacted P+ tie dot"
+  end
+  bt_marker_gate = ngate.interacting(contacted_paths)
+end
+
+# PMOS body ties: the foundry mask set has no P-ch channel mask and NWL has no
+# fab mask. A mask-visible tie requires a continuous N-type neck that leaves the
+# channel and stays outside the P+ dope - but this PCell's channel-adjacent neck
+# is covered by the gate extension (it cannot be separated from the channel) and
+# a neck outside TiN is cut by the 2 um P+ bias. PMOS4 extraction therefore
+# remains PMOS4_EXPERIMENTAL and fails closed: an in-island N+ dot aborts
+# instead of silently dropping the body terminal.
+pmos_islands = diff.interacting(parea)
+p_tie_dots = (narea & diff) & pmos_islands
+unless p_tie_dots.is_empty?
+  raise "ICPS2023_5 LVS: PMOS body-tie extraction is not supported yet " \
+        "(N+ dot inside a PMOS island)"
+end
+
+bt_ngate = bt_marker_gate
+ngate = ngate - bt_ngate
+bt_ndiff = ndiff.interacting(bt_ngate)
+ndiff = ndiff - bt_ndiff
+nsd = ndiff - ngate
+bt_nsd = bt_ndiff - bt_ngate
+psd = pdiff - pgate
 lv_ngate = ngate
 lv_pgate = pgate
 lv_bt_ngate = bt_ngate
@@ -264,6 +303,20 @@ diff_nores = diff_nores - ngate - pgate - bt_ngate
 
 diff_in_pwl = diff & pwl
 ptie = diff_in_pwl & parea
+unless bt_ngate.is_empty?
+  if (bt_ngate & pwl).is_empty?
+    raise "ICPS2023_5 LVS: NMOS4 gate lacks its N-channel body-tie route marker"
+  end
+  if (pwl & parea & diff).is_empty?
+    raise "ICPS2023_5 LVS: NMOS4 body-tie route has no physical P-doped terminal"
+  end
+  # The contact requirement is physical in both modes: without a CNT on the
+  # P+ dot the body tie has no terminal.
+  tie_dot = pwl & parea & diff
+  unless (tie_dot - tie_dot.interacting(cnt)).is_empty?
+    raise "ICPS2023_5 LVS: NMOS4 body-tie P+ dot has no contact"
+  end
+end
 
 mim_c1 = (cap & ml1 & ml2) - tin
 mim_c2 = (cap & ml1 & ml2) - tin
@@ -274,6 +327,13 @@ pdiff_c2 = cap & tin & diff & parea
 ndiff_c1 = cap & tin & diff & narea
 ndiff_c2 = cap & tin & diff & narea
 
+tin_res = (res & tin) - cap - diff
+# Only a CNT cut on the TiN resistor and connected to ML1 can terminate R_TIN.
+# Keep the actual cut footprint as the extractor contact: extending it across
+# the body would alter KLayout's perimeter-based resistance calculation.
+tin_res_contact_cuts = tin_res.sized(0.5.um) & cnt & ml1
+tin_res_contacts = tin_res_contact_cuts
+tin_conn = tin - tin_res
 nres = narea & res & diff
 pres = parea & res & diff
 soi_res = (res & diff) - nres - pres
@@ -282,9 +342,10 @@ rs_layer = soi_res.sized(0.5.um) & (diff - soi_res)
 rn_layer = nres.sized(0.5.um) & (diff - nres)
 rp_layer = pres.sized(0.5.um) & (diff - pres)
 
-# Area capacitances are F/um^2. The PDIFF/NDIFF cells are TiN/diffusion
-# capacitors (PDF p.18) using Cox=2.3 fF/um^2 (PDF p.9); MIM/TiN values
-# remain inherited legacy values pending qualification.
+# p.8: TiN under RES is one explicit 20 ohm/square device. CAP and SOI-owned
+# TiN are excluded; CNT-backed contact heads define its terminals.
+extract_devices(resistor("R_TIN", 20), {"R" => tin_res, "C" => tin_res_contacts})
+
 extract_devices(capacitor("MIMCAP", 0.115e-15), {"P1" => mim_c1, "P2" => mim_c2})
 extract_devices(capacitor("TINCAP", 0.115e-15), {"P1" => tin_c1, "P2" => tin_c2})
 extract_devices(capacitor("PDIFFCAP", 2.3e-15), {"P1" => pdiff_c1, "P2" => pdiff_c2})
@@ -299,16 +360,17 @@ extract_devices(resistor("NRES", 180), {"R" => nres, "C" => rn_layer, "tA" => rn
 extract_devices(resistor("PRES", 1200), {"R" => pres, "C" => rp_layer, "tA" => rp_layer, "tB" => rp_layer})
 extract_devices(resistor("R_SOI", 250e6), {"R" => soi_res, "C" => rs_layer, "tA" => rs_layer, "tB" => rs_layer})
 
-extract_devices(mos3("PMOS"), {"SD" => psd, "G" => lv_pgate, "tS" => psd, "tD" => psd, "tG" => tin})
-extract_devices(mos3("NMOS"), {"SD" => nsd, "G" => lv_ngate, "tS" => nsd, "tD" => nsd, "tG" => tin})
-extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => lv_bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin, "tW" => pwl})
+extract_devices(mos3("PMOS"), {"SD" => psd, "G" => lv_pgate, "tS" => psd, "tD" => psd, "tG" => tin_conn})
+extract_devices(mos3("NMOS"), {"SD" => nsd, "G" => lv_ngate, "tS" => nsd, "tD" => nsd, "tG" => tin_conn})
+extract_devices(mos4("NMOS4"), {"SD" => bt_nsd, "G" => lv_bt_ngate, "W" => pwl, "tS" => bt_nsd, "tD" => bt_nsd, "tG" => tin_conn, "tW" => pwl})
 
 # Connectivity, copied from the design legacy deck. VIA1/ML2 are available in
 # the experimental profile; VIA2/ML3 have no extracted connectivity.
 connect(psd, cnt)
 connect(nsd, cnt)
+connect(tin_conn, cnt)
 connect(bt_nsd, cnt)
-connect(tin, cnt)
+connect(tin_res_contacts, cnt)
 connect(cnt, ml1)
 connect(ml1, text_labels)  # attaches logical top-level labels for extraction/assembly
 connect(ml1, via1)
@@ -332,32 +394,8 @@ connect(ml1, cnt_d)
 connect(nplus, ncnt)
 connect(ncnt, cnt_d)
 
-# Both extraction modes retain the documented gate overlap at each end.
-# The BSIMSOI model uses channel L, so remove the caller-selected overlap from
-# both ends of every extracted MOS device. The 2023 PDF gives 2 um per end.
-begin
-  gate_overlap_um = ($gate_overlap_um.nil? || $gate_overlap_um.to_s.empty?) ?
-    2.0 : Float($gate_overlap_um)
-rescue ArgumentError, TypeError
-  raise "ICPS2023_5 LVS: gate_overlap_um must be finite, non-negative microns per end"
-end
-unless gate_overlap_um.finite? && gate_overlap_um >= 0.0
-  raise "ICPS2023_5 LVS: gate_overlap_um must be finite, non-negative microns per end"
-end
-gate_length_correction_um = 2.0 * gate_overlap_um
-puts "ICPS2023_5 LVS  gate_overlap_um=#{gate_overlap_um} per end"
-netlist.each_circuit do |circuit|
-  circuit.each_device do |device|
-    next unless ["NMOS", "PMOS", "NMOS4"].include?(device.device_class.name)
-    gate_length = device.parameter("L")
-    next unless gate_length
-    channel_length = gate_length - gate_length_correction_um
-    unless channel_length > 0.0
-      raise "ICPS2023_5 LVS: extracted MOS gate length #{gate_length} um must exceed the total gate overlap #{gate_length_correction_um} um"
-    end
-    device.set_parameter("L", channel_length)
-  end
-end
+# MOS device geometry already is the active dopant gap; never alter its
+# extracted L by a scalar overlap correction.
 # Preserve physical MOS instances and named ports for PEX assembly. Comparison
 # may combine parallel devices, but MOS_MAP still identifies each physical gate.
 netlist.purge
@@ -378,6 +416,7 @@ same_device_classes("MIMCAP", "CAP")
 same_device_classes("TINCAP", "CAP")
 same_device_classes("PDIFFCAP", "CAP")
 same_device_classes("NDIFFCAP", "CAP")
+same_device_classes("R_TIN", "RES")
 same_device_classes("NRES", "RES")
 # Strict comparison is the default. `legacy` retains the pad-array smoke
 # filter for old reference layouts; those cutoffs apply to both netlists.
@@ -394,11 +433,39 @@ else
 end
 same_device_classes("PRES", "RES")
 same_device_classes("R_SOI", "RES")
-["RES", "NRES", "PRES", "R_SOI"].each { |klass| tolerance(klass, "R", :relative => 0.03) }
+["RES", "NRES", "PRES", "R_SOI", "R_TIN"].each { |klass| tolerance(klass, "R", :relative => 0.03) }
 ["MIMCAP", "TINCAP", "PDIFFCAP", "NDIFFCAP"].each { |klass| tolerance(klass, "C", :relative => 0.03) }
 netlist.combine_devices
 schematic.combine_devices
 
 matched = compare
 puts(matched ? "ICPS2023_5 LVS MATCH (mismatches=0)" : "ICPS2023_5 LVS NO MATCH (see #{report_file} for mismatches)")
-physical_netlist.write(output_file, write_spice, "Created by KLayout")
+class ICPS2023_5PhysicalNetlistWriter < RBA::NetlistSpiceWriterDelegate
+  def write_device(device)
+    if device.device_class.name == "R_TIN"
+      a = device.net_for_terminal("A")
+      b = device.net_for_terminal("B")
+      unless a && b
+        raise "ICPS2023_5 LVS: R_TIN #{device.name} has an unconnected terminal"
+      end
+      position = device.trans.disp
+      record = {
+        "instance" => device.name,
+        "a" => net_to_string(a),
+        "b" => net_to_string(b),
+        "r_ohm" => device.parameter("R"),
+        "x_um" => position.x.round(6),
+        "y_um" => position.y.round(6),
+      }
+      emit_comment("ICPS2023_5_R_TIN " + JSON.generate(record))
+    end
+    super(device)
+  end
+end
+
+physical_spice_writer = RBA::NetlistSpiceWriter::new(
+  ICPS2023_5PhysicalNetlistWriter::new
+)
+physical_spice_writer.use_net_names = false
+physical_spice_writer.with_comments = true
+physical_netlist.write(output_file, physical_spice_writer, "Created by KLayout")

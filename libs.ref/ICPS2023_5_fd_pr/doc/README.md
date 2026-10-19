@@ -19,9 +19,10 @@ geometry-only; the electrical models live in `libs.tech/ngspice/`.
 | `PAD100` | 100 × 100 | 100 µm pad | alternative pad size |
 | `PAD150` | 150 × 150 | 150 µm pad | alternative pad size |
 
-Every cell uses the design layer numbers of `libs.tech/klayout/doc/layers.md`
-(DIFF 3/0, TIN 5/0, CNT 7/0, ML1 8/0, VIA1 9/0, ML2 10/0, PAREA 18/0,
-NAREA 19/0, PAD 50/0 and the DM_* dummy marks 101–104).
+Every cell is shipped in the foundry mask numbering: SOI 4/0, N-diff 3/0,
+P-diff 2/0, TiN 5/0, contact 6/0, M1(Al) 7/0, VIA1 8/0, ML2 9/0, PAD opening
+10/0 and TEXT 13/1. The `DM_*` dummy-fill marks (101/0-104/0) and the design
+NWL layer (1/0) have no mask output and are not present.
 
 The 60 µm pad used by the frame library is `pad_60_m1_tin` in
 `libs.ref/ICPS2023_5_fd_base`; `PAD60/100/150` here are the vendor's standalone
@@ -29,7 +30,8 @@ pad cells.
 
 ## Known DRC markers
 
-Run of `libs.tech/klayout/drc/icps2023_5.drc` per cell (default limits):
+Run of `libs.tech/klayout/drc/icps2023_5.drc` with `-rd layer_mode=fab` per cell
+(default limits; the shipped file is mask-numbered):
 
 | Cell | Markers |
 |------|---------|
@@ -48,8 +50,30 @@ With `-rd strict=true`, `pcont_min` additionally reports two `TIN.m4` and two
 enclosure where the PDK documents ask for 2.5 µm. See
 `libs.tech/klayout/drc/README.md` for the strict/default split.
 
+## Foundry view
+
+The shipped GDS is the foundry-mask view of the salt-package library. It was
+produced with
+`python3 libs.tech/klayout/drc/make_mask_view.py --flat-library` at the
+experimental profile (the cells contain unqualified VIA1/ML2 geometry), which
+converts every top cell with `icps2023_5_fab_prep.drc` and merges the results.
+
+Two consequences are explicit:
+
+* **The hierarchy is flattened.** `fab_prep` writes flattened output, and these
+  primitives are meant to be instantiated cell by cell (`psubcont`/`nsubcont`
+  share the `DCNT` child). The ten primitive cell names survive as flattened
+  top cells; the internal `DCNT` child does not. The content also engages real
+  fab-prep derivations (`DIFF` in the children interacts with `PAREA`/`NAREA` in
+  the parents), so the frame-style hierarchical renaming does not apply here.
+* **The `DM_*` dummy-fill marks are dropped.** They have no mask mapping: the
+  original conversion deck (`ICPS2023_5_to_SOI.lydrc`) does not map them either,
+  and the original DRC's only dummy rule (`VIA1` minus `DM_via1`) is commented
+  out upstream. Dummy fill, if required, is a separate DFM step that draws real
+  geometry.
+
 ## Provenance
 
-`gds/ICPS2023_5_fd_pr.gds` is the `ICPS2023_5_Basic` static library of the
-original KLayout salt package, renamed and moved unchanged. See `SOURCES` in
-the repository root.
+The drawing original is `Basic/libraries/ICPS2023_5_Basic.gds` from the
+original KLayout salt package (upstream Mineda repository); the shipped GDS is
+its foundry-mask view. See `SOURCES` in the repository root.

@@ -46,15 +46,15 @@ QUALIFICATION_LIMITS = [
 ]
 
 _LIBERTY_REFUSAL = {
-    "status": "refused",
+    "status": "experimental_only",
     "emitted": False,
     "reason_codes": [
-        "no_process_qualified_timing_model",
-        "nominal_model_arcs_are_not_a_signoff_library",
-        "geometry_scaling_and_wire_coupling_are_unqualified",
-        "no_qualified_placement_site_or_row",
+        "single_corner_xyce_bridge",
+        "no_pvt_sweep",
+        "no_sequential_setup_hold",
+        "no_process_signoff",
     ],
-    "message": "No Liberty file is emitted: nominal compact-model characterization does not establish a process-qualified timing library.",
+    "message": "Use the explicit experimental Xyce Liberty artifact only within its declared 3 V / 25 C evidence scope; no signoff claim.",
 }
 
 

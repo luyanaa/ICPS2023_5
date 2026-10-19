@@ -39,7 +39,7 @@ numbering). Both spaces are defined here once, and every deck selects one with
 | 18/0 | `PAREA` | P+ source/drain doping | `P_DIFF` 2/0 |
 | 19/0 | `NAREA` | N+ source/drain doping | `N_DIFF` 3/0 |
 | 20/0 | `MASK` | DRC/LVS exclusion zone: geometry under this layer is ignored | – |
-| 21/0 | `NCH` | NMOS channel doping (`N-ch` mask), also the body-tie path (`pwl` in LVS) | `N_CH` 13/0 |
+| 21/0 | `NCH` | NMOS channel doping (`N-ch` mask), also the body-tie path (`pwl` in LVS). The legacy conversion deck also auto-generated a PWell from `narea.interacting(tin).sized(2)`; the current deck emits only this explicit layer by default (`-rd legacy_pwell=true` reproduces the legacy mask, see `drc/test_conversion_semantics.py`) | `N_CH` 13/0 |
 | 50/0 | `PAD` | pad opening | `PAD` 10/0 |
 | 63/63 | `EXCLUDE` | hard keep-out (imported/foreign geometry is ignored) | – |
 | 100/0 | `CELL_BOUNDARY` | experimental standard-cell reserved placement rectangle; drawing only, removed by fab prep | – |

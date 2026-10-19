@@ -1,0 +1,215 @@
+{
+  "schema": "ICPS2023_5_stdcell_rfc_v2",
+  "library": "ICPS2023_5_sc_1m",
+  "process_profile": "icps2023_5_1m",
+  "dbu_um": 0.001,
+  "objective": {
+    "primary": "min_routed_core_area",
+    "secondary": "min_route_crossing_and_overflow",
+    "tertiary": "min_parasitic_contact_power_cost",
+    "timing": "feasibility_only",
+    "target_clock_period_ns": null
+  },
+  "frame": {
+    "gds": "libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds",
+    "die_bbox_um": [
+      -1600,
+      -1600,
+      1600,
+      1600
+    ],
+    "expected_pad_count": 56,
+    "keepout_um": {
+      "pad": 20,
+      "frame": 10,
+      "edge": 10
+    },
+    "keepout_provenance": "Explicit engineering reservations; manufacturing and package clearance are not qualified.",
+    "power_interface": {},
+    "pro_capacity_multiplier": null,
+    "pro_capacity_provenance": "superseded: the 2x2 frame is measured directly from libs.ref/ICPS2023_5_fd_base_2x2 instead of a user-supplied 4x reading; the historical unverified interpretations are not re-applied",
+    "frame_provenance": "derived 3200x3200 um, 56-pad frame library (libs.ref/ICPS2023_5_fd_base_2x2/doc/README.md); the foundry publishes no 2x2 frame GDS, so this is derived geometry, not foundry qualification"
+  },
+  "technology": {
+    "allowed_conductors": [
+      "ML1",
+      "TIN",
+      "NAREA",
+      "PAREA"
+    ],
+    "poly_routing": "unsupported",
+    "via1_ml2": "forbidden",
+    "tin_to_diff_direct_contact": "unqualified",
+    "contacts": [
+      {
+        "between": [
+          "ML1",
+          "TIN"
+        ],
+        "cut": "CNT",
+        "condition": "5x5 um outside DIFF; TiN/ML1 enclosure >=2.5 um"
+      },
+      {
+        "between": [
+          "ML1",
+          "NAREA"
+        ],
+        "cut": "CNT",
+        "condition": "NAREA intersect DIFF, no TIN; DIFF/ML1 enclosure >=4 um"
+      },
+      {
+        "between": [
+          "ML1",
+          "PAREA"
+        ],
+        "cut": "CNT",
+        "condition": "PAREA intersect DIFF, no TIN; DIFF/ML1 enclosure >=4 um"
+      }
+    ],
+    "crossings": {
+      "ML1_ML1": "forbidden",
+      "ML1_TIN": "insulated_without_CNT",
+      "TIN_active": "intended_MOS_gate_only"
+    },
+    "rules_source": "libs.tech/klayout/drc/icps2023_5.drc (strict=true); pcells/pcells_v0.1.lym",
+    "qualification": "repository_rule_conformance; no foundry signoff claim",
+    "rules_um": {
+      "ML1_width": 6,
+      "ML1_space": 4,
+      "TIN_width": 6,
+      "TIN_space": 6,
+      "CNT_size": 5,
+      "SD_contact_enclosure": 4,
+      "gate_contact_enclosure": 2.5,
+      "gate_to_SD_contact": 8,
+      "MOS_L_min": 6,
+      "MOS_W_min": 13,
+      "DIFF_space": 5,
+      "implant_halo": 2
+    },
+    "sheet_resistance_ohm_sq": {
+      "ML1": 0.2,
+      "TIN": 20,
+      "NAREA": 180,
+      "PAREA": 1200
+    }
+  },
+  "model": {
+    "library": "libs.tech/ngspice/b4soi_fd_bridge_experimental.lib.spice",
+    "section": "b4soi",
+    "include": "libs.tech/ngspice/models/b4soi_fd_bridge_experimental.inc",
+    "engine": "xyce",
+    "engine_path": "/usr/local/XyceNF_OMPI_7.10/bin/Xyce",
+    "engine_version": "Xyce 7.10 / BSIMSOI 4.5.0",
+    "engine_level": 70450,
+    "scope": "W24/L6, 3 V, 25 C, 4-terminal D/G/S/E",
+    "provenance": "experimental ideal-FD bridge card (SOIMOD=2, NCH=1.0e15, NGATE=0) selected for the standard-cell library evidence path; SOIMOD=0 stage-1 remains the nominal PDK model and the characterization-bench binding; ngspice BSIMSOI 4.4 (LEVEL=58) must not accept or be mixed with this card (documented 5-11 % cross-version divergence)"
+  },
+  "row_candidates": {
+    "nominal_track_counts": [
+      5,
+      6,
+      7
+    ],
+    "pitch_lower_bound_um": 10,
+    "pitch_provenance": "6 um width +4 um spacing; not an OpenROAD site or qualified track definition",
+    "additional_height_um": [
+      90,
+      110,
+      130,
+      150,
+      180,
+      220,
+      260
+    ],
+    "compare_pdn_topologies": [
+      "edge_rails",
+      "segmented_rails",
+      "local_clusters"
+    ],
+    "require_pin_access": true,
+    "require_abutment": true
+  },
+  "area_search": {
+    "heights_um": [
+      110,
+      120,
+      130,
+      140,
+      150,
+      160,
+      180
+    ],
+    "total_device_widths_um": [
+      13,
+      24,
+      26
+    ],
+    "fingers": [
+      1,
+      2
+    ],
+    "pin_orders": [
+      "declared",
+      "reverse_signals"
+    ],
+    "mirrors": [
+      false,
+      true
+    ],
+    "route_channels_um": [
+      0,
+      20
+    ],
+    "workers": 2,
+    "candidate_timeout_s": 120,
+    "pareto_objectives": [
+      "area_um2",
+      "contacts_count",
+      "local_wire_resistance_proxy_ohm"
+    ],
+    "require_postlayout_logic": true,
+    "geometry_scaling_qualification": "unqualified; measured compact-model fit only at W24/L6"
+  },
+  "cells": {
+    "strengths": [
+      "X1"
+    ],
+    "enable_pin_permutation_variants": true,
+    "enable_multi_finger_sweep": true,
+    "enable_body_tie_variants": "only_when_verified",
+    "prefer_static_storage": true
+  },
+  "checks": {
+    "strict_drc": true,
+    "strict_lvs": true,
+    "postlayout_spice": true,
+    "routing_1m": true,
+    "power_connectivity": true
+  },
+  "area_definitions": {
+    "A_cell_total": "sum instance height*width including required physical cells",
+    "A_routed_core": "actual allocated floorplan core area including placement whitespace, routing channels, repair and PDN/clock/physical cells",
+    "A_payload": "A_routed_core + fixed pad/frame/measurement overhead; does not equal frame area",
+    "U_effective": "A_cell_total / A_routed_core"
+  },
+  "roadmap": {
+    "io_after": "M3-M4 stdcell acceptance",
+    "io_required": [
+      "IO_IN",
+      "IO_OUT",
+      "IO_BIDIR",
+      "IO_VDD",
+      "IO_VSS",
+      "IO_ANALOG",
+      "IO_ESD_TEST"
+    ],
+    "io_states": [
+      "functional_prototype",
+      "electrically_qualified"
+    ],
+    "io_driver_strengths": "independent size and multi-stage sweep; X1 restriction does not apply",
+    "esd_qualification": "requires pad-to-rail and rail-to-return discharge network and measured electrical/ESD validation; simplified ESD wrappers and +/-7 V absolute maximum are not ESD ratings",
+    "sram": "deferred until stdcell and IO completed and separately decided"
+  }
+}

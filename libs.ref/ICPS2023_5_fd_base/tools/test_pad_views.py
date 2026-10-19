@@ -50,7 +50,7 @@ class PadViewsTests(unittest.TestCase):
         top = layout.cell("ICPS2023_5_fd_base")
         self.assertIsNotNone(top)
         die = top.bbox()
-        ml1 = layout.find_layer(pya.LayerInfo(8, 0))
+        ml1 = layout.find_layer(pya.LayerInfo(7, 0))
         self.assertIsNotNone(ml1)
         top.flatten(True)
         region = pya.Region(top.shapes(ml1)).merged()
@@ -110,7 +110,7 @@ class PadViewsTests(unittest.TestCase):
         )
 
         top.flatten(True)
-        ml1 = layout.find_layer(pya.LayerInfo(8, 0))
+        ml1 = layout.find_layer(pya.LayerInfo(7, 0))
         self.assertIsNotNone(ml1)
         boxes = [
             polygon.bbox()

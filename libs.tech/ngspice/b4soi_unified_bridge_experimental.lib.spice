@@ -1,0 +1,7 @@
+* Bridge-candidate library selector.
+* Mirrors icps2023_5.lib.spice's b4soi section but selects the bridge card.
+* Paths are relative to this file; ngspice and Xyce both resolve nested
+* includes against the including file's directory.
+.lib b4soi
+.include models/b4soi_unified_bridge_experimental.inc
+.endl b4soi

@@ -55,10 +55,14 @@ explicit experimental profile, and only when no unmasked VIA2/ML3 is present;
 those results are not foundry qualification. The shipped `pcont_min` also
 provides only 2.0 µm enclosure for two strict 2.5 µm gate-contact rules.
 
-The shipped NAND GDS was checked in design mode and after experimental
-fab-preparation in fab mode, each with `strict=false`; both DRC reports
-contained no items. This is a legacy compatibility smoke, not foundry
-qualification.
+The shipped NAND GDS is foundry-mask numbered in place and is checked directly
+in fab mode with `strict=false`; no conversion step remains in the flow. The
+report contains only the experimental `TIN.SOIEDGE` step-edge screen (69
+crossings): the legacy layout predates that design-practice convention, and the
+screen is not a process limit. No document-limit rule fires. This is a legacy
+compatibility smoke, not foundry qualification.
+`drc/test_foundry_migration.py` pins the result: the shipped mask views are
+clean except for that experimental screen.
 
 | Rule | Default | `strict=true` | Evidence |
 |------|---------|---------------|----------|
@@ -70,6 +74,70 @@ qualification.
 
 Strict limits are suitable as an opt-in migration check, not as the default or
 sign-off criterion for the shipped reference layouts.
+
+## TiN/SOI step-edge protection (`TIN.SOIEDGE`, `TIN.SOIBYPASS`, `CNT.SOIGATE`)
+
+These are **experimental topography-dependent** rules, not document limits, and
+not foundry qualification. They exist because TiN thins where it steps over the
+SOI island edge and can fracture there; the published recipe is to carry ML1 over
+the gate at the step. A DRC-only view of this is possible, but nothing here
+proves the fracture physics — it is a design-practice obligation.
+
+* `TIN.SOIEDGE` — TiN that **straddles** the island boundary must be covered by
+  ML1 that reaches `SOI_EDGE_MARGIN_UM` beyond it on every side. The target is
+  the crossing itself (a 2 µm band across the boundary) restricted to MOS gates
+  (`TiN` interacting with N/P dope). Deliberately *not* targets: the off-island
+  edge landing pad, off-island TiN jumper bars between fingers, capacitor plates,
+  diffusion resistors and other non-gate TiN — none of them crosses the boundary.
+  The margin defaults to 2.0 µm; `-rd soi_edge_margin=<um>` may raise it, and
+  values below 2.0 µm are rejected. See the caveat below.
+* `TIN.SOIBYPASS` (`-rd edge_redundancy=true`) — each MOS gate must cross the
+  boundary at two separate places, every off-island branch must carry a CNT tied
+  to ML1, and one connected ML1 component must contact at least two
+  gate-connected CNTs. This is the electrical *redundancy* half of the recipe: if
+  one crossing fractures, the other still drives the gate.
+* `CNT.SOIGATE` (`-rd edge_redundancy=true`) — a gate CNT may not sit on the
+  active channel; the bypass contacts are off-island only.
+
+`TIN.SOIEDGE` needs both a coverage term and a margin term. A bare
+`ml1.enclosing(target, margin)` is not enough: `enclosing` only inspects ML1
+polygons that meet the target, so a gate with no strap at all passes it silently.
+
+### Margin status
+
+The margin is experimental. The native PCell's gate bay (`MIN_GATE_BAY_UM = 8`
+µm) leaves room for the ML1 strap, and the `nmos_min` fixture passes the screen
+at the 2.0 µm default in both design and fab modes (also with
+`strict=true`/`edge_redundancy=true`); the deliberately unprotected diagnostic
+fixture reports `TIN.SOIEDGE`/`TIN.SOIBYPASS` as intended. Raising the value to
+2.4 µm still reports `TIN.SOIEDGE` markers on the same fixture, so the cells are
+**not** compliant with the 2–4 µm range the recipe suggests. The older note that
+0.5 µm was the widest achievable margin predates the widened gate bay and is
+obsolete; do not cite it as the current limit.
+
+## Conversion semantics
+
+Three derivations in `icps2023_5_fab_prep.drc` change manufacturing geometry;
+`test_conversion_semantics.py` pins each of them.
+
+* **Doping windows.** `P_DIFF`/`N_DIFF` are not the drawing `PAREA`/`NAREA`
+  shapes. Each is `(area & DIFF).sized(2) - (TIN - CAP + dio2)`, so the TiN
+  subtraction cuts the channel window out of the dope mask. The mask therefore
+  carries device-structure semantics: the fab LVS derives the MOS length from
+  the window, and `L=6` in the drawing becomes a 6 µm mask window.
+* **Whole-polygon TiN bias.** `interacting` selects complete polygons, so
+  `TIN.interacting(DIFF).sized(2) & bb` biases every connected TiN conductor
+  that touches the island: the gate window, its off-island landing pads and any
+  jumper bar wired to it. `bb` clips the growth to the `(DIFF + TiN)` extents,
+  so only directions with island overhang grow. This is the inherited legacy
+  convention, not a local Ti/TiN-edge rule.
+* **N-ch mask source.** The legacy deck generated a PWell region from every
+  `NAREA` polygon that interacts with TiN
+  (`pwell = narea.interacting(tin).sized(2) + input(21,0)`). The current deck
+  emits only the explicit drawing `21/0` by default; `-rd legacy_pwell=true`
+  reproduces the legacy mask. For a native NMOS this is a ~13x area difference
+  (120 µm² vs 1568 µm² for `nmos_min`), so it is a behaviour change that needs
+  recipe confirmation, not a bug fix.
 
 ## `icps2023_5_fab_prep.drc`
 

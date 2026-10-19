@@ -71,18 +71,37 @@ FRAME   = input(14, 0) - EXCLUDE - MASK
 # ---- mask derivations (from the legacy conversion deck) --------------------
 # The doping masks are drawn as the *dope* region; the mask shop needs them
 # clipped to the silicon island, biased by 2 um and pulled back from the gate
-# and from the diode guard ring.
+# and from the diode guard ring.  The resulting P_DIFF/N_DIFF masks are NOT the
+# drawing PAREA/NAREA shapes: the TiN subtraction cuts the channel window, so
+# the mask carries device-structure semantics (the fab LVS derives L from it).
 dio2 = DIO.sized(2.0) - (PAREA + NAREA)
 p_dope = (PAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
 n_dope = (NAREA & DIFF).sized(2.0) - (TIN - CAP + dio2)
 
 # Exclude the native diffusion-capacitor plate and its 4 um fringe from gate bias.
+# `interacting` selects whole TiN polygons, so the bias below applies to every
+# connected TiN conductor that touches the island - the gate window, its
+# off-island landing pads and any jumper bar wired to it.  That whole-polygon
+# behaviour is inherited from the legacy deck and is pinned by
+# drc/test_conversion_semantics.py; it is not a property of the TI/TiN edge.
 tin_gate = TIN.interacting(DIFF) - (TIN & CAP.sized(4.0.um))
 bb = (DIFF + tin_gate).extents
 tin_gate_enlarged = tin_gate.sized(2.0.um) & bb
 # Preserve the legacy gate-window bias and the design-side block geometry in
 # the combined TiN mask; TIN_BLK has no independent fab mask layer.
 tin_out = TIN + tin_gate_enlarged + TINBLK
+
+# N-ch (13/0) output.  The legacy conversion deck generated a PWell region from
+# every NAREA polygon that interacts with TiN:
+#     pwell = narea.interacting(tin).sized(2.0) + input(21,0)
+# That is a behaviour change, not a bug fix: for the same drawing GDS it emits a
+# much larger 13/0 mask (the whole island plus 4 um) than the explicit drawing
+# 21/0.  Which one matches the actual AIST/YSS recipe is an open process
+# question, so the auto-generation is opt-in and the default emits the explicit
+# drawing layer unchanged.
+legacy_pwell = ($legacy_pwell.to_s == "true" || $legacy_pwell.to_s == "1")
+pwell_out = legacy_pwell ? (NAREA.interacting(TIN).sized(2.0.um) + NCH) : NCH
+puts "icps2023_5_fab_prep: legacy_pwell=#{legacy_pwell}"
 
 # ---- fab mask layers -------------------------------------------------------
 p_dope.output(2, 0)                    # P-diff   (P+ source/drain dope)
@@ -99,7 +118,7 @@ end
 if permitted_upper_layers.include?("ML2")
   ML2.output(9, 0)                     # M2(Al)
 end
-NCH.output(13, 0)                      # N-ch   (channel dope NMOS)
+pwell_out.output(13, 0)                # N-ch   (channel dope NMOS)
 FRAME.output(14, 0)
 RES.output(15, 0)
 CAP.output(16, 0)

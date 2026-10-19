@@ -1,0 +1,62 @@
+{
+  "card": "libs.tech/ngspice/models/b4soi_unified_bridge_experimental.inc",
+  "card_sha256": "9557eee9c2faadc7a8e5c9f32379f452b540eb41534e926932635d201771be6e",
+  "metrics": {
+    "n_out_vg15": {
+      "relative_rms_percent": 23.711735127975313,
+      "samples": 45
+    },
+    "n_out_vg2": {
+      "relative_rms_percent": 2.147634660603251,
+      "samples": 43
+    },
+    "n_out_vg25": {
+      "relative_rms_percent": 3.8900305697442223,
+      "samples": 44
+    },
+    "n_out_vg3": {
+      "relative_rms_percent": 5.48026994245697,
+      "samples": 41
+    },
+    "n_transfer_blue": {
+      "log10_current_rms_decades": 0.1931580728741522,
+      "samples": 32
+    },
+    "n_transfer_orange": {
+      "log10_current_rms_decades": 0.173491522084745,
+      "samples": 29
+    },
+    "p_out_vg15": {
+      "relative_rms_percent": 10.842195543879933,
+      "samples": 43
+    },
+    "p_out_vg2": {
+      "relative_rms_percent": 6.748533037013221,
+      "samples": 43
+    },
+    "p_out_vg25": {
+      "relative_rms_percent": 6.339622730074714,
+      "samples": 43
+    },
+    "p_out_vg3": {
+      "relative_rms_percent": 7.903000187269832,
+      "samples": 42
+    },
+    "p_transfer_blue": {
+      "log10_current_rms_decades": 0.28544601537585124,
+      "samples": 27
+    },
+    "p_transfer_orange": {
+      "log10_current_rms_decades": 0.23324037370993236,
+      "samples": 27
+    }
+  },
+  "ngspice_bsimsoi": "4.4 (LEVEL=58)",
+  "same_engine_current_floor_A": 1e-12,
+  "same_engine_rel_tol": 0.0005,
+  "soimod": 1,
+  "variant": "unified",
+  "xyce": "/usr/local/XyceNF_OMPI_7.10/bin/Xyce",
+  "xyce_bsimsoi": "4.5.0",
+  "xyce_level": 70450
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import hashlib
 import json
@@ -44,8 +45,34 @@ def _sha256(path: Path) -> str:
 def _physical_summary(evidence: dict[str, Any]) -> dict[str, Any]:
     keys = ("process_profile", "strict_drc", "strict_lvs", "pex", "assembly",
             "passed", "geometry", "drc_markers", "mos_access", "gds_sha256",
-            "reference_sha256", "deck_sha256", "pex_sha256", "assembly_stats")
+            "reference_sha256", "deck_sha256", "pex_sha256", "assembly_stats",
+            "model_binding", "soi_edge_protection", "fabrication")
     return {key: evidence[key] for key in keys if key in evidence}
+
+
+def _build_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build one cell in a worker process; every failure becomes a record.
+
+    Cells are path-disjoint inside the stage directory (views and verification
+    evidence are namespaced by cell name), so workers never share a file.  The
+    parent merges results in canonical specification order, which keeps the
+    publication deterministic regardless of completion order.
+    """
+    try:
+        return _build_one(payload["name"], payload["spec"], payload["parameters"],
+                          Path(payload["stage"]), payload["provenance"],
+                          payload["logical_spice_sha256"])
+    except Exception as error:  # reported, never raised across the process boundary
+        return {"cell": payload["name"], "status": "failed",
+                "error": "%s: %s" % (type(error).__name__, error)}
+
+
+def _build_many(payloads: list[dict[str, Any]], jobs: int) -> list[dict[str, Any]]:
+    """Build selected cells sequentially or across processes, in selection order."""
+    if jobs <= 1 or len(payloads) <= 1:
+        return [_build_worker(payload) for payload in payloads]
+    with concurrent.futures.ProcessPoolExecutor(max_workers=min(jobs, len(payloads))) as pool:
+        return list(pool.map(_build_worker, payloads))
 
 
 def _physical_spec(spec: dict[str, Any], devices: list[dict[str, Any]]) -> dict[str, Any]:
@@ -89,6 +116,8 @@ def _write_record_views(record: dict[str, Any], root: Path) -> None:
     (root / paths["lef"]).parent.mkdir(parents=True, exist_ok=True)
     (root / paths["spice"]).parent.mkdir(parents=True, exist_ok=True)
     (root / paths["lef"]).write_text(library._lef_text(record), encoding="utf-8")
+    (root / paths["lef_librelane"]).write_text(library.librelane_lef_text(record),
+                                               encoding="utf-8")
     logic.write_reference(record["physical_spec"], root / paths["spice"],
                           top_name=record["cell"], library=True)
 
@@ -163,6 +192,11 @@ def _base_record(name: str, spec: dict[str, Any], parameters: dict[str, Any],
         "views": {
             "gds": f"gds/{name}.gds",
             "lef": f"lef/{name}.lef",
+            # Router-facing alias view: identical geometry with the physical ML1
+            # layer named `M1`, which is the layer the experimental LibreLane
+            # technology LEF declares (the same alias pattern the frame library
+            # uses). The canonical LEF above keeps the physical process name.
+            "lef_librelane": f"lef/{name}_librelane.lef",
             "spice": f"spice/physical/{name}.spice",
         },
     }
@@ -178,47 +212,72 @@ def _build_one(name: str, spec: dict[str, Any], parameters: dict[str, Any],
     if parameters["width_um"] is not None:
         for mos in build_spec["mos"]:
             mos["w_um"] = parameters["width_um"]
-    try:
-        layout, top, generator_manifest = geometry.build_cell(
-            build_spec, parameters["height_um"], fingers=parameters["fingers"],
-            pin_order=parameters["pin_order"], mirror=parameters["mirror"],
-            route_channel_um=parameters["route_channel_um"], architecture=parameters["architecture"])
-    except geometry.GeometryError as error:
-        return {"cell": name, "status": "geometry_failed", "error": str(error)}
-    for source_mos in spec["mos"]:
-        devices = [device for device in generator_manifest["devices"]
-                   if _device_base(device["name"]) == source_mos["name"]]
-        total_width = parameters["width_um"]
-        if total_width is None:
-            total_width = source_mos["w_um"]
-        if (len(devices) != parameters["fingers"] or
-                any(device["w_um"] < 13.0 for device in devices) or
-                not math.isclose(sum(device["w_um"] for device in devices), total_width,
-                                 rel_tol=0, abs_tol=0.001)):
-            return {"cell": name, "status": "geometry_failed",
-                    "error": f"folding for {source_mos['name']} does not preserve selected total width"}
+    architecture = parameters["architecture"]
+    if architecture == "auto":
+        # Smallest *legal* layout first: compact rows are roughly half the
+        # width of the sparse channel template, and a PnR row height is a fixed
+        # cost either way.  Some networks cannot use compact rows at all: the
+        # single-row star router's ordering search is intractable for a wide
+        # multi-input cell, and the deck rejects the geometrically-closed result
+        # elsewhere.  Those start on the channel template, which the strict deck
+        # also has to accept, so a layout that closes but leaves markers falls
+        # back rather than publishing.
+        inputs = len(spec.get("inputs", []))
+        wide = (bool(spec.get("sequential"))
+                or len(spec.get("outputs", [])) > 1
+                or len(spec["mos"]) > 12
+                or inputs >= 4)
+        candidates = ("channel", "compact_rows") if wide else ("compact_rows", "channel")
+    else:
+        candidates = (architecture,)
+    last: dict[str, Any] = {}
+    for candidate in candidates:
+        attempt = {**parameters, "architecture": candidate}
+        try:
+            layout, top, generator_manifest = geometry.build_cell(
+                build_spec, parameters["height_um"], fingers=parameters["fingers"],
+                pin_order=parameters["pin_order"], mirror=parameters["mirror"],
+                route_channel_um=parameters["route_channel_um"],
+                architecture=candidate)
+        except geometry.GeometryError as error:
+            last = {"cell": name, "status": "geometry_failed", "error": str(error)}
+            continue
+        for source_mos in spec["mos"]:
+            devices = [device for device in generator_manifest["devices"]
+                       if _device_base(device["name"]) == source_mos["name"]]
+            total_width = parameters["width_um"]
+            if total_width is None:
+                total_width = source_mos["w_um"]
+            if (len(devices) != parameters["fingers"] or
+                    any(device["w_um"] < 13.0 for device in devices) or
+                    not math.isclose(sum(device["w_um"] for device in devices), total_width,
+                                     rel_tol=0, abs_tol=0.001)):
+                return {"cell": name, "status": "geometry_failed",
+                        "error": f"folding for {source_mos['name']} does not preserve selected total width"}
 
-    layout.rename_cell(top.cell_index(), name)
-    gds_path = stage / "gds" / f"{name}.gds"
-    spice_path = stage / "spice/physical" / f"{name}.spice"
-    gds_path.parent.mkdir(parents=True, exist_ok=True)
-    spice_path.parent.mkdir(parents=True, exist_ok=True)
-    layout.write(str(gds_path))
-    physical_spec = _physical_spec(spec, generator_manifest["devices"])
-    logic.write_reference(physical_spec, spice_path, top_name=name, library=True)
-    try:
-        evidence = verify.verify_physical(
-            gds_path, spice_path, name, stage / "verification" / name)
-    except verify.VerificationError as error:
-        return {"cell": name, "status": "strict_physical_failed",
-                "error": str(error), "physical": _physical_summary(error.evidence)}
+        layout.rename_cell(top.cell_index(), name)
+        gds_path = stage / "gds" / f"{name}.gds"
+        spice_path = stage / "spice/physical" / f"{name}.spice"
+        gds_path.parent.mkdir(parents=True, exist_ok=True)
+        spice_path.parent.mkdir(parents=True, exist_ok=True)
+        layout.write(str(gds_path))
+        physical_spec = _physical_spec(spec, generator_manifest["devices"])
+        logic.write_reference(physical_spec, spice_path, top_name=name, library=True)
+        try:
+            evidence = verify.verify_physical(
+                gds_path, spice_path, name, stage / "verification" / name)
+        except verify.VerificationError as error:
+            last = {"cell": name, "status": "strict_physical_failed",
+                    "error": str(error), "physical": _physical_summary(error.evidence)}
+            continue
 
-    record = _base_record(name, spec, parameters, generator_manifest,
-                          physical_spec, evidence)
-    _write_record_views(record, stage)
-    record["fingerprints"] = _fingerprints(record, stage, provenance,
-                                           logical_spice_sha256)
-    return record
+        record = _base_record(name, spec, attempt, generator_manifest,
+                              physical_spec, evidence)
+        _write_record_views(record, stage)
+        record["fingerprints"] = _fingerprints(record, stage, provenance,
+                                               logical_spice_sha256)
+        return record
+    return last
 
 
 def build_candidate_library(output_dir: str | Path, cells: list[str], *,
@@ -227,11 +286,14 @@ def build_candidate_library(output_dir: str | Path, cells: list[str], *,
                             route_channel_um: float = 0.0,
                             pin_order: list[str] | None = None,
                             pin_order_mode: str = "declared",
-                            architecture: str = "compact_rows") -> dict[str, Any]:
+                            architecture: str = "compact_rows",
+                            jobs: int = 1) -> dict[str, Any]:
     """Build a private, strictly checked cell set without changing publication.
 
     Failed attempts remain in ``attempts.json`` and have no eligible physical
     view in the candidate manifest. Existing output is never overwritten.
+    ``jobs`` > 1 builds the selected cells in worker processes; views and
+    evidence are cell-namespaced, and the manifest keeps canonical order.
     """
     specs = logic.cell_specs()
     if not cells or len(cells) != len(set(cells)) or set(cells) - set(specs):
@@ -242,16 +304,15 @@ def build_candidate_library(output_dir: str | Path, cells: list[str], *,
         raise ValueError("explicit pin_order and pin_order_mode are mutually exclusive")
     if height_um is None and architecture != "channel":
         raise ValueError("automatic template height requires the explicit channel architecture")
+    if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
+        raise ValueError("jobs must be a positive integer")
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
     provenance = library._current_provenance()
     logical_hash = _write_logical_spice(specs, output_dir)
-    records = []
-    attempts = []
+    payloads = []
     for name, spec in specs.items():
         if name not in cells:
-            records.append({"cell": name, "status": "not_published",
-                            "reason": "Not selected for this private experiment."})
             continue
         ordered_pins = list(spec["pins"]) if pin_order is None else list(pin_order)
         if pin_order_mode == "reverse_signals":
@@ -261,13 +322,23 @@ def build_candidate_library(output_dir: str | Path, cells: list[str], *,
             height_um=height_um, width_um=width_um, fingers=fingers,
             pin_order=ordered_pins, mirror=mirror,
             route_channel_um=route_channel_um, architecture=architecture))
-        record = _build_one(name, spec, parameters, output_dir, provenance, logical_hash)
-        attempts.append(record)
+        payloads.append({"name": name, "spec": spec, "parameters": parameters,
+                         "stage": str(output_dir), "provenance": provenance,
+                         "logical_spice_sha256": logical_hash})
+    attempts = _build_many(payloads, jobs)
+    attempts_by_name = {record["cell"]: record for record in attempts}
+    records = []
+    for name in specs:
+        if name not in cells:
+            records.append({"cell": name, "status": "not_published",
+                            "reason": "Not selected for this private experiment."})
+            continue
+        record = attempts_by_name[name]
         records.append(record if record["status"] == "strict_physical_pass" else
                        {"cell": name, "status": "not_published",
-                        "reason": record.get("error", record["status"])})
-        (output_dir / "attempts.json").write_text(
-            json.dumps(attempts, indent=2) + "\n", encoding="utf-8")
+                        "reason": record.get("error", record.get("status", "failed"))})
+    (output_dir / "attempts.json").write_text(
+        json.dumps(attempts, indent=2) + "\n", encoding="utf-8")
     manifest_path = output_dir / "doc/cell_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
@@ -457,22 +528,27 @@ def _publish(args: argparse.Namespace, specs: dict[str, dict[str, Any]]) -> dict
         else:
             old_records = ({record["cell"]: record for record in old_manifest["cells"]}
                            if old_manifest else {})
-            records = []
+            payloads = []
             for name, spec in specs.items():
                 if name in requested:
-                    record = _build_one(
-                        name, spec, _parameters(spec, args, old_records.get(name)),
-                        stage, current, logical_spice_sha256)
-                    records.append(record)
-                else:
-                    previous = old_records.get(name)
-                    if previous is None or previous.get("status") == "not_published":
-                        records.append({"cell": name, "status": "not_published",
-                                        "reason": "No strict-verified GDS is included for this cell."})
-                        continue
-                    _copy_views(previous, LIBRARY, stage)
-                    record = copy.deepcopy(previous)
-                    records.append(record)
+                    payloads.append({
+                        "name": name, "spec": spec,
+                        "parameters": _parameters(spec, args, old_records.get(name)),
+                        "stage": str(stage), "provenance": current,
+                        "logical_spice_sha256": logical_spice_sha256})
+            built = {record["cell"]: record for record in _build_many(payloads, args.jobs)}
+            records = []
+            for name, spec in specs.items():
+                if name in built:
+                    records.append(built[name])
+                    continue
+                previous = old_records.get(name)
+                if previous is None or previous.get("status") == "not_published":
+                    records.append({"cell": name, "status": "not_published",
+                                    "reason": "No strict-verified GDS is included for this cell."})
+                    continue
+                _copy_views(previous, LIBRARY, stage)
+                records.append(copy.deepcopy(previous))
 
         failed = [record for record in records
                   if record.get("status") != "strict_physical_pass" and
@@ -511,8 +587,9 @@ def main() -> int:
                         help="selected total width per source MOS (None preserves the canonical width)")
     parser.add_argument("--fingers", type=int,
                         help="parallel finger count for selected cells")
-    parser.add_argument("--architecture", choices=("compact_rows", "channel"),
-                        help="explicit layout architecture; new storage defaults to channel")
+    parser.add_argument("--architecture", choices=("compact_rows", "channel", "auto"),
+                        help="explicit layout architecture, or auto = smallest "
+                             "legal one per cell (compact_rows, channel fallback)")
     parser.add_argument("--pin-order", type=lambda value: value.split(","),
                         help="comma-separated pin permutation for selected cells")
     parser.add_argument("--pin-order-mode", choices=("declared", "reverse_signals"),
@@ -527,6 +604,9 @@ def main() -> int:
                         help="explicit additional routing channel for selected cells")
     parser.add_argument("--check", action="store_true",
                         help="read-only provenance and physical-geometry check")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="build selected cells in N worker processes (default 1); the "
+                             "manifest keeps canonical order and publication stays atomic")
     parser.add_argument("--candidate-output", type=Path,
                         help="build a private candidate library here; never change publication")
     args = parser.parse_args()
@@ -553,7 +633,7 @@ def main() -> int:
             mirror=args.mirror if args.mirror is not None else False,
             route_channel_um=args.route_channel_um if args.route_channel_um is not None else 0.0,
             pin_order=args.pin_order, pin_order_mode=args.pin_order_mode,
-            architecture=args.architecture or "compact_rows")
+            architecture=args.architecture or "auto", jobs=args.jobs)
         counts: dict[str, int] = {}
         for record in candidate["attempts"]:
             counts[record["status"]] = counts.get(record["status"], 0) + 1

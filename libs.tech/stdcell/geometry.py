@@ -20,24 +20,47 @@ except ImportError:  # pragma: no cover - supplied by the pinned KLayout toolcha
 
 DBU = 0.001
 DIFF, TIN, CNT, ML1, TEXT, NWL, PAREA, NAREA = 3, 5, 7, 8, 13, 1, 18, 19
+CAP = 16
 MIN_W, MIN_L = 13.0, 6.0
-CONTACT, CUT, GATE_OVERLAP = 13.0, 5.0, 2.0
-GATE_CONTACT = 13.0  # Native PCell landing; CNT enclosure minimum alone is 10um
-N_GATE_CONTACT_OFFSET = 26.0
-P_GATE_CONTACT_OFFSET = 26.0
-COMPACT_GATE_CONTACT_OFFSET = 11.5
-VIA_CONTACT = 10.0  # Strict CNT_TIN enclosure: 5um cut + 2.5um on each side
+CONTACT, CUT = 13.0, 5.0
+GATE_CONTACT = 13.0  # Off-SOI TiN/ML1 edge landing around a 5um CNT cut
+VIA_CONTACT = 10.0  # 5um cut + 2.5um enclosure on each side
+MIN_GATE_BAY_UM = 8.0
+SOI_EDGE_CONTACT_OFFSET_UM = 11.5
+SOI_EDGE_FAB_TIN_BIAS_UM = 2.0
+SOI_EDGE_EXPERIMENTAL_MARGIN_UM = 2.0
+SOI_EDGE_BAND_UM = 2.0
+SOI_EDGE_STRAP_DRAW_MARGIN_UM = (SOI_EDGE_FAB_TIN_BIAS_UM +
+                                 SOI_EDGE_EXPERIMENTAL_MARGIN_UM)
+SOI_EDGE_STRAP_END_OFFSET_UM = (
+    SOI_EDGE_CONTACT_OFFSET_UM + GATE_CONTACT/2)
 ML1_WIDTH, ML1_SPACE, TIN_WIDTH, TIN_SPACE = 6.0, 4.0, 6.0, 6.0
 ML1_ROUTE_DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 TIN_ROUTE_DIRECTIONS = ((1, 0), (-1, 0), (0, 1), (0, -1))
-
-CONTACT_SPAN = 35.0  # PCell: 13um contact + 6um gate + 2*8um gate bay
+# Deterministic ceilings on the ML1 A* expansion.  The search grid grows with
+# cell width, so a very wide single-row cell could otherwise spend hours across
+# many nets.  Routes that resolve below the budgets are unchanged.  A row rail
+# plus the TiN gate keepout forces some output nets to search the whole
+# 218 x 500 grid (~4.3e5 nodes), so the per-net ceiling covers that grid while
+# the per-cell ceiling still bounds a pathological wide-row attempt.
+ML1_ROUTE_NODE_BUDGET = 400_000          # per net
+ML1_ROUTE_CELL_NODE_BUDGET = 24_000_000
+_ROUTE_BUDGET = {"remaining": ML1_ROUTE_CELL_NODE_BUDGET}
+# Nets whose TiN reaches an island gate: the deck treats a whole such network
+# as gate TiN (enlarged by 2um), so it is routed with the wider keepout.
+# ``None`` means "not established yet", which stays conservative.
+_TIN_GATE_NETS: "frozenset[str] | None" = None
 Rect = Tuple[float, float, float, float]
 Point = Tuple[float, float]
 
 
+
 class GeometryError(ValueError):
     """Raised when an explicit topology cannot fit or route at the requested height."""
+
+
+class _RouteBudgetExceeded(Exception):
+    """Internal: the bounded ML1 A* expansion hit its deterministic node budget."""
 
 
 def _finite(value: Any, field: str) -> float:
@@ -57,6 +80,15 @@ def _snap(value: float) -> float:
 def _rect(x1: float, y1: float, x2: float, y2: float) -> Rect:
     return (_snap(min(x1, x2)), _snap(min(y1, y2)),
             _snap(max(x1, x2)), _snap(max(y1, y2)))
+
+def _gate_bay(length: float) -> float:
+    return max(MIN_GATE_BAY_UM, (22.0 - length) / 2.0)
+
+
+def _gate_pitch(length: float) -> float:
+    return CONTACT + length + 2 * _gate_bay(length)
+
+
 
 
 def _layer(layout: db.Layout, number: int) -> int:
@@ -179,16 +211,67 @@ def _point_from_key(key: Tuple[int, int]) -> Point:
 
 
 
+def _unmerged_same_net_gap(shapes, *, min_space: float | None = None):
+    """Return a same-net ML1 wire pair that the deck would report as too close.
+
+    The deck's ML1 space rule is not net-aware, so two polygons of the *same*
+    net that only come close are reported exactly like a foreign-net short.
+    The rule is an edge-to-edge check: two rectangles that are offset in *both*
+    axes only need their overlapping projection separated, whereas a corner
+    diagonal is not a violation.  Returns ``(net, rect, other, gap)`` or
+    ``None``.
+    """
+    space = ML1_SPACE if min_space is None else min_space
+    by_net = defaultdict(list)
+    for rect, owner, kind in shapes:
+        if kind != "wire":
+            continue
+        by_net[owner].append(rect)
+    for net, rects in by_net.items():
+        if len(rects) < 2:
+            continue
+        ordered = sorted(set(rects))
+        for index, first in enumerate(ordered):
+            for second in ordered[index + 1:]:
+                if _rects_overlap(first, second):
+                    continue  # one merged conductor to the deck
+                gap_x = max(second[0] - first[2], first[0] - second[2])
+                gap_y = max(second[1] - first[3], first[1] - second[3])
+                if gap_x <= 0.0:          # projections overlap vertically
+                    gap = gap_y
+                elif gap_y <= 0.0:        # projections overlap horizontally
+                    gap = gap_x
+                else:
+                    # Diagonal corner: the deck measures the overlapping
+                    # projection, not the corner distance, so take the larger
+                    # of the two separations only when they overlap elsewhere.
+                    gap = None
+                if gap is not None and gap < space - 1e-9:
+                    return (net, first, second, gap)
+    return None
+
+
 def _route_ml1(start: Point, goal: Point, net: str,
-               shapes: Sequence[Tuple[Rect, str, str]], width: float, height: float) -> List[Point]:
+               shapes: Sequence[Tuple[Rect, str, str]], width: float, height: float,
+               *, merge_targets: Sequence[Rect] = ()) -> List[Point]:
     source, target = _point_key(start), _point_key(goal)
     if source == target:
         return [start]
     lo, hi = 6, round((width - 3.0) * 2)
     by, ty = 6, round((height - 3.0) * 2)
     blocked_rows=defaultdict(list)
+    # A merge target is a conductor the caller *requires* the route to enter
+    # (the rail it ties into, the trunk it branches from).  It is a fence for
+    # every other net and for every other route, but for this one it is only a
+    # destination, so it is left to ``endpoint``/``access_path``.
+    exempt = tuple(merge_targets)
     for shape_index,(rect,owner,kind) in enumerate(shapes):
-        if owner==net and kind in {"pad","via","wire"}: continue
+        if owner==net:
+            if kind in {"pad","via","wire","soi_edge_strap"} and not any(
+                    _rects_overlap(rect, keep) for keep in exempt):
+                continue
+            if any(_rects_overlap(rect, keep) for keep in exempt):
+                continue
         margin=ML1_WIDTH/2+ML1_SPACE
         x1,y1,x2,y2=rect
         xlo=math.ceil((x1-margin)*2-1e-9)
@@ -219,10 +302,10 @@ def _route_ml1(start: Point, goal: Point, net: str,
                     (_snap(point[0]),_snap(rect[1]-margin)),
                     (_snap(rect[2]+margin),_snap(point[1])),
                     (_snap(rect[0]-margin),_snap(point[1]))]
-                return index,candidates
-        return None,[point]
-    source_pad,source_exits=endpoint(start)
-    target_pad,target_exits=endpoint(goal)
+                return frozenset({index}),candidates
+        return frozenset(),[point]
+    source_ignore,source_exits=endpoint(start)
+    target_ignore,target_exits=endpoint(goal)
     def access_path(point,exit_point,ignored):
         first,last=_point_key(point),_point_key(exit_point)
         if first[0]!=last[0] and first[1]!=last[1]: return None
@@ -242,8 +325,17 @@ def _route_ml1(start: Point, goal: Point, net: str,
         if not valid(first) or not valid(last): return None
         queue=[(0.0,0,first)]
         previous={first:None}; distance={first:0.0}; serial=0
+        visited=0
         while queue:
             _,_,current=heapq.heappop(queue)
+            visited+=1
+            _ROUTE_BUDGET["remaining"] -= 1
+            if visited>ML1_ROUTE_NODE_BUDGET or _ROUTE_BUDGET["remaining"] < 0:
+                # A wide single-row cell makes the grid search grow with cell
+                # width; deterministic budgets keep unroutable or oversized
+                # cells failing fast instead of spinning.  Cells whose routes
+                # resolve below the budgets keep byte-identical geometry.
+                raise _RouteBudgetExceeded()
             if current==last:
                 path=[]; cursor=current
                 while cursor is not None:
@@ -258,21 +350,26 @@ def _route_ml1(start: Point, goal: Point, net: str,
                 heapq.heappush(queue,(distance[nxt]+estimate,serial,nxt))
         return None
     best=None; best_length=float("inf")
-    source_ignore=frozenset(() if source_pad is None else (source_pad,))
-    target_ignore=frozenset(() if target_pad is None else (target_pad,))
-    for source_exit in source_exits:
-        source_stub=access_path(start,source_exit,source_ignore)
-        if source_stub is None: continue
-        for target_exit in target_exits:
-            target_stub=access_path(goal,target_exit,target_ignore)
-            if target_stub is None: continue
-            core=route_core(source_exit,target_exit)
-            if core is None: continue
-            path=source_stub+core[1:]+list(reversed(target_stub[:-1]))
-            length=sum(abs(a[0]-b[0])+abs(a[1]-b[1])
-                       for a,b in zip(path,path[1:]))
-            if length<best_length:
-                best,best_length=path,length
+    try:
+        for source_exit in source_exits:
+            source_stub=access_path(start,source_exit,source_ignore)
+            if source_stub is None: continue
+            for target_exit in target_exits:
+                target_stub=access_path(goal,target_exit,target_ignore)
+                if target_stub is None: continue
+                core=route_core(source_exit,target_exit)
+                if core is None: continue
+                path=source_stub+core[1:]+list(reversed(target_stub[:-1]))
+                length=sum(abs(a[0]-b[0])+abs(a[1]-b[1])
+                           for a,b in zip(path,path[1:]))
+                if length<best_length:
+                    best,best_length=path,length
+    except _RouteBudgetExceeded:
+        raise GeometryError(
+            f"ML1 route search for net {net} exceeded the routing budget "
+            f"({ML1_ROUTE_NODE_BUDGET} nodes per net, {ML1_ROUTE_CELL_NODE_BUDGET} per cell) "
+            f"in a {width:g} x {height:g} um cell; use the channel architecture or a narrower "
+            f"cell instead of an unreachable full-width search") from None
     if best is None:
         raise GeometryError(f"no legal ML1 route for net {net} between {start} and {goal}")
     return best
@@ -284,12 +381,24 @@ def _blocked_tin(point: Point, net: str,
                  allow_same_net_reuse: bool,
                  allow_gate_in_active: bool) -> bool:
     x, y = point
-    active_margin = 0.0 if allow_gate_in_active else TIN_WIDTH/2+0.5
-    in_active = any(x1-active_margin <= x <= x2+active_margin and
-                    y1-active_margin <= y <= y2+active_margin
+    # TiN merely *connected* to a gate is read by the deck as gate TiN, so a
+    # routed gate network must keep TIN.d1's 8um from the source/drain cuts.
+    # Those cuts sit 4um inside each island end, which is the binding side; the
+    # island's long sides only need the wire body off the island.  A point test
+    # without any margin let a 6um wire straddle the active edge and create a
+    # sub-10um "gate" (TIN.W1/S3/S4/m2/d1).
+    active_margin_x = TIN_WIDTH/2+4.0
+    active_margin_y = TIN_WIDTH/2+0.5
+    in_active = any(x1-active_margin_x <= x <= x2+active_margin_x and
+                    y1-active_margin_y <= y <= y2+active_margin_y
                     for x1, y1, x2, y2 in active)
+    # TiN inside the island is legal only on the net's own gate, and then only
+    # far enough inside its L-wide native gate bar that the 6um route body
+    # stays on the gate; for L=6 this reduces the allowed centerline to one
+    # track, while the minimum 8um gate bay preserves the final TIN.d1 gap.
     on_own_gate = any(owner == net and kind == "gate" and
-                      rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+                      rect[0]+TIN_WIDTH/2 <= x <= rect[2]-TIN_WIDTH/2 and
+                      rect[1] <= y <= rect[3]
                       for rect, owner, kind in shapes)
     if in_active and (not on_own_gate or not allow_gate_in_active):
         return True
@@ -302,10 +411,28 @@ def _blocked_tin(point: Point, net: str,
                 rect[0]-5.0 <= ax <= rect[2]+5.0 and
                 rect[1]-5.0 <= ay <= rect[3]+5.0
                 for ax, ay in access)
-            # Same-net wire branches merge; gate and pad spacing remain enforced.
-            if allow_same_net_reuse or endpoint_access or gate_escape:
+            if endpoint_access or gate_escape:
                 continue
-        margin = 9.5  # 3um half-width + 6um TiN spacing, with grid margin
+            # Same-net reuse merges TiN; the deck's TiN space rule is not
+            # net-aware, so two same-net polygons that only come *close* are a
+            # violation too.  Reuse therefore requires an actual merge.
+            if allow_same_net_reuse and _rects_overlap(
+                    _rect(x-TIN_WIDTH/2, y-TIN_WIDTH/2,
+                          x+TIN_WIDTH/2, y+TIN_WIDTH/2), rect):
+                continue
+        # The deck's tinA model enlarges a gate-reachable network by 2um and
+        # then asks 4um (TIN.S3), so a *connected* conductor needs 6um of raw
+        # TiN.  A landing pad is not part of the route: it only has to clear
+        # what it must physically separate from, which is a body or another
+        # pad, never a bare wire of its own net.
+        gate_connected = (_TIN_GATE_NETS is None or owner in _TIN_GATE_NETS
+                          or net in _TIN_GATE_NETS)
+        if gate_connected:
+            margin = 13.5
+        elif kind in ("pad", "via") or owner in ("pad", "via"):
+            margin = 11.5
+        else:
+            margin = 9.5
         x1, y1, x2, y2 = rect
         if x1-margin <= x <= x2+margin and y1-margin <= y <= y2+margin:
             return True
@@ -380,9 +507,246 @@ def _path_rectangles(path: Sequence[Point]) -> Iterable[Rect]:
         previous = end
     yield _wire_rect(start, previous)
 
+POWER_RAIL_HEIGHT_UM = 12.0
+# Escape tracks between the VSS rail and the NMOS island.  Routed TiN that
+# joins a gate must also keep TIN.d1/TIN.S3's 8um from the island end and from
+# the gate TiN, so the corridor is sized for two ML1 tracks plus that keepout.
+BOTTOM_RAIL_CLEARANCE_UM = 40.0
+SOI_EDGE_MIN_ACTIVE_Y_UM = max(
+    15.0, POWER_RAIL_HEIGHT_UM + ML1_SPACE + SOI_EDGE_STRAP_END_OFFSET_UM)
+SOI_EDGE_ROW_CLEARANCE_UM = (
+    2 * SOI_EDGE_STRAP_END_OFFSET_UM + ML1_SPACE)
+
+
+def _power_rail_rectangles(width: float, height: float) -> dict[str, Rect]:
+    """Return the shared full-width VSS-bottom/VDD-top row-access bands.
+
+    LibreLane's 1M profile is rails-only (`PDN_VPITCH` exceeds the die), so the
+    rail pair has to reach every instance from the cell itself.  The bands sit
+    on the row boundary, which is what makes the rails of abutted rows merge.
+    """
+    if height < 2 * POWER_RAIL_HEIGHT_UM:
+        raise GeometryError("cell height is too small for full-width power rails")
+    return {
+        "VSS": _rect(0.0, 0.0, width, POWER_RAIL_HEIGHT_UM),
+        "VDD": _rect(0.0, height - POWER_RAIL_HEIGHT_UM, width, height),
+    }
+
+
+def _add_power_rail_bands(layout, top, ml1_layer, m1_shapes,
+                          width: float, height: float) -> dict[str, Rect]:
+    """Draw same-net ML1 row rails after confirming signal-metal clearance."""
+    rails = _power_rail_rectangles(width, height)
+    for net, rail in rails.items():
+        for shape, owner, _kind in m1_shapes:
+            if owner == net:
+                continue
+            if (shape[0] <= rail[2] and shape[2] >= rail[0] and
+                    shape[1] < rail[3] + ML1_SPACE and
+                    shape[3] > rail[1] - ML1_SPACE):
+                raise GeometryError(
+                    f"{net} power rail {rail} violates ML1 spacing to net {owner} at {shape}")
+    for net, rail in rails.items():
+        _put_box(layout, top, ml1_layer, rail)
+        m1_shapes.append((rail, net, "wire"))
+    return rails
+
+
+def _first_legal_via(net, origin, m1_shapes, tin_shapes, active_regions,
+                     contacts, width, height, *, steps=120,
+                     dx_offsets=None, dy_offsets=None):
+    """Return the closest legal CNT_TIN_ML1 site to ``origin``, or ``None``.
+
+    Candidate order is by increasing offset; ``_via_site_legal`` applies the
+    active-island clearance, the cut-to-cut spacing and the conductor spacing,
+    so the search only has to walk outward.
+    """
+    if dx_offsets is None:
+        dx_offsets = [0.0, 4.0, -4.0, 8.0, -8.0, 12.0, -12.0, 16.0, -16.0,
+                      20.0, -20.0, 24.0, -24.0, 28.0, -28.0, 32.0, -32.0]
+    if dy_offsets is None:
+        dy_offsets = [0.0]
+        for step in range(1, steps + 1):
+            dy_offsets.extend((step * 0.5, -step * 0.5))
+    for dy in dy_offsets:
+        for dx in dx_offsets:
+            site = (_snap(origin[0] + dx), _snap(origin[1] + dy))
+            if _via_site_legal(site, net, m1_shapes, tin_shapes,
+                               active_regions, contacts, width, height,
+                               allow_same_net_overlap=True):
+                return site
+    return None
+
+
+def _via_pad(center: Point) -> Rect:
+    return _rect(center[0]-VIA_CONTACT/2, center[1]-VIA_CONTACT/2,
+                 center[0]+VIA_CONTACT/2, center[1]+VIA_CONTACT/2)
+
+
+def _tin_column_clear(site, goal, net, shapes, active, width, height):
+    """True when a straight vertical TiN run from ``site`` to ``goal`` is legal.
+
+    Cheap pre-test so the search commits to a riser site that the A* can leave
+    immediately, instead of paying a full grid exhaustion per candidate.
+    """
+    if abs(site[0] - goal[0]) > 1e-9:
+        return False
+    step = 0.5 if goal[1] > site[1] else -0.5
+    source, target = _point_key(site), _point_key(goal)
+    key = source
+    limit = int(abs(goal[1] - site[1]) / 0.5) + 1
+    for _ in range(limit):
+        if key == target:
+            return True
+        if key != source and _blocked_tin(_point_from_key(key), net, shapes,
+                                          active, (site, goal), True, False):
+            return False
+        key = (key[0], key[1] + (1 if step > 0 else -1))
+    return False
+
+
+def _connect_power_rails(layout, top, layers, rails, m1_shapes, tin_shapes,
+                         tin_route_shapes, contacts, terminals, active_regions,
+                         width: float, height: float, *, connected_nets=()):
+    """Tie every separate supply terminal to its shared row rail.
+
+    SOI-edge ML1 straps can separate same-row S/D pads. Do not require a
+    horizontal ML1 tree to cross those straps: give each unconnected supply
+    terminal its own rail access. Already-routed supply trees need one access.
+    VSS uses a short ML1 drop; VDD uses a TiN riser so it does not partition
+    the single ML1 signal layer. These TiN power risers remain experimental.
+    """
+    ml1_length = 0.0
+    tin_length = 0.0
+    via_count = 0
+    sources = []
+    for net, rail in rails.items():
+        points = list(dict.fromkeys(terminals.get(net, ())))
+        if not points:
+            raise GeometryError(f"{net} power rail has no device terminal to connect")
+        if net in connected_nets:
+            source = (min(points, key=lambda point: point[1]) if net == "VSS"
+                      else max(points, key=lambda point: point[1]))
+            points = [source]
+        sources.extend((net, rail, point) for point in points)
+    for net, rail, source in sources:
+        rail_center = _snap((rail[1] + rail[3]) / 2)
+        if net == "VSS":
+            # Keep the short source-column drop on ML1. The rail is this
+            # route's destination, not a foreign-net routing obstacle.
+            goal = (_snap(source[0]), rail_center)
+            path = _route_ml1(source, goal, net, m1_shapes, width, height,
+                              merge_targets=(rail,))
+            for rectangle in _path_rectangles(path):
+                _put_box(layout, top, layers[ML1], rectangle)
+                m1_shapes.append((rectangle, net, "wire"))
+            ml1_length += sum(abs(a[0] - b[0]) + abs(a[1] - b[1])
+                              for a, b in zip(path, path[1:]))
+            continue
+        # The VDD band is a full cell height above the PMOS row, so it is
+        # reached with a TiN riser: TiN crosses ML1 without a via, so the riser
+        # cannot partition the single ML1 signal layer (an ML1 riser does, and
+        # that is what made the internal nets of AOI21/OAI21/AOI22 unreachable).
+        # The riser site is chosen above the island, clear of the gate TiN and
+        # of the rail landing, with a short ML1 stub from the supply pad.
+        span = (rail[3] - rail[1]) / 2.0
+        rail_dy = [0.0]
+        for step in range(1, int(span / 0.5) + 1):
+            rail_dy.extend((step * 0.5, -step * 0.5))
+        rail_is_top = rail[1] > height / 2.0
+        floor = max(rect[3] for rect in active_regions) + VIA_CONTACT/2 + 4.1
+        dx_order = [0.0]
+        for step in range(1, 21):
+            dx_order.extend((step * 0.5, -step * 0.5))
+        committed = False
+        for dx in dx_order:
+            site_x = _snap(source[0] + dx)
+            if site_x < 3.0 + VIA_CONTACT/2 or site_x > width - 3.0 - VIA_CONTACT/2:
+                continue
+            local_tin = list(tin_shapes) + list(tin_route_shapes)
+            rail_site = _first_legal_via(
+                net, (site_x, rail_center), m1_shapes, local_tin,
+                active_regions, contacts, width, height, dy_offsets=rail_dy,
+                dx_offsets=[0.0])
+            if rail_site is None:
+                continue
+            # The riser via has to keep TIN.S4's 6um from the rail landing too,
+            # so the landing is part of the environment from here on.
+            landing = (_via_pad(rail_site), net, "via")
+            local_tin = local_tin + [landing]
+            aim = -0.5 if rail_is_top else 0.5
+            riser_y = rail_site[1]
+            for _ in range(900):
+                probe = (site_x, _snap(riser_y + aim))
+                if probe[1] <= 3.0 or probe[1] >= height - 3.0:
+                    break
+                if _blocked_tin(probe, net, local_tin, active_regions,
+                                (probe, rail_site), True, False):
+                    break
+                riser_y = _snap(riser_y + aim)
+            if rail_is_top:
+                riser_y = max(riser_y, floor)
+            riser_site = None
+            for _ in range(160):
+                candidate = (site_x, _snap(riser_y))
+                if _via_site_legal(candidate, net, m1_shapes, local_tin,
+                                   active_regions, contacts, width, height,
+                                   allow_same_net_overlap=True):
+                    riser_site = candidate
+                    break
+                riser_y = _snap(riser_y - aim * 0.5)
+                if riser_y <= 3.0 or riser_y >= height - 3.0:
+                    break
+            if riser_site is None:
+                continue
+            if not _tin_column_clear(riser_site, rail_site, net,
+                                     local_tin + [(_via_pad(riser_site),
+                                                   net, "via")],
+                                     active_regions, width, height):
+                continue
+            try:
+                stub = _route_ml1(source, riser_site, net, m1_shapes,
+                                  width, height)
+            except GeometryError:
+                continue
+            for rectangle in _path_rectangles(stub):
+                _put_box(layout, top, layers[ML1], rectangle)
+                m1_shapes.append((rectangle, net, "wire"))
+            ml1_length += sum(abs(a[0] - b[0]) + abs(a[1] - b[1])
+                              for a, b in zip(stub, stub[1:]))
+            _draw_tin_ml1_via(layout, top, layers, riser_site, net,
+                              m1_shapes, tin_shapes, contacts)
+            via_count += 1
+            path = _route_tin(riser_site, rail_site, net,
+                              list(tin_shapes) + list(tin_route_shapes),
+                              active_regions, width, height,
+                              allow_same_net_reuse=True,
+                              allow_gate_in_active=False)
+            for rectangle in _path_rectangles(path):
+                _put_box(layout, top, layers[TIN], rectangle)
+                tin_shapes.append((rectangle, net, "wire"))
+            tin_length += sum(abs(a[0] - b[0]) + abs(a[1] - b[1])
+                              for a, b in zip(path, path[1:]))
+            _draw_tin_ml1_via(layout, top, layers, rail_site, net,
+                              m1_shapes, tin_shapes, contacts)
+            via_count += 1
+            committed = True
+            break
+        if not committed:
+            goal = (_snap(source[0]), rail_center)
+            path = _route_ml1(source, goal, net, m1_shapes, width, height,
+                              merge_targets=(rail,))
+            for rectangle in _path_rectangles(path):
+                _put_box(layout, top, layers[ML1], rectangle)
+                m1_shapes.append((rectangle, net, "wire"))
+            ml1_length += sum(abs(a[0] - b[0]) + abs(a[1] - b[1])
+                              for a, b in zip(path, path[1:]))
+    return ml1_length, tin_length, via_count
+
+
 def _draw_island(layout, top, layers, devices, net_walk, x_start, y_start,
-                 label_points, gate_contact_offset):
-    """Draw one legal continuous DIFF row using native PCell gate/contact geometry."""
+                 label_points):
+    """Draw one legal DIFF row with dual-ended, off-SOI gate protection."""
     if not devices or len(net_walk) != len(devices) + 1:
         raise GeometryError("island path has inconsistent transistor and diffusion-net counts")
     polarity = devices[0]["polarity"]
@@ -393,8 +757,8 @@ def _draw_island(layout, top, layers, devices, net_walk, x_start, y_start,
     if len(lengths) != 1:
         raise GeometryError("mixed channel lengths in one active Euler row are unsupported")
     length = lengths.pop()
-    gate_bay = max(4.0, (22.0 - length) / 2.0)  # native source/drain gate-bay contract
-    pitch = CONTACT + length + 2 * gate_bay
+    gate_bay = _gate_bay(length)
+    pitch = _gate_pitch(length)
     total_x = (len(devices) + 1) * CONTACT + len(devices) * (length + 2 * gate_bay)
     x0, y0 = _snap(x_start), _snap(y_start)
     active = _rect(x0, y0, x0 + total_x, y0 + w)
@@ -418,41 +782,354 @@ def _draw_island(layout, top, layers, devices, net_walk, x_start, y_start,
         contacts.append({"kind": "diffusion", "net": net, "cut_um": list(cut), "landing_um": list(pad)})
         pads.append((pad, net, "pad"))
         diffusion_points.append((net, center))
+
     gates = []
+    edge_protection = []
     for index, device in enumerate(devices):
         gx = _snap(x0 + CONTACT + gate_bay + index*pitch)
         channel = _rect(gx, y0, gx + length, y0 + w)
-        gate_y = _snap(y0+w+gate_contact_offset)
-        gate_top = max(y0+w+6, gate_y-CONTACT/2+2.5)
-        gate = _rect(gx-GATE_OVERLAP, y0-6, gx+length+GATE_OVERLAP, gate_top)
+        upper_y = _snap(y0 + w + SOI_EDGE_CONTACT_OFFSET_UM)
+        lower_y = _snap(y0 - SOI_EDGE_CONTACT_OFFSET_UM)
+        gate_center = (_snap(gx + length/2), upper_y)
+        gate_top = max(y0+w+6, upper_y-GATE_CONTACT/2+2.5)
+        gate = _rect(gx, y0-6, gx+length, gate_top)
         tin_shapes.append((gate, device["g"], "gate"))
-
         _put_box(layout, top, layers[TIN], gate)
         if polarity == "n":
             _put_box(layout, top, layers[NWL], _rect(channel[0],channel[1],channel[2],channel[3])) if device.get("pwell") else None
-        gate_center = (_snap(gx + length/2), gate_y)
-        tin_landing = _rect(gate_center[0]-GATE_CONTACT/2, gate_center[1]-GATE_CONTACT/2,
-                            gate_center[0]+GATE_CONTACT/2, gate_center[1]+GATE_CONTACT/2)
-        cut = _rect(gate_center[0]-CUT/2, gate_center[1]-CUT/2,
-                    gate_center[0]+CUT/2, gate_center[1]+CUT/2)
-        _put_box(layout, top, layers[TIN], tin_landing)
-        _put_box(layout, top, layers[CNT], cut)
-        _put_box(layout, top, layers[ML1], tin_landing)
-        tin_shapes.append((tin_landing, device["g"], "pad"))
 
-        contacts.append({"kind": "gate", "net": device["g"], "cut_um": list(cut), "landing_um": list(tin_landing)})
-        pads.append((tin_landing, device["g"], "pad"))
+        edge_contacts = []
+        for edge, center in (("lower", (_snap(gate_center[0]), lower_y)),
+                             ("upper", gate_center)):
+            tin_landing = _rect(
+                center[0]-GATE_CONTACT/2, center[1]-GATE_CONTACT/2,
+                center[0]+GATE_CONTACT/2, center[1]+GATE_CONTACT/2)
+            cut = _rect(center[0]-CUT/2, center[1]-CUT/2,
+                        center[0]+CUT/2, center[1]+CUT/2)
+            _put_box(layout, top, layers[TIN], tin_landing)
+            _put_box(layout, top, layers[CNT], cut)
+            _put_box(layout, top, layers[ML1], tin_landing)
+            tin_shapes.append((tin_landing, device["g"], "pad"))
+            pads.append((tin_landing, device["g"], "pad"))
+            contact = {"kind": "soi_edge_protection", "net": device["g"],
+                       "edge": edge, "cut_um": list(cut),
+                       "landing_um": list(tin_landing),
+                       "conductor_pair": ["TiN", "ML1"],
+                       "off_diffusion": True}
+            contacts.append(contact)
+            edge_contacts.append({"edge": edge, "center_um": list(center),
+                                  "cut_um": list(cut),
+                                  "landing_um": list(tin_landing)})
+
+        strap = _rect(gx-SOI_EDGE_STRAP_DRAW_MARGIN_UM,
+                      lower_y-GATE_CONTACT/2,
+                      gx+length+SOI_EDGE_STRAP_DRAW_MARGIN_UM,
+                      upper_y+GATE_CONTACT/2)
+        _put_box(layout, top, layers[ML1], strap)
+        pads.append((strap, device["g"], "soi_edge_strap"))
+        protection = {"device": device["name"], "net": device["g"],
+                      "gate_bbox_um": list(channel),
+                      "tin_crossing_um": list(channel),
+                      "strap_um": list(strap), "contacts": edge_contacts,
+                      "single_edge_only": True}
+        edge_protection.append(protection)
+        tin_bbox = _rect(min(gate[0], gate_center[0]-GATE_CONTACT/2),
+                         lower_y-GATE_CONTACT/2,
+                         max(gate[2], gate_center[0]+GATE_CONTACT/2),
+                         upper_y+GATE_CONTACT/2)
         gates.append({"device": device, "gate_center_um": list(gate_center),
-                      "gate_bbox_um": list(channel), "tin_bbox_um": list(gate)})
+                      "gate_bbox_um": list(channel), "tin_bbox_um": list(tin_bbox),
+                      "soi_edge_protection": protection})
         label_points[device["g"]].append(gate_center)
     return {"bbox_um": list(active), "active_bbox_um": active,
             "diffusion_points": diffusion_points,
             "gate_points": [(device["g"], tuple(gate["gate_center_um"]))
                             for device, gate in zip(devices, gates)],
             "pads": pads, "contacts": contacts, "gates": gates,
+            "edge_protection": edge_protection,
             "tin_shapes": tin_shapes,
             "tin_length_um": sum(max(r[2]-r[0],r[3]-r[1]) for r in
                                   [tuple(g["tin_bbox_um"]) for g in gates])}
+
+
+def _physical_region(layout, top, layer_number: int, datatype: int = 0):
+    index = layout.find_layer(db.LayerInfo(layer_number, datatype))
+    return db.Region() if index is None else db.Region(top.begin_shapes_rec(index)).merged()
+
+
+def _region_components(region):
+    return [db.Region(polygon) for polygon in region.merged().each()]
+
+
+def soi_edge_protection(layout, top, layer_mode: str = "design") -> dict[str, Any]:
+    """Check every final-mask TiN/SOI crossing and verify MOS bypasses.
+
+    Design geometry is expanded by fab-prep's gate TiN bias before applying the
+    experimental margin. Fab geometry is already biased and gets only that
+    margin. Only TiN components with positive-area material both inside and
+    outside DIFF create a crossing obligation.
+    """
+    layer_maps = {
+        "design": {
+            "diff": DIFF, "tin": TIN, "cnt": CNT, "ml1": ML1,
+            "parea": PAREA, "narea": NAREA,
+        },
+        "fab": {
+            "diff": 4, "tin": 5, "cnt": 6, "ml1": 7,
+            "parea": 2, "narea": 3,
+        },
+    }
+    if layer_mode not in layer_maps:
+        raise ValueError("layer_mode must be 'design' or 'fab'")
+    if layout.dbu <= 0:
+        raise ValueError("layout DBU must be positive")
+    layers = layer_maps[layer_mode]
+    dbu = float(layout.dbu)
+    diff = _physical_region(layout, top, layers["diff"])
+    tin = _physical_region(layout, top, layers["tin"])
+    cnt = _physical_region(layout, top, layers["cnt"])
+    ml1 = _physical_region(layout, top, layers["ml1"])
+    if diff.is_empty() or tin.is_empty():
+        raise ValueError("SOI-edge protection requires actual DIFF and TiN geometry")
+
+    if layer_mode == "design":
+        cap = _physical_region(layout, top, CAP)
+        tinblk = _physical_region(layout, top, TIN, 1)
+        prep_tin_gate = tin.interacting(diff) - (
+            tin & cap.sized(round(4.0 / dbu))
+        )
+        prep_bounds = db.Region()
+        for polygon in (diff + prep_tin_gate).merged().each():
+            prep_bounds.insert(polygon.bbox())
+        biased_gate = (
+            prep_tin_gate.sized(round(SOI_EDGE_FAB_TIN_BIAS_UM / dbu))
+            & prep_bounds
+        )
+        final_tin = (tin + biased_gate + tinblk).merged()
+        predicted_bias_ticks = round(SOI_EDGE_FAB_TIN_BIAS_UM / dbu)
+    else:
+        final_tin = tin
+        predicted_bias_ticks = 0
+
+    experimental_ticks = round(SOI_EDGE_EXPERIMENTAL_MARGIN_UM / dbu)
+    coverage_ticks = predicted_bias_ticks + experimental_ticks
+    band_ticks = round(SOI_EDGE_BAND_UM / dbu)
+    # Three arguments select (dx, dy, mode), not the scalar (distance, mode) overload.
+    topology_eps_ticks = max(1, round(0.001 / dbu))
+    horizontal_boundary_band = (
+        diff.sized(0, topology_eps_ticks, 2) -
+        diff.sized(0, -topology_eps_ticks, 2)
+    )
+    vertical_boundary_band = (
+        diff.sized(topology_eps_ticks, 0, 2) -
+        diff.sized(-topology_eps_ticks, 0, 2)
+    )
+    tin_inside_diff = final_tin & diff
+    tin_outside_diff = final_tin - diff
+    horizontal_local_overlap = (
+        tin_inside_diff.sized(0, topology_eps_ticks, 2) &
+        tin_outside_diff.sized(0, topology_eps_ticks, 2)
+    )
+    vertical_local_overlap = (
+        tin_inside_diff.sized(topology_eps_ticks, 0, 2) &
+        tin_outside_diff.sized(topology_eps_ticks, 0, 2)
+    )
+    normal_reach_ticks = (
+        band_ticks + experimental_ticks - topology_eps_ticks
+    )
+    tin_components = _region_components(final_tin)
+    crossing_targets = []
+    crossing_count = 0
+    for component_id, component in enumerate(tin_components):
+        if (component & diff).is_empty() or (component - diff).is_empty():
+            continue
+        horizontal_seed = (
+            component & horizontal_boundary_band & horizontal_local_overlap
+        ).merged()
+        vertical_seed = (
+            component & vertical_boundary_band & vertical_local_overlap
+        ).merged()
+        crossing_count += (
+            len(_region_components(horizontal_seed)) +
+            len(_region_components(vertical_seed))
+        )
+        required = (
+            horizontal_seed.sized(experimental_ticks, normal_reach_ticks, 2) +
+            vertical_seed.sized(normal_reach_ticks, experimental_ticks, 2)
+        ).merged()
+        if required.is_empty():
+            continue
+        crossing_targets.append((component_id, required))
+        if not (required - ml1).is_empty():
+            raise ValueError(
+                f"TiN crossing {component_id} lacks the required ML1 SOI-edge enclosure")
+
+    parea = _physical_region(layout, top, layers["parea"])
+    narea = _physical_region(layout, top, layers["narea"])
+    doped_active = parea + narea
+    gate_candidates = _region_components(final_tin & diff)
+    gates = [
+        crossing for crossing in gate_candidates
+        if not (crossing & doped_active).is_empty()
+        and any(not (crossing & target).is_empty()
+                for _component_id, target in crossing_targets)
+    ]
+
+    ml1_components = _region_components(ml1)
+    cuts = []
+    cut_ticks = round(CUT / dbu)
+    enclosure_ticks = round((GATE_CONTACT - CUT) / (2 * dbu))
+    edge_offset_ticks = round(SOI_EDGE_CONTACT_OFFSET_UM / dbu)
+    for polygon in cnt.merged().each():
+        box = polygon.bbox()
+        if (box.width() != cut_ticks or box.height() != cut_ticks or
+                polygon.area() != cut_ticks * cut_ticks):
+            continue
+        cut = db.Region(polygon)
+        if not (cut & diff).is_empty():
+            continue
+        cuts.append((box, cut))
+
+    results = []
+    for gate_index, crossing in enumerate(gates):
+        crossing_box = crossing.bbox()
+        crossing_x = (crossing_box.left + crossing_box.right) / 2
+        lower_y = crossing_box.bottom - edge_offset_ticks
+        upper_y = crossing_box.top + edge_offset_ticks
+        lower_cuts = []
+        upper_cuts = []
+        for box, cut in cuts:
+            center_x = (box.left + box.right) / 2
+            center_y = (box.bottom + box.top) / 2
+            if abs(center_x - crossing_x) > 1:
+                continue
+            if abs(center_y - lower_y) <= 1:
+                lower_cuts.append((box, cut))
+            if abs(center_y - upper_y) <= 1:
+                upper_cuts.append((box, cut))
+        if len(lower_cuts) != 1 or len(upper_cuts) != 1:
+            raise ValueError(
+                f"gate crossing {gate_index} needs one off-DIFF CNT endpoint on each opposite edge")
+        gate_tin_ids = [
+            index for index, component in enumerate(tin_components)
+            if not (component & crossing).is_empty()
+        ]
+        if len(gate_tin_ids) != 1:
+            raise ValueError(f"gate crossing {gate_index} is not one continuous TiN component")
+        endpoint_ids = []
+        endpoint_data = []
+        for edge, (box, cut) in (("lower", lower_cuts[0]),
+                                 ("upper", upper_cuts[0])):
+            landing = cut.sized(enclosure_ticks)
+            contact_tin_ids = [
+                index for index, component in enumerate(tin_components)
+                if (landing - component).is_empty()
+            ]
+            contact_ml1_ids = [
+                index for index, component in enumerate(ml1_components)
+                if (landing - component).is_empty()
+            ]
+            if contact_tin_ids != gate_tin_ids:
+                raise ValueError(
+                    f"gate crossing {gate_index} {edge} CNT is not joined to its TiN gate")
+            if len(contact_ml1_ids) != 1:
+                raise ValueError(
+                    f"gate crossing {gate_index} {edge} CNT lacks a real ML1 landing")
+            endpoint_ids.append((gate_tin_ids[0], contact_ml1_ids[0]))
+            endpoint_data.append({
+                "edge": edge,
+                "cut_um": [value * dbu for value in
+                           (box.left, box.bottom, box.right, box.top)],
+                "landing_um": [value * dbu for value in
+                               (box.left-enclosure_ticks, box.bottom-enclosure_ticks,
+                                box.right+enclosure_ticks, box.top+enclosure_ticks)],
+                "off_diffusion": True,
+                "tin_component": gate_tin_ids[0],
+                "ml1_component": contact_ml1_ids[0],
+            })
+        if endpoint_ids[0][0] != endpoint_ids[1][0]:
+            raise ValueError(f"gate crossing {gate_index} endpoints do not share TiN")
+        if endpoint_ids[0][1] != endpoint_ids[1][1]:
+            raise ValueError(f"gate crossing {gate_index} endpoints do not share one continuous ML1 strap")
+
+        required_ml1 = db.Region()
+        for component_id, target in crossing_targets:
+            if component_id in gate_tin_ids:
+                required_ml1 += target
+        required_ml1 = required_ml1.merged()
+
+        gate_tin = tin_components[endpoint_ids[0][0]]
+        faults = []
+        for broken_edge, survivor in (("lower", "upper"), ("upper", "lower")):
+            if broken_edge == "lower":
+                cut_y1, cut_y2 = crossing_box.bottom-1, crossing_box.bottom+1
+                survivor_index = 1
+            else:
+                cut_y1, cut_y2 = crossing_box.top-1, crossing_box.top+1
+                survivor_index = 0
+            break_box = db.Box(crossing_box.left-1, cut_y1,
+                               crossing_box.right+1, cut_y2)
+            break_region = db.Region(break_box)
+            broken_network = gate_tin - break_region
+            surviving_active = crossing - break_region
+            survivor_cut = (lower_cuts[0][1] if survivor == "lower"
+                            else upper_cuts[0][1])
+            survived = any(
+                not (component & surviving_active).is_empty() and
+                not (component & survivor_cut).is_empty()
+                for component in _region_components(broken_network))
+            if not survived:
+                raise ValueError(
+                    f"gate crossing {gate_index} loses drive after a {broken_edge}-edge TiN break")
+            faults.append({"broken_edge": broken_edge,
+                           "surviving_contact_edge": survivor,
+                           "tin_continuity_passed": True,
+                           "ml1_component": endpoint_ids[survivor_index][1]})
+        bbox = [value * dbu for value in
+                (crossing_box.left, crossing_box.bottom,
+                 crossing_box.right, crossing_box.top)]
+        covered_bbox = [value * dbu for value in
+                        (required_ml1.bbox().left, required_ml1.bbox().bottom,
+                         required_ml1.bbox().right, required_ml1.bbox().top)]
+        results.append({"gate_index": gate_index, "tin_crossing_um": bbox,
+                        "required_ml1_bbox_um": covered_bbox,
+                        "contacts": endpoint_data,
+                        "single_edge_faults": faults})
+    return {
+        "passed": True,
+        "layer_mode": layer_mode,
+        "experimental_margin_um": SOI_EDGE_EXPERIMENTAL_MARGIN_UM,
+        "fab_prep_tin_bias_um": SOI_EDGE_FAB_TIN_BIAS_UM,
+        "design_side_ml1_expansion_um": SOI_EDGE_STRAP_DRAW_MARGIN_UM,
+        "applied_ml1_expansion_um": coverage_ticks * dbu,
+        "scope": "single_edge_only",
+        "crossing_count": crossing_count,
+        "gate_count": len(results),
+        "protected_gate_count": len(results),
+        "dual_endpoint_gate_count": len(results),
+        "single_edge_breaks_checked": 2 * len(results),
+        "single_edge_breaks_passed": True,
+        "devices": results,
+    }
+
+
+def _ml1_area_metrics(layout, top, ml1_layer: int, boundary: Sequence[float]):
+    dbu = float(layout.dbu)
+    ml1 = db.Region(top.begin_shapes_rec(ml1_layer)).merged()
+    cell = db.Region(db.Box(*(round(value / dbu) for value in boundary)))
+    expansion = round((ML1_WIDTH/2 + ML1_SPACE) / dbu)
+    blocked = (ml1.sized(expansion) & cell).merged()
+    free = cell - blocked
+    return {
+        "ml1_occupancy_um2": ml1.area() * dbu * dbu,
+        "routing_blockage_um2": blocked.area() * dbu * dbu,
+        "routing_capacity_um2": free.area() * dbu * dbu,
+        "routing_blockage_expansion_um": ML1_WIDTH/2 + ML1_SPACE,
+        "routing_capacity_scope": (
+            "area proxy: actual ML1 union expanded by half a 6um route width plus "
+            "4um ML1 spacing and clipped to the cell boundary; not routable tracks "
+            "or qualified capacity"),
+    }
 
 
 def _rects_overlap(a: Rect, b: Rect) -> bool:
@@ -583,8 +1260,8 @@ def _euler_islands(devices: Sequence[Mapping[str, Any]], reverse: bool = False):
         position=15.0
         for group,nodes in placement:
             length=group[0]["l_um"]
-            bay=max(4.0,(22.0-length)/2.0)
-            pitch=CONTACT+length+2*bay
+            bay = _gate_bay(length)
+            pitch = _gate_pitch(length)
             for index,net in enumerate(nodes):
                 net_x[net].append(_snap(position+CONTACT/2+index*pitch))
             for index,device in enumerate(group):
@@ -653,8 +1330,8 @@ def _island_wire_cost(placements):
         position=15.0
         for group,nodes in placement:
             length=group[0]["l_um"]
-            bay=max(4.0,(22.0-length)/2.0)
-            pitch=CONTACT+length+2*bay
+            bay = _gate_bay(length)
+            pitch = _gate_pitch(length)
             for index,net in enumerate(nodes):
                 net_x[net].append(_snap(position+CONTACT/2+index*pitch))
             for index,device in enumerate(group):
@@ -678,6 +1355,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         raise GeometryError("cell specification must be a mapping")
     if architecture not in {"compact_rows", "channel"}:
         raise GeometryError("architecture must be compact_rows or channel")
+    _ROUTE_BUDGET["remaining"] = ML1_ROUTE_CELL_NODE_BUDGET
     requested = _finite(height_um, "requested cell height")
     extension = _finite(route_channel_um, "route-channel width")
     if requested <= 0:
@@ -724,7 +1402,8 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     for polarity in ("p", "n"):
         row_devices = [d for d in devices if d["polarity"] == polarity]
         if not row_devices:
-            raise GeometryError(f"{spec.get('name')}: complementary {polarity} row is missing")
+            rows[polarity] = [([], None)]
+            continue
         options = _row_options(row_devices)
         if options:
             rows[polarity] = options
@@ -747,20 +1426,21 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                                p_order, p_walk, n_order, n_walk, columns))
     _, _, _, p_order, p_walk, n_order, n_walk, columns = max(candidates, key=lambda x:(x[0],x[1],x[2]))
 
-    nw = max(d["w_um"] for d in n_order)
-    pw = max(d["w_um"] for d in p_order)
+    nw = max((d["w_um"] for d in n_order), default=0.0)
+    pw = max((d["w_um"] for d in p_order), default=0.0)
     is_sequential = bool(spec.get("sequential"))
-    n_y = 15.0
-    # Sequential cells reserve a wider row gap for feedback-net escape routing.
-    n_gate_contact_offset = (N_GATE_CONTACT_OFFSET if is_sequential
-                             else COMPACT_GATE_CONTACT_OFFSET)
-    p_gate_contact_offset = (P_GATE_CONTACT_OFFSET if is_sequential
-                             else COMPACT_GATE_CONTACT_OFFSET)
-    row_gap = 44.5 if is_sequential else 12.5
+    # Both outer gate straps remain clear of the row rails and each other.
+    n_y = max(15.0 + BOTTOM_RAIL_CLEARANCE_UM, SOI_EDGE_MIN_ACTIVE_Y_UM)
     row_floor = 86.5 if is_sequential else 56.0
-    p_y = _snap(n_y + max(row_floor, nw + n_gate_contact_offset +
-                           GATE_CONTACT/2 + row_gap))
-    top_needed = p_y + pw + p_gate_contact_offset + GATE_CONTACT/2 + 4.0
+    p_y = _snap(n_y + max(row_floor, nw + SOI_EDGE_ROW_CLEARANCE_UM))
+    if p_order and n_order:
+        top_needed = p_y + pw + SOI_EDGE_STRAP_END_OFFSET_UM + \
+            POWER_RAIL_HEIGHT_UM + ML1_SPACE
+    else:
+        row_y = n_y if n_order else p_y
+        row_width = nw if n_order else pw
+        top_needed = row_y + row_width + SOI_EDGE_STRAP_END_OFFSET_UM + \
+            POWER_RAIL_HEIGHT_UM + ML1_SPACE
     minimum_height = math.ceil(top_needed/10.0)*10.0
     actual_height = _snap(requested)
     if actual_height + 1e-9 < minimum_height:
@@ -793,16 +1473,13 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     m1_shapes: List[Tuple[Rect,str,str]]=[]
     tin_shapes: List[Tuple[Rect,str,str]]=[]
     active_regions: List[Rect]=[]
-    contact_records=[]; device_records=[]; row_records=[]
+    contact_records=[]; device_records=[]; row_records=[]; protection_records=[]
     total_tin=0.0
     # Preserve a legal left-edge escape lane for sequential CNT_TIN bridges.
     row_x_origin=60.0 if is_sequential else 15.0
-    row_contact_span=CONTACT_SPAN
 
     def draw_row(order,walk,polarity,y,island_layout=None):
         nonlocal total_tin
-        gate_contact_offset = (p_gate_contact_offset if polarity == "p"
-                               else n_gate_contact_offset)
         island_origins={}
         if walk is None:
             runs=[]
@@ -810,7 +1487,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
             for island_index,(group,path_nodes) in enumerate(
                     _euler_islands(order) if island_layout is None else island_layout):
                 length=group[0]["l_um"]
-                gate_bay=max(4.0,(22.0-length)/2.0)
+                gate_bay = _gate_bay(length)
                 active_width=(len(group)+1)*CONTACT+len(group)*(length+2*gate_bay)
                 island_origins[island_index]=_snap(position)
                 runs.append((island_index,island_index+1,group,path_nodes,len(group)>1))
@@ -831,16 +1508,13 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         for first_slot,last_slot,group,path_nodes,shared in runs:
             if walk is None:
                 x_start=island_origins[first_slot]
-                first_device=group[0]
-                bay=max(4.0,(22.0-first_device["l_um"])/2.0)
-                x_gate=x_start+CONTACT+bay+first_device["l_um"]/2
             else:
-                x_gate=row_x_origin+24+row_contact_span*first_slot
-                x_start=x_gate-24
+                x_start=_snap(
+                    row_x_origin + _gate_pitch(group[0]["l_um"]) * first_slot)
             row_right=x_start
             if shared or walk is None:
                 island=_draw_island(layout,top,layers,group,path_nodes,x_start,y,
-                                    labels,gate_contact_offset)
+                                    labels)
                 for net,point in island["diffusion_points"]:
                     terminals[net].append(point)
                     diff_terminals[net].append(point)
@@ -851,6 +1525,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                 tin_shapes.extend(island["tin_shapes"])
                 active_regions.append(island["active_bbox_um"])
                 contact_records.extend(island["contacts"])
+                protection_records.extend(island["edge_protection"])
                 total_tin+=island["tin_length_um"]
                 row_right=island["bbox_um"][2]
                 row_bbox=[x_start,y-2,row_right,y+max(d["w_um"] for d in group)+2]
@@ -859,13 +1534,13 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                         "d":device["d"],"g":device["g"],"s":device["s"],
                         "w_um":device["w_um"],"l_um":device["l_um"],
                         "active_row":"shared_euler_island" if len(group)>1 else "isolated_euler_island",
-                        "gate_order_index":index,"bbox_um":row_bbox})
+                        "gate_order_index":index,"bbox_um":row_bbox,
+                        "soi_edge_protection":island["edge_protection"][index]})
             else:
                 for index,device in enumerate(group):
-                    start_x=x_gate+row_contact_span*index-24
+                    start_x=_snap(x_start+_gate_pitch(device["l_um"])*index)
                     island=_draw_island(layout,top,layers,[dict(device)],
-                                        [device["s"],device["d"]],start_x,y,labels,
-                                        gate_contact_offset)
+                                        [device["s"],device["d"]],start_x,y,labels)
                     for net,point in island["diffusion_points"]:
                         terminals[net].append(point)
                         diff_terminals[net].append(point)
@@ -876,13 +1551,15 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                     tin_shapes.extend(island["tin_shapes"])
                     active_regions.append(island["active_bbox_um"])
                     contact_records.extend(island["contacts"])
+                    protection_records.extend(island["edge_protection"])
                     total_tin+=island["tin_length_um"]
                     row_right=max(row_right,island["bbox_um"][2])
                     device_records.append({"name":device["name"],"polarity":polarity,
                         "d":device["d"],"g":device["g"],"s":device["s"],
                         "w_um":device["w_um"],"l_um":device["l_um"],
                         "active_row":"isolated_non_euler_island",
-                        "bbox_um":[start_x,y-2,island["bbox_um"][2],y+device["w_um"]+2]})
+                        "bbox_um":[start_x,y-2,island["bbox_um"][2],y+device["w_um"]+2],
+                        "soi_edge_protection":island["edge_protection"][0]})
                 row_bbox=[x_start,y-2,row_right,y+max(d["w_um"] for d in group)+2]
             row_records.append({"polarity":polarity,"bbox_um":row_bbox,
                                 "gate_order":[d["g"] for d in group],
@@ -890,9 +1567,16 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
 
     draw_row(p_order,p_walk,"p",p_y,p_islands)
     draw_row(n_order,n_walk,"n",n_y,n_islands)
+    global _TIN_GATE_NETS
+    _TIN_GATE_NETS = frozenset(gate_terminals)
 
     cell_width=(max(r["bbox_um"][2] for r in row_records)+15.0+extension+
                 (3.0 if is_sequential else 0.0))
+    # The rail bands are real ML1 conductors: they must exist before the signal
+    # router plans, so signal routing keeps its 4um spacing from them, but they
+    # are tied to the supply pads only after every signal net is committed.
+    power_rails = _add_power_rail_bands(
+        layout, top, layers[ML1], m1_shapes, cell_width, actual_height)
     if mirror:
         def mirrored_point(point): return (_snap(cell_width-point[0]),point[1])
         def mirrored_rect(rect):
@@ -914,6 +1598,13 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         for record in contact_records:
             for key in ("cut_um","landing_um"):
                 record[key]=mirrored_rect(record[key])
+        for protection in protection_records:
+            for key in ("gate_bbox_um", "tin_crossing_um", "strap_um"):
+                protection[key] = list(mirrored_rect(protection[key]))
+            for contact in protection["contacts"]:
+                contact["center_um"] = list(mirrored_point(contact["center_um"]))
+                for key in ("cut_um", "landing_um"):
+                    contact[key] = list(mirrored_rect(contact[key]))
         device_records=[{**d,"bbox_um":mirrored_rect(d["bbox_um"])} for d in device_records]
         row_records=[{**r,"bbox_um":mirrored_rect(r["bbox_um"])} for r in row_records]
 
@@ -1118,30 +1809,49 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     def plan_ml1_tree(net,points,obstacles):
         unique=list(dict.fromkeys(points))
         if len(unique)<2: return []
-        connected=[unique[0]]
-        remaining=unique[1:]
-        paths=[]
-        while remaining:
-            candidates=sorted(
-                ((abs(source[0]-target[0])+abs(source[1]-target[1]),
-                  source,target)
-                 for source in connected for target in remaining),
-                key=lambda candidate:candidate)
-            best=None
-            for _distance,source,target in candidates:
-                try:
-                    path=_route_ml1(source,target,net,obstacles,
-                                    cell_width,actual_height)
-                except GeometryError:
-                    continue
-                best=(source,target,path)
-                break
-            if best is None: return None
-            source,target,path=best
-            paths.append(path)
-            connected.append(target)
-            remaining.remove(target)
-        return paths
+        # Grow the tree from every possible root and keep the first spanning
+        # tree whose ML1 bodies all merge (the deck's space rule is not
+        # net-aware, so branches that only come close are still markers).
+        best=None
+        for seed in unique:
+            connected=[seed]
+            remaining=[point for point in unique if point!=seed]
+            paths=[]
+            while remaining:
+                candidates=sorted(
+                    ((abs(source[0]-target[0])+abs(source[1]-target[1]),
+                      source,target)
+                     for source in connected for target in remaining),
+                    key=lambda candidate:candidate)
+                chosen=None
+                for _distance,source,target in candidates:
+                    try:
+                        path=_route_ml1(source,target,net,obstacles,
+                                        cell_width,actual_height)
+                    except GeometryError:
+                        continue
+                    chosen=(source,target,path)
+                    break
+                if chosen is None:
+                    paths=None
+                    break
+                source,target,path=chosen
+                paths.append(path)
+                connected.append(target)
+                remaining.remove(target)
+            if paths is None:
+                continue
+            probe=list(obstacles)
+            for path in paths:
+                probe.extend((rectangle,net,"wire")
+                             for rectangle in _path_rectangles(path))
+            gap=_unmerged_same_net_gap([shape for shape in probe
+                                        if shape[1]==net])
+            if gap is None:
+                return paths
+            if best is None:
+                best=paths
+        return best
 
     def commit_ml1_tree(net,paths):
         nonlocal ml1_route_length
@@ -1286,10 +1996,16 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         for _cost,layout in sorted(top_layouts)[:32]:
             if commit_candidates(layout): return True
         def nearby_sites(origin):
+            offsets = {18.0,20.0,22.0,24.0,26.0,28.0,30.0,32.0,34.0}
+            for rect in active_regions:
+                if (rect[0] <= origin[0] <= rect[2] and
+                        rect[1] <= origin[1] <= rect[3]):
+                    offsets.add(_snap((rect[3]-rect[1])/2 +
+                        SOI_EDGE_STRAP_END_OFFSET_UM + TIN_SPACE +
+                        VIA_CONTACT/2 + 0.5))
+            offsets.update(-offset for offset in tuple(offsets))
             candidates={(_snap(origin[0]+dx),_snap(origin[1]+dy))
-                        for dy in (18.0,20.0,22.0,24.0,26.0,28.0,
-                                   30.0,32.0,34.0,-18.0,-20.0,-22.0,
-                                   -24.0,-26.0,-28.0,-30.0,-32.0,-34.0)
+                        for dy in sorted(offsets)
                         for dx in range(-16,17,2)}
             legal=[point for point in candidates
                    if _via_site_legal(point,net,m1_shapes,
@@ -1337,6 +2053,13 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         bridgeable_nets.update(
             {spec.get("sequential",{}).get("data")}&set(gate_terminals))
     outputs=set(spec.get("outputs", []))
+    # Internal transistor nodes (no gate terminal, not a pin and not an output)
+    # ride TiN: ML1 is reserved for the supplies, outputs and external signals,
+    # so ML1 only carries the short access stub to each CNT_TIN_ML1 landing.
+    bridgeable_nets.update(
+        net for net in diff_terminals
+        if net not in gate_terminals and net not in pins_set
+        and net not in outputs and net not in {"VDD", "VSS"})
     data_net=(spec.get("sequential",{}).get("data")
               if is_sequential else None)
     if (is_sequential and data_net in diff_terminals and
@@ -1720,6 +2443,28 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
             bridge_nets.add(net)
             gate_ml1.discard(net)
 
+    rail_ml1_length, rail_tin_length, rail_via_count = _connect_power_rails(
+        layout, top, layers, power_rails, m1_shapes, tin_shapes,
+        tin_route_shapes, contact_records, terminals, active_regions,
+        cell_width, actual_height,
+        connected_nets=bridge_nets | pre_routed_nets)
+    pre_routed_nets.update(power_rails)
+    metal_via_count += rail_via_count
+    ml1_route_length += rail_ml1_length
+    tin_route_length += rail_tin_length
+    # A protected gate can isolate a two-pad output from an ML1-only tree.
+    # Commit the native ML1 tree before the generic route-order sweep; otherwise
+    # a later net can consume the only corridor and create a false output failure.
+    for net in sorted(outputs - bridge_nets - pre_routed_nets):
+        points = list(dict.fromkeys(diff_terminals.get(net, ())))
+        if len(points) < 2 or net in gate_terminals:
+            continue
+        planned_output = plan_ml1_tree(net, points, m1_shapes)
+        if planned_output is not None:
+            commit_ml1_tree(net, planned_output)
+            pre_routed_nets.add(net)
+        elif len(points) == 2 and commit_off_active_tin_tree(net, points):
+            pre_routed_nets.add(net)
     # Diffusion-only nets use ML1; mixed gate/diffusion nets use validated
     # off-active CNT_TIN bridges when a complete bridge can be routed.
     route_points={net:list(diffusion_access_points.get(net,points))
@@ -1767,14 +2512,23 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         if key not in seen_orders:
             seen_orders.add(key)
             orderings.append(order)
-    for first in signal_items:
-        for second in signal_items:
+    # Promote pairs of signal nets to the front of the order, which is what
+    # actually rescues a congested net.  The full N^2 sweep is only affordable on
+    # a small network: a 40-device cell would otherwise queue hundreds of grid
+    # searches before the first ordering is even tried, so the promotion list is
+    # capped and the remaining heuristics still run after it.
+    promote = signal_items if len(signal_items) <= 8 else signal_items[:8]
+    for first in promote:
+        for second in promote:
             if first[0]==second[0]: continue
             add_route_order([first,second]+[item for item in priority_order
                                             if item[0] not in {first[0],second[0]}])
     planned_routes=None
     last_route_error=None
     selected_route_order=None
+    same_net_gap=None
+    fallback_routes=None
+    fallback_order=None
     for order_index,route_order in enumerate(orderings):
         for reverse_roots in (False,True):
             obstacles=list(m1_shapes)
@@ -1790,15 +2544,34 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                         rectangles=list(_path_rectangles(path))
                         candidate.append((net,path,rectangles))
                         obstacles.extend((rectangle,net,"wire") for rectangle in rectangles)
-                planned_routes=candidate
-                selected_route_order={"variant":order_index,
-                                      "reverse_roots":reverse_roots}
-                break
             except GeometryError as error:
                 last_route_error=error
+                continue
+            gap=_unmerged_same_net_gap(obstacles)
+            if gap is not None:
+                # The deck's ML1 space rule is not net-aware: two polygons of
+                # the same net that only come close are reported exactly like a
+                # foreign-net short.  Remember this ordering as a last resort
+                # and keep looking for one whose tree merges instead.
+                if fallback_routes is None:
+                    fallback_routes=candidate
+                    fallback_order={"variant":order_index,
+                                    "reverse_roots":reverse_roots}
+                    same_net_gap=gap
+                continue
+            planned_routes=candidate
+            selected_route_order={"variant":order_index,
+                                  "reverse_roots":reverse_roots}
+            break
         if planned_routes is not None: break
     if planned_routes is None:
-        raise last_route_error or GeometryError("no legal ML1 routing order")
+        if fallback_routes is not None:
+            # No ordering merged the tree.  Keep the best legal geometry and let
+            # the strict deck decide, exactly as before this gate existed.
+            planned_routes=fallback_routes
+            selected_route_order=fallback_order
+        else:
+            raise last_route_error or GeometryError("no legal ML1 routing order")
     for net,path,rectangles in planned_routes:
         for rectangle in rectangles:
             _put_box(layout,top,layers[ML1],rectangle)
@@ -1808,6 +2581,14 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     text_layer=layers[TEXT]
     pin_windows={}
     for pin in ordered_pins:
+        if pin in power_rails:
+            # The rail band *is* the power pin: one full-width window per row
+            # edge is what makes an abutted neighbour share the same rail.
+            rail = power_rails[pin]
+            _put_text(layout, top, text_layer, pin,
+                      ((rail[0] + rail[2]) / 2, (rail[1] + rail[3]) / 2))
+            pin_windows[pin] = [list(rail)]
+            continue
         unique=[]
         for point in terminals[pin]:
             if point not in unique: unique.append(point)
@@ -1823,9 +2604,25 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
         _put_text(layout,top,text_layer,pin,unique[0])
         pin_windows[pin]=windows
     bbox=[0.0,0.0,_snap(cell_width),actual_height]
+    edge_metrics = _ml1_area_metrics(layout, top, layers[ML1], bbox)
+    soi_edge_manifest = {
+        "experimental_margin_um": SOI_EDGE_EXPERIMENTAL_MARGIN_UM,
+        "fab_prep_tin_bias_um": SOI_EDGE_FAB_TIN_BIAS_UM,
+        "design_side_ml1_expansion_um": SOI_EDGE_STRAP_DRAW_MARGIN_UM,
+        "single_edge_only": True,
+        "scope": "one open TiN/SOI edge; not two simultaneous edge breaks",
+        "contact_topology": (
+            "two off-DIFF 5um CNT ties per gate on opposite TiN crossing edges, "
+            "joined by a continuous ML1 strap"),
+        "devices": protection_records,
+        **edge_metrics,
+    }
     manifest={"name":name,"process_profile":"icps2023_5_1m","architecture":"compact_rows","bbox_um":bbox,
         "width_um":bbox[2],"height_um":bbox[3],"area_um2":bbox[2]*bbox[3],
-        "pins":pin_windows,"devices":device_records,"rows":row_records,
+        "pins":pin_windows,
+        "power_rails_um":{net:list(rail) for net,rail in power_rails.items()},
+        "devices":device_records,"rows":row_records,
+        "soi_edge_protection":soi_edge_manifest,
         "mos_count":len(device_records),"contacts_count":len(contact_records),
         "contacts":contact_records,"tin_length_um":_snap(total_tin),
         "nominal_track_count_assumption":actual_height/10.0,
@@ -1844,7 +2641,7 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
                     "additional_CNT_vias":metal_via_count,
                     "route_order_variant":selected_route_order,
                     "direct_tin_diff_contact":False},
-        "provenance":{"device_geometry":"native ICPS2023_5 PCell equation: contact=13um, gate L>=6um, gate bay=max(4,(22-L)/2), gate overlap2um, CNT5um; gate-contact offset=11.5um combinational,26um sequential; folding preserves total MOS width",
+        "provenance":{"device_geometry":"native ICPS2023_5 MOS gate bar exactly L, 13um off-SOI edge landings, gate bay=max(8,(22-L)/2), CNT5um; dual-ended ML1 strap width L+8 covers fab-prep TiN bias2um plus experimental margin2um",
                        "sheet_resistance_ohm_sq":{"ML1":0.2,"TIN":20.0},
                        "qualification":"canonical DRC/LVS/PEX must still pass; no signoff claim"}}
     # The reserved drawing rectangle is placement metadata, not a mask layer.
@@ -1888,4 +2685,4 @@ def build_cell(spec: Mapping[str, Any], height_um: float, *, fingers: int = 1,
     return layout,top,manifest
 
 
-__all__=["GeometryError","build_cell"]
+__all__=["GeometryError","build_cell","soi_edge_protection"]

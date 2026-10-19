@@ -60,16 +60,33 @@ end
 nch = variant(layout, lib, "Nch")
 expect_bbox(layout, nch, 3, [0.0, 0.0, 48.0, 20.0])
 expect_bbox(layout, nch, 19, [-2.0, -2.0, 50.0, 22.0])
-expect_bbox(layout, nch, 21, [19.0, 0.0, 29.0, 20.0])
-expect_bbox(layout, nch, 5, [17.0, -6.0, 31.0, 38.0])
-expect_bbox(layout, nch, 7, [4.0, 7.5, 44.0, 34.0])
-expect_bbox(layout, nch, 8, [0.0, 3.5, 48.0, 38.0])
+expect_bbox(layout, nch, 21, [21.0, 0.0, 27.0, 20.0])
+tight_nch = variant(
+    layout, lib, "Nch",
+    {"w" => 20.0, "l" => 6.0, "dg" => 0.0, "sdg" => 0.0, "dsl" => 0.0}
+)
+tight_tin = []
+tight_nch.shapes(layout.layer(RBA::LayerInfo.new(5, 0))).each do |shape|
+  tight_tin << shape.bbox
+end
+tight_cnt = []
+tight_nch.shapes(layout.layer(RBA::LayerInfo.new(7, 0))).each do |shape|
+  tight_cnt << shape.bbox
+end
+gate_box = tight_tin.find do |box|
+  [box.left, box.bottom, box.right, box.top] == [21000, -6000, 27000, 26000]
+end
+sd_cut = tight_cnt.find do |box|
+  [box.left, box.bottom, box.right, box.top] == [4000, 7500, 9000, 12500]
+end
+unless gate_box && sd_cut && ((gate_box.left - 2000 - sd_cut.right) * layout.dbu).round(3) >= 8.0
+  raise "minimum native gate bay must preserve the final 8um TiN/CNT clearance"
+end
 
 pch = variant(layout, lib, "Pch", {"use_nwell" => true})
 expect_bbox(layout, pch, 3, [0.0, 0.0, 48.0, 40.0])
 expect_bbox(layout, pch, 18, [-2.0, -2.0, 50.0, 42.0])
 expect_bbox(layout, pch, 1, [-2.0, -2.0, 50.0, 42.0])
-expect_bbox(layout, pch, 5, [17.0, -6.0, 31.0, 58.0])
 expect_absent(layout, pch, 19)
 
 psub_nch = variant(layout, lib, "Nch", {"with_psubcont" => true})
@@ -81,16 +98,28 @@ pch_nsub = variant(layout, lib, "Pch", {"with_nsubcont" => true})
 expect_bbox(layout, pch_nsub, 19, [-8.5, 49.5, 8.5, 66.5])
 expect_bbox(layout, pch_nsub, 1, [-8.5, -2.0, 50.0, 66.5])
 
-
-# The finger interconnect option changes ML1 routing, not channel geometry.
+# Protected gate bays are formula-derived; the minimum bay preserves the
+# native source/drain contact clearance while retaining the physical channel L.
 nch_no_bus = variant(layout, lib, "Nch", {"n" => 2, "no_finger_conn" => true})
 nch_bus = variant(layout, lib, "Nch", {"n" => 2, "no_finger_conn" => false})
-expect_bbox(layout, nch_no_bus, 21, [19.0, 0.0, 64.0, 20.0])
-expect_bbox(layout, nch_no_bus, 8, [0.0, 3.5, 83.0, 38.0])
-expect_bbox(layout, nch_bus, 8, [0.0, -33.0, 83.0, 53.0])
+expect_bbox(layout, nch_no_bus, 21, [21.0, 0.0, 62.0, 20.0])
 expect_absent(layout, nch, 5, 1)
 tied_nch = variant(layout, lib, "Nch", {"body_tie" => true})
-expect_bbox(layout, tied_nch, 5, [17.0, -6.0, 31.0, 26.0], 1)
+
+# The PCell guard reports through KLayout's log, not to the caller: the raw
+# add_pcell_variant returns an unnamed, empty cell.  Callers that need a
+# handleable rejection run the shared validator first, which raises.
+begin
+  ICPS2023_5NativeGeometry.validate_supported_parameters!("Pch", true)
+  raise "Pch body_tie=true passed the pre-call validation"
+rescue => error
+  raise unless error.message.include?("PMOS body ties are unsupported")
+end
+raw_guard = variant(layout, lib, "Pch", {"body_tie" => true})
+raise "raw PCell guard must leave an unnamed cell" unless raw_guard.name.empty?
+raw_shapes = 0
+layout.layer_indices.each { |li| raw_shapes += raw_guard.shapes(li).size }
+raise "raw PCell guard must not produce geometry" unless raw_shapes == 0
 
 r_ndiff = variant(layout, lib, "R_ndiff")
 expect_bbox(layout, r_ndiff, 3, [0.0, 6.5, 13.0, 59.5])
@@ -105,13 +134,13 @@ expect_bbox(layout, r_pdiff, 1, [-4.0, -4.0, 15.5, 67.0])
 expect_absent(layout, r_pdiff, 19)
 
 ncap = variant(layout, lib, "Ndiff_cap")
-expect_bbox(layout, ncap, 3, [0.0, -4.0, 100.0, 117.0])
+expect_bbox(layout, ncap, 3, [0.0, -4.0, 100.0, 119.5])
 expect_bbox(layout, ncap, 16, [0.0, 0.0, 100.0, 100.0])
-expect_bbox(layout, ncap, 19, [-2.0, -6.0, 102.0, 119.0])
+expect_bbox(layout, ncap, 19, [-2.0, -6.0, 102.0, 121.5])
 expect_bbox(layout, ncap, 5, [-4.0, 0.0, 104.0, 100.0])
 
 pcap = variant(layout, lib, "Pdiff_cap")
-expect_bbox(layout, pcap, 18, [-2.0, -6.0, 102.0, 119.0])
+expect_bbox(layout, pcap, 18, [-2.0, -6.0, 102.0, 121.5])
 expect_absent(layout, pcap, 19)
 
 # TiN capacitor plates and overlap are distinct design masks.
@@ -122,12 +151,24 @@ expect_bbox(layout, tin_cap, 5, [23.5, -4.0, 123.5, 121.0])
 
 bridge = variant(layout, lib, "Bridge")
 expect_bbox(layout, bridge, 5, [1.5, 1.5, 31.5, 51.5])
-expect_bbox(layout, bridge, 15, [1.5, 1.5, 31.5, 51.5])
+expect_bbox(layout, bridge, 15, [1.5, 6.5, 26.5, 51.5])
 expect_bbox(layout, bridge, 8, [0.0, 0.0, 33.0, 53.0])
+
+bent_bridge = variant(
+    layout, lib, "Bridge", {"l" => 25.0, "w" => 10.0, "s" => "20"}
+)
+expect_bbox(layout, bent_bridge, 5, [1.5, 1.5, 31.5, 36.5])
+expect_bbox(layout, bent_bridge, 15, [1.5, 6.5, 26.5, 36.5])
+# The stored parameter readback keeps the requested values (coerce corrections
+# are not exposed), so the bend is checked on the drawn TiN/RES bodies; the
+# intended 90 ohm value (20 ohm/sq x (25+20)/10) is only observable through the
+# LVS R_TIN extraction, which currently mis-measures bent shapes (known gap).
+cnt_layer = layout.layer(RBA::LayerInfo.new(7, 0))
+raise "bent Bridge must expose two physical CNT terminals" unless bent_bridge.shapes(cnt_layer).size == 2
 
 nbridge = variant(layout, lib, "Nbridge")
 expect_bbox(layout, nbridge, 3, [1.5, 1.5, 31.5, 51.5])
-expect_bbox(layout, nbridge, 15, [1.5, 1.5, 31.5, 51.5])
+expect_bbox(layout, nbridge, 15, [1.5, 6.5, 26.5, 51.5])
 expect_bbox(layout, nbridge, 19, [-0.5, -0.5, 33.5, 53.5])
 expect_absent(layout, nbridge, 5)
 

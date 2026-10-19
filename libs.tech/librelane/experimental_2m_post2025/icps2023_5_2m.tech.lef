@@ -1,0 +1,124 @@
+# ICPS2023_5 experimental post-2025 2M routing overlay for LibreLane/OpenROAD.
+#
+# This file is not a process-qualified technology LEF. ML2/VIA1 are marked T.B.D.
+# by the foundry-facing layer table; the dimensions below mirror only the
+# repository's provisional multimetal DRC rules so geometry experiments can be
+# represented without modifying the canonical 1M process profile.
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+UNITS
+  DATABASE MICRONS 1000 ;
+END UNITS
+MANUFACTURINGGRID 0.001 ;
+# The selected row origin matches the largest published standard cell (500 um
+# high); the SCL cell LEFs use this exact site name.
+SITE ICPS2023_5_ROW500
+  CLASS CORE ;
+  SYMMETRY Y ;
+  SIZE 1.0 BY 500.0 ;
+END ICPS2023_5_ROW500
+
+
+# Engineering-only POLY-Si horizontal jumper. No canonical POLY mask exists.
+LAYER POLY
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 0.32 ;
+  WIDTH 0.12 ;
+  SPACING 0.20 ;
+  RESISTANCE RPERSQ 25.0 ;
+END POLY
+
+# Engineering-only TiN local connector. Geometry is experimental; sheet R is
+# the measured value carried by the repository's KLayout PEX model.
+LAYER TIN
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 0.28 ;
+  WIDTH 0.14 ;
+  SPACING 0.14 ;
+  RESISTANCE RPERSQ 20.0 ;
+END TIN
+
+# M1 router alias for canonical physical ML1 8/0.
+LAYER M1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH 10.0 ;
+  WIDTH 6.0 ;
+  SPACING 4.0 ;
+  RESISTANCE RPERSQ 0.20 ;
+END M1
+
+# M2 router alias for canonical physical ML2 10/0. Width/space are the
+# provisional DRC values only; no ML2 sheet resistance is declared.
+LAYER M2
+  TYPE ROUTING ;
+  DIRECTION VERTICAL ;
+  PITCH 12.0 ;
+  WIDTH 6.0 ;
+  SPACING 6.0 ;
+END M2
+
+# Canonical VIA1 design layer 9/0. This is a cut layer, not a routing layer.
+LAYER VIA1
+  TYPE CUT ;
+END VIA1
+
+# Existing pad obstruction layer; physical CNT remains 7/0.
+LAYER CNT
+  TYPE CUT ;
+END CNT
+
+# Engineering-only cut layers retained from the 1M overlay.
+LAYER VIA_POLY_TIN_CUT
+  TYPE CUT ;
+END VIA_POLY_TIN_CUT
+LAYER VIA_TIN_M1_CUT
+  TYPE CUT ;
+END VIA_TIN_M1_CUT
+LAYER VIA_POLY_M1_CUT
+  TYPE CUT ;
+END VIA_POLY_M1_CUT
+
+# Canonical ML1-to-ML2 via geometry used by the repository's provisional rules:
+# 5 x 5 um VIA1 cut with 2 um enclosure on each metal. This is not qualified.
+VIA VIA_M1_M2 DEFAULT
+  LAYER M1 ;
+    RECT -3.5 -3.5 3.5 3.5 ;
+  LAYER VIA1 ;
+    RECT -2.5 -2.5 2.5 2.5 ;
+  LAYER M2 ;
+    RECT -3.5 -3.5 3.5 3.5 ;
+END VIA_M1_M2
+
+# Existing engineering POLY/TiN/M1 placeholder vias.
+VIA VIA_POLY_TIN DEFAULT
+  LAYER POLY ;
+    RECT -0.06 -0.06 0.06 0.06 ;
+  LAYER VIA_POLY_TIN_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER TIN ;
+    RECT -0.07 -0.07 0.07 0.07 ;
+END VIA_POLY_TIN
+
+VIA VIA_TIN_M1 DEFAULT
+  LAYER TIN ;
+    RECT -0.07 -0.07 0.07 0.07 ;
+  LAYER VIA_TIN_M1_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER M1 ;
+    RECT -3.0 -3.0 3.0 3.0 ;
+END VIA_TIN_M1
+
+VIA VIA_POLY_M1 DEFAULT
+  LAYER POLY ;
+    RECT -0.06 -0.06 0.06 0.06 ;
+  LAYER VIA_POLY_M1_CUT ;
+    RECT -0.04 -0.04 0.04 0.04 ;
+  LAYER M1 ;
+    RECT -3.0 -3.0 3.0 3.0 ;
+END VIA_POLY_M1
+
+END LIBRARY

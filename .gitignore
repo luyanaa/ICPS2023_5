@@ -1,3 +1,7 @@
+.commandcode/
+AGENTS.md
+libs.tech/librelane/designs/runs
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -230,3 +234,10 @@ __marimo__/
 
 # deepwork session state
 .slim/deepwork/
+
+# PDK Liberty views live in libs.ref/*/lib/ and are not Python packages
+!libs.ref/*/lib/
+!libs.ref/*/lib/*
+
+# make_gen_sc staging directories (removed on success)
+libs.ref/ICPS2023_5_gen_sc/icps_gen_sc_stage_*/

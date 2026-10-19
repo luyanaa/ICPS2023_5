@@ -8,6 +8,14 @@ UNITS
   DATABASE MICRONS 1000 ;
 END UNITS
 MANUFACTURINGGRID 0.001 ;
+# The selected row origin matches the largest published standard cell (500 um
+# high); the SCL cell LEFs use this exact site name.
+SITE ICPS2023_5_ROW500
+  CLASS CORE ;
+  SYMMETRY Y ;
+  SIZE 1.0 BY 500.0 ;
+END ICPS2023_5_ROW500
+
 
 # LEF routing level 1. Experimental POLY-Si horizontal jumper.
 LAYER POLY
@@ -19,14 +27,15 @@ LAYER POLY
   RESISTANCE RPERSQ 25.0 ;
 END POLY
 
-# LEF routing level 2. User-directed vertical local connector.
+# LEF routing level 2. TiN geometry is experimental; sheet R is the measured
+# value carried by the repository's KLayout PEX model.
 LAYER TIN
   TYPE ROUTING ;
   DIRECTION VERTICAL ;
   PITCH 0.28 ;
   WIDTH 0.14 ;
   SPACING 0.14 ;
-  RESISTANCE RPERSQ 5.0 ;
+  RESISTANCE RPERSQ 20.0 ;
 END TIN
 
 # LEF routing level 3. M1 is the router alias for physical design layer ML1 8/0.

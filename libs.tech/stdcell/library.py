@@ -14,9 +14,15 @@ except ImportError:  # pragma: no cover - supplied by the pinned KLayout toolcha
     from klayout import db  # type: ignore
 
 try:
-    from . import logic
+    from . import logic, verify
 except ImportError:  # direct import from the stdcell tool directory
     import logic  # type: ignore
+    import verify  # type: ignore
+
+try:
+    from . import model_binding
+except ImportError:  # direct import from the stdcell tool directory
+    import model_binding  # type: ignore
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +31,12 @@ DEFAULT_MANIFEST = LIBRARY / "doc/cell_manifest.json"
 PROFILE = "icps2023_5_1m"
 BOUNDARY_LAYER = (100, 0)
 PHYSICAL_LAYERS = ((1, 0), (3, 0), (5, 0), (7, 0), (8, 0), (18, 0), (19, 0))
+# Experimental placement-row contract shared with LibreLane
+# (libs.tech/librelane/experimental_1m/icps2023_5_1m.tech.lef declares the same
+# SITE).  Cells are height-normalised to it; a cell of another height declares
+# no site and is therefore not row-placeable rather than silently mis-declared.
+ROW_SITE_NAME = "ICPS2023_5_ROW500"
+ROW_SITE_HEIGHT_UM = 500.0
 
 
 class LibraryValidationError(ValueError):
@@ -48,19 +60,12 @@ def _file_digest(path: Path) -> str:
 
 
 def _current_provenance() -> dict[str, Any]:
+    binding = model_binding.load()
     files = {
         "logic_sha256": ROOT / "libs.tech/stdcell/logic.py",
         "generator_sha256": ROOT / "libs.tech/stdcell/geometry.py",
         "config_sha256": ROOT / "libs.tech/stdcell/config.json",
-        "model_sha256": ROOT / "libs.tech/ngspice/icps2023_5.lib.spice",
-        "model_include_sha256": ROOT / "libs.tech/ngspice/models/icps2023_5_b4soi.inc",
-    }
-    decks = {
-        "drc": ROOT / "libs.tech/klayout/drc/icps2023_5.drc",
-        "lvs": ROOT / "libs.tech/klayout/lvs/icps2023_5.lvs",
-        "pex": ROOT / "libs.tech/klayout/pex/icps2023_5_pex.py",
-        "assembler": ROOT / "libs.tech/ngspice/tools/assemble_postlayout.py",
-        "verify": ROOT / "libs.tech/stdcell/verify.py",
+        **model_binding.provenance_files(),
     }
     current = {name: _file_digest(path) for name, path in files.items()}
     generator_files = {
@@ -69,8 +74,11 @@ def _current_provenance() -> dict[str, Any]:
     }
     current["generator_files_sha256"] = generator_files
     current["generator_sha256"] = _digest(generator_files)
-    current["deck_sha256"] = {name: _file_digest(path) for name, path in decks.items()}
+    current["deck_sha256"] = verify.verification_deck_hashes()
     current["source_specs_sha256"] = _digest(logic.cell_specs())
+    current["model_binding"] = {**model_binding.engine_record(),
+                                "library_sha256": current["model_sha256"],
+                                "include_sha256": current["model_include_sha256"]}
     return current
 
 
@@ -102,6 +110,8 @@ def _lef_text(record: dict[str, Any]) -> str:
     lines = ["VERSION 5.8 ;", f"MACRO {name}", "  CLASS CORE ;",
              "  ORIGIN 0 0 ;",
              f"  SIZE {_num(width)} BY {_num(height)} ;"]
+    if math.isclose(height, ROW_SITE_HEIGHT_UM, rel_tol=0, abs_tol=1e-9):
+        lines.append(f"  SITE {ROW_SITE_NAME} ;")
     for pin, data in record["pins"].items():
         if pin == "VDD":
             direction, use = "INOUT", "POWER"
@@ -125,6 +135,20 @@ def _lef_text(record: dict[str, Any]) -> str:
             lines.append(f"      RECT {_num(x1)} {_num(y1)} {_num(x2)} {_num(y2)} ;")
     lines.extend(["  END", f"END {name}", ""])
     return "\n".join(lines)
+
+
+def librelane_lef_text(record: dict[str, Any]) -> str:
+    """The same cell with the physical ML1 layer named by the router alias.
+
+    The experimental LibreLane technology LEF declares the routing layer as
+    `M1`; the canonical LEF keeps the physical process name `ML1`.  Only the
+    layer name changes, exactly like the frame library's `*_librelane.lef`.
+    """
+    text = _lef_text(record)
+    if "LAYER ML1" not in text:
+        raise LibraryValidationError(
+            f"{record.get('cell')} has no ML1 geometry to alias")
+    return text.replace("LAYER ML1", "LAYER M1")
 
 
 def _resolve_artifact(library_root: Path, relative: str) -> Path:
@@ -176,6 +200,10 @@ def _read_gds_boundary(gds_path: Path, cell_name: str) -> tuple[float, float]:
                     right > coords[2] + layout.dbu / 2 or upper > coords[3] + layout.dbu / 2):
                 raise LibraryValidationError(
                     f"physical geometry for {cell_name} extends outside its 100/0 boundary")
+    try:
+        verify.soi_edge_protection(layout, top)
+    except ValueError as error:
+        raise LibraryValidationError(f"SOI-edge protection failed for {cell_name}: {error}") from error
     return width, height
 
 
@@ -312,7 +340,9 @@ def _validate_cell(record: dict[str, Any], current_spec: dict[str, Any],
         raise LibraryValidationError(f"reserved boundary record is inconsistent for {name}")
 
     views = record.get("views")
-    if not isinstance(views, dict) or set(views) != {"gds", "lef", "spice"}:
+    if (not isinstance(views, dict) or
+            not {"gds", "lef", "spice"}.issubset(views) or
+            not set(views).issubset({"gds", "lef", "spice", "lef_librelane"})):
         raise LibraryValidationError(f"physical GDS/LEF/SPICE paths are incomplete for {name}")
     paths = {key: _resolve_artifact(library_root, value) for key, value in views.items()}
     view_hashes = {key: _file_digest(path) for key, path in paths.items()}
@@ -364,6 +394,17 @@ def _validate_cell(record: dict[str, Any], current_spec: dict[str, Any],
         raise LibraryValidationError(f"cannot read LEF for {name}") from error
     if lef != _lef_text(record):
         raise LibraryValidationError(f"LEF SIZE/ORIGIN/pins/OBS do not match geometry for {name}")
+    alias_relative = paths.get("lef_librelane")
+    if alias_relative is not None:
+        try:
+            alias = Path(alias_relative).read_text(encoding="utf-8")
+        except OSError as error:
+            raise LibraryValidationError(f"cannot read LibreLane alias LEF for {name}") from error
+        if alias != librelane_lef_text(record):
+            raise LibraryValidationError(
+                f"LibreLane alias LEF is not the canonical geometry with the M1 alias for {name}")
+        if "LAYER ML1" in alias:
+            raise LibraryValidationError(f"LibreLane alias LEF still names ML1 for {name}")
     try:
         spice = paths["spice"].read_text(encoding="utf-8")
     except OSError as error:
@@ -376,6 +417,12 @@ def _validate_cell(record: dict[str, Any], current_spec: dict[str, Any],
             physical.get("pex") is not True or physical.get("assembly") is not True or
             physical.get("passed") is not True):
         raise LibraryValidationError(f"strict physical evidence is incomplete for {name}")
+    protection = physical.get("soi_edge_protection")
+    if not isinstance(protection, dict) or protection.get("passed") is not True:
+        raise LibraryValidationError(f"SOI-edge protection evidence is incomplete for {name}")
+    fabrication = physical.get("fabrication")
+    if not isinstance(fabrication, dict) or fabrication.get("passed") is not True:
+        raise LibraryValidationError(f"final-mask protection evidence is incomplete for {name}")
 
 
 def load_library(manifest_path: str | Path | None = None, *, check: bool = True) -> dict[str, Any]:
@@ -395,10 +442,16 @@ def load_library(manifest_path: str | Path | None = None, *, check: bool = True)
         raise LibraryValidationError("manifest cells must be a list")
     specs = logic.cell_specs()
     by_name = {record.get("cell"): record for record in records if isinstance(record, dict)}
-    if len(by_name) != len(records) or set(by_name) != set(specs):
-        raise LibraryValidationError("manifest must retain exactly the 26 canonical cell records")
+    if len(by_name) != len(records):
+        raise LibraryValidationError("manifest contains duplicate or malformed cell records")
     if not check:
+        # A read-only load must also succeed while a publication that adds a new
+        # canonical spec is being prepared; the full canonical-set check below
+        # stays in force for every validated load.
         return manifest
+    if set(by_name) != set(specs):
+        raise LibraryValidationError(
+            f"manifest must retain exactly the {len(specs)} canonical cell records")
 
     current = _current_provenance()
     if manifest.get("status") != "experimental_partial":

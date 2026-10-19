@@ -18,6 +18,14 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+_ACTIVE_BENCH = None   # bench engine binding set by the CLI/tests; default nominal ngspice
+
+
+def set_bench(bench):
+    """Select the bench engine binding for this process (default: nominal ngspice)."""
+    global _ACTIVE_BENCH
+    _ACTIVE_BENCH = bench
 STD_CELL_SOURCE = Path(__file__).resolve().parent
 TARGET_CELLS = ("LATCH_TG_X1", "LATCH_GATE_X1", "DFF_TG_X1", "DFF_GATE_X1")
 ARCHITECTURES = ("channel", "compact_rows")
@@ -51,7 +59,7 @@ def _load_modules():
         sys.path.insert(0, source)
     modules = {}
     errors = {}
-    for name in ("logic", "geometry", "verify", "characterize"):
+    for name in ("logic", "geometry", "verify", "characterize", "bench_engine", "model_binding"):
         try:
             modules[name] = importlib.import_module(name)
         except Exception as error:
@@ -193,7 +201,8 @@ def _logical_reference(spec: dict[str, Any], path: Path, logic: Any,
     if "SUB" not in reference_spec["pins"]:
         reference_spec["pins"].append("SUB")
     logic.write_reference(reference_spec, path, library=True)
-    lines = [f'.lib "{model_library.resolve()}" b4soi']
+    lines = [(_ACTIVE_BENCH.model_line() if _ACTIVE_BENCH is not None
+              else f'.lib "{model_library.resolve()}" b4soi')]
     lines.extend(path.read_text(encoding="utf-8").splitlines())
     pins = set(spec["pins"])
     internal_nets = sorted({mos[terminal] for mos in spec["mos"]
@@ -236,7 +245,8 @@ def _run_logical_state(spec: dict[str, Any], cell_dir: Path,
     try:
         _logical_reference(spec, reference, logic, characterize.MODELS)
         result = characterize.sequential_state(
-            spec, reference, state_dir, load_ff=LOGICAL_OUTPUT_LOAD_FF)
+            spec, reference, state_dir, load_ff=LOGICAL_OUTPUT_LOAD_FF,
+            bench=_ACTIVE_BENCH)
         state_path = state_dir / "state.json"
         stage.update({
             "status": "passed",
@@ -376,7 +386,8 @@ def _run_postlayout_storage(spec: dict[str, Any], candidate_id: str,
             characterization_spec, postlayout_path, state_dir,
             load_ff=STORAGE_OUTPUT_LOAD_FF,
             hold_times_us=STORAGE_HOLD_TIMES_US,
-            slew_ns=STORAGE_INPUT_SLEW_NS, integration_method=integration_method)
+            slew_ns=STORAGE_INPUT_SLEW_NS, integration_method=integration_method,
+            bench=_ACTIVE_BENCH)
         if not isinstance(result, dict):
             raise RuntimeError("storage characterizer returned a non-object result")
         stage["result"] = result
@@ -809,8 +820,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="mirror the selected candidate; default is unmirrored")
     parser.add_argument("--integration-method", choices=("trap", "gear"), default="trap",
                         help="explicit transient integration method, recorded with every storage experiment")
+    parser.add_argument("--bench-engine", choices=("ngspice", "xyce"), default="ngspice",
+                        help="bench engine; xyce requires the configured FD card and a local Xyce")
+    parser.add_argument("--bench-binding", choices=("nominal", "configured"), default="nominal",
+                        help="nominal stage-1 card, or the config's model binding (FD card)")
     args = parser.parse_args(argv)
     try:
+        if "bench_engine" not in modules or "model_binding" not in modules:
+            raise RuntimeError("bench engine modules are unavailable: %s" % sorted(dependency_errors))
+        binding_mod, bench_mod = modules["model_binding"], modules["bench_engine"]
+        binding = (binding_mod.load() if args.bench_binding == "configured"
+                   else binding_mod.nominal())
+        set_bench(bench_mod.bench_for(
+            binding=binding, engine=args.bench_engine,
+            work=Path(args.output_dir).expanduser().resolve() / "bench",
+            method=args.integration_method))
         selected_heights = (args.height,) if args.height is not None else None
         summary = run_closure(
             args.output_dir, cells=args.cell or TARGET_CELLS,

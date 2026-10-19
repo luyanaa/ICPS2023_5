@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Compare the frozen BSIMSOI stage-1 cards with digitized PDK I-V samples."""
+"""Compare the frozen nominal BSIMSOI cards with digitized PDK I-V samples.
+
+The manifest (`fit/b4soi_stage1_baseline.json`) freezes whichever card is
+currently nominal and its expected per-curve metrics.  The file and tool keep
+their historical "stage1" names, but since 2026-10-17 the nominal card is the
+verified bridge fit (SOIMOD=1); the superseded stage-1 card and its manifest
+are preserved verbatim as `models/stage1_b4soi_reference.inc` and
+`fit/stage1_b4soi_baseline.json` for the historical audits.
+
+The expected selector is read from the manifest rather than hard-coded, so the
+check still fails on silent drift.
+"""
 
 import argparse
 import bisect
@@ -95,8 +106,12 @@ def verify_frozen_inputs(baseline, model_path, measurements_path):
                     "frozen %s.%s changed: expected %s, got %s"
                     % (model, parameter, expected_value, actual[parameter])
                 )
-        if actual.get("SOIMOD") != 0.0:
-            raise RegressionError("nominal SOIMOD must remain 0")
+        expected_soimod = float(baseline.get("expected_soimod", 0))
+        if actual.get("SOIMOD") != expected_soimod:
+            raise RegressionError(
+                "nominal SOIMOD changed: expected %g, got %s"
+                % (expected_soimod, actual.get("SOIMOD"))
+            )
 
 
 def format_number(value):

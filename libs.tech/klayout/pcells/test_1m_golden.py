@@ -66,7 +66,7 @@ def schematic(name):
         ]
     elif design_name == "bridge_tin_min":
         pins = ["START", "END"]
-        devices = []
+        devices = ["R1 START END 90"]
     elif design_name == "bridge_nplus_min":
         pins = ["START", "END"]
         devices = ["R1 START END 810"]

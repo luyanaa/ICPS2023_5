@@ -28,20 +28,31 @@ CONFIG_PATH = STD_CELL_SOURCE / "config.json"
 SCHEMA = "ICPS2023_5_area_search_v1"
 MAX_WORKERS = 4
 
+try:
+    from . import model_binding
+except ImportError:  # direct import from the stdcell tool directory
+    import model_binding  # type: ignore
+
+_BINDING = model_binding.load(CONFIG_PATH)
+
 
 _PROVENANCE_FILES = {
     "config": "libs.tech/stdcell/config.json",
     "search_area": "libs.tech/stdcell/search_area.py",
     "logic": "libs.tech/stdcell/logic.py",
     "geometry": "libs.tech/stdcell/geometry.py",
+    "channel_geometry": "libs.tech/stdcell/channel_geometry.py",
     "verify": "libs.tech/stdcell/verify.py",
     "characterize": "libs.tech/stdcell/characterize.py",
     "drc_deck": "libs.tech/klayout/drc/icps2023_5.drc",
+    "fab_prep_deck": "libs.tech/klayout/drc/icps2023_5_fab_prep.drc",
+    "process_profile": "libs.tech/klayout/process_profile.rb",
+    "process_profiles": "libs.tech/klayout/process_profiles.json",
     "lvs_deck": "libs.tech/klayout/lvs/icps2023_5.lvs",
     "pex_deck": "libs.tech/klayout/pex/icps2023_5_pex.py",
     "postlayout_assembler": "libs.tech/ngspice/tools/assemble_postlayout.py",
-    "model_library": "libs.tech/ngspice/icps2023_5.lib.spice",
-    "model_include": "libs.tech/ngspice/models/icps2023_5_b4soi.inc",
+    "model_library": _BINDING["library"],
+    "model_include": _BINDING["include"],
 }
 
 
@@ -80,8 +91,12 @@ def _load_modules():
 
 
 def _provenance() -> dict[str, str]:
-    return {key: _sha256(ROOT / relative)
-            for key, relative in sorted(_PROVENANCE_FILES.items())}
+    return {
+        **{key: _sha256(ROOT / relative)
+           for key, relative in sorted(_PROVENANCE_FILES.items())},
+        "model_engine": _BINDING["engine"],
+        "model_engine_version": _BINDING["engine_version"],
+    }
 
 
 def _finite_number(value: Any, field: str, *, minimum: float | None = None) -> float:
@@ -366,6 +381,7 @@ def _worker(request_path: Path) -> int:
         "contacts": copy.deepcopy(manifest["contacts"]),
         "pins": copy.deepcopy(manifest["pins"]),
         "active_regions_um": copy.deepcopy(manifest["active_regions_um"]),
+        "soi_edge_protection": copy.deepcopy(manifest["soi_edge_protection"]),
         "folding": copy.deepcopy(manifest["folding"]),
         "routing": {
             "ML1_wire_length_um": float(manifest["routing"]["ML1_wire_length_um"]),
@@ -389,6 +405,8 @@ def _worker(request_path: Path) -> int:
         required = ("strict_drc", "strict_lvs", "pex", "assembly")
         if not evidence.get("passed") or not all(evidence.get(key) is True for key in required):
             raise RuntimeError("verify.verify_physical returned without all strict evidence gates passing")
+        if evidence.get("soi_edge_protection", {}).get("passed") is not True:
+            raise RuntimeError("SOI-edge protection gate did not pass")
         record["physical_status"] = "passed"
         _physical_evidence(record, evidence, evidence_path, output_root, "passed")
     except Exception as error:

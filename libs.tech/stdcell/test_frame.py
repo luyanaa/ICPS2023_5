@@ -2,6 +2,7 @@
 """Deterministic geometry tests for frame.measure_frame."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -16,6 +17,10 @@ import frame
 
 SOURCE_GDS = (HERE.parents[1] / "libs.ref" / "ICPS2023_5_fd_base" / "gds" /
               "ICPS2023_5_fd_base.gds")
+FRAME_2X2_GDS = (HERE.parents[1] / "libs.ref" / "ICPS2023_5_fd_base_2x2" / "gds" /
+                 "ICPS2023_5_fd_base_2x2.gds")
+CONFIG_1X1 = HERE / "config.json"
+CONFIG_2X2 = HERE / "config_2x2.json"
 
 
 def _write_gds(path: Path, *, outer_um: float, inner_um: float,
@@ -147,6 +152,82 @@ class FrameMeasurementTests(unittest.TestCase):
                            {"edge_keepout_um": True}, {"pad_keepout_um": 0.0004}):
                 with self.subTest(kwargs=kwargs), self.assertRaises(frame.FrameError):
                     frame.measure_frame(gds_path, **kwargs)
+
+
+class SecondDieOptionTests(unittest.TestCase):
+    """The derived 2x2 frame library measures through the same contract."""
+
+    def test_2x2_frame_measures_56_pads_and_reserved_capacity(self):
+        report = frame.measure_frame(FRAME_2X2_GDS, expected_pad_count=56,
+                                     pro_capacity_multiplier=None)
+        self.assertEqual(report["die_outer_bbox_um"], [-1600.0, -1600.0, 1600.0, 1600.0])
+        self.assertEqual(report["frame"]["inner_bbox_um"], [-1550.0, -1550.0, 1550.0, 1550.0])
+        self.assertEqual(report["pads"]["count"], 56)
+        self.assertEqual(report["pads"]["merged_rectangle_count"], 56)
+        self.assertEqual([pad["pad_id"] for pad in report["pads"]["rectangles"]],
+                         [f"PAD_{index:02d}" for index in range(56)])
+        for pad in report["pads"]["rectangles"]:
+            left, bottom, right, top = pad["bbox_um"]
+            self.assertEqual((right - left, top - bottom), (60.0, 60.0))
+        self.assertEqual(report["die_area_um2"], 10240000.0)
+        self.assertEqual(report["core_available_area_um2"], 9097200.0)
+        self.assertEqual(report["fixed_overhead_area_um2"],
+                         report["die_area_um2"] - report["core_available_area_um2"])
+        self.assertEqual(report["pro_capacity_scenarios"], {})
+        self.assertEqual(report["provenance"]["frame_readme"],
+                         "libs.ref/ICPS2023_5_fd_base_2x2/doc/README.md")
+        self.assertEqual(report["provenance"]["pad_source"],
+                         "libs.ref/ICPS2023_5_fd_base_2x2/doc/pad_map.csv and recursive ML1 geometry")
+        self.assertEqual(len(report["power_interface"]["unassigned_pads"]), 56)
+
+    def test_2x2_square_routing_envelope_uses_the_whole_inner_region(self):
+        report = frame.measure_frame(FRAME_2X2_GDS, expected_pad_count=56,
+                                     pro_capacity_multiplier=None)
+        fit = frame.find_rectangular_core_fit(report, 2940, 2940)
+        self.assertTrue(fit["fits"], fit)
+        self.assertEqual(fit["placement_bbox_um"], [-1470.0, -1470.0, 1470.0, 1470.0])
+        self.assertFalse(frame.find_rectangular_core_fit(report, 2980, 2980)["fits"])
+
+    def test_pad_count_and_capacity_factor_validation(self):
+        with self.assertRaisesRegex(frame.FrameError, "exactly 56 pads"):
+            frame.measure_frame(SOURCE_GDS, expected_pad_count=56)
+        for value in (0, -1, True, "4"):
+            with self.subTest(expected_pad_count=value), self.assertRaises(frame.FrameError):
+                frame.measure_frame(SOURCE_GDS, expected_pad_count=value)
+        for value in (0, -4, float("nan"), True):
+            with self.subTest(pro_capacity_multiplier=value), self.assertRaises(frame.FrameError):
+                frame.measure_frame(SOURCE_GDS, pro_capacity_multiplier=value)
+        self.assertEqual(
+            frame.measure_frame(SOURCE_GDS, pro_capacity_multiplier=None)["pro_capacity_scenarios"],
+            {})
+
+    def test_configs_differ_only_in_the_frame_block(self):
+        base = json.loads(CONFIG_1X1.read_text(encoding="utf-8"))
+        second = json.loads(CONFIG_2X2.read_text(encoding="utf-8"))
+        self.assertEqual({key: value for key, value in base.items() if key != "frame"},
+                         {key: value for key, value in second.items() if key != "frame"})
+        self.assertEqual(second["frame"]["gds"],
+                         "libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds")
+        self.assertEqual(second["frame"]["die_bbox_um"], [-1600, -1600, 1600, 1600])
+        self.assertEqual(second["frame"]["expected_pad_count"], 56)
+        self.assertIsNone(second["frame"]["pro_capacity_multiplier"])
+
+    def test_config_frame_arguments_drive_the_measurement(self):
+        gds_path, arguments = frame._config_frame_arguments(CONFIG_2X2)
+        self.assertTrue(str(gds_path).endswith("ICPS2023_5_fd_base_2x2.gds"))
+        self.assertEqual(arguments["expected_pad_count"], 56)
+        self.assertIsNone(arguments["pro_capacity_multiplier"])
+        report = frame.measure_frame(gds_path, **arguments)
+        self.assertEqual(report["pads"]["count"], 56)
+
+        canonical_path, canonical_args = frame._config_frame_arguments(CONFIG_1X1)
+        self.assertEqual(canonical_args["expected_pad_count"], 28)
+        self.assertEqual(canonical_args["pro_capacity_multiplier"], 4)
+        canonical = frame.measure_frame(canonical_path, **canonical_args)
+        self.assertEqual(canonical["pads"]["count"], 28)
+        self.assertEqual(canonical["core_available_area_um2"], 1997200.0)
+        self.assertEqual(sorted(canonical["pro_capacity_scenarios"]),
+                         ["area_multiplier_4", "side_multiplier_4"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Measure geometric frame reservations from the canonical ICPS2023_5 frame GDS.
+"""Measure geometric frame reservations from a frame GDS.
+
+The canonical input is the 1x1 frame library
+(libs.ref/ICPS2023_5_fd_base, 1600 x 1600 um, 28 pads).  A config may select
+any frame library that follows the same two-contour FRAME14/0 drawing and
+60 x 60 um ML1 pad convention, including the derived 2x2 frame library
+(libs.ref/ICPS2023_5_fd_base_2x2, 3200 x 3200 um, 56 pads) via
+``expected_pad_count``.
 
 This is an engineering geometry estimate, not a manufacturing or floorplan
 qualification.  FRAME14/0's two nested rectangles are contour marks: the inner
@@ -184,16 +191,24 @@ def _power_assignments(power_interface: Any, pad_ids: set[str]) -> dict[str, str
 def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = None,
                   pad_keepout_um: float = 20, frame_keepout_um: float = 10,
                   edge_keepout_um: float = 10,
+                  expected_pad_count: int | None = None,
+                  pro_capacity_multiplier: float | None = 4.0,
                   power_interface: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Measure die/frame/pad geometry and reserved core area from a real GDS.
 
     ``die_bbox`` is an optional [left, bottom, right, top] die override in um;
     otherwise the outer FRAME14/0 contour is used.  Keepouts are nonnegative
-    distances in um.  ``power_interface`` is an explicit mapping from canonical
-    ``PAD_00``..``PAD_27`` IDs to net names; GDS text labels are never consulted.
+    distances in um.  ``expected_pad_count`` defaults to the canonical 28-pad
+    1x1 frame; the derived 3200 x 3200 um 2x2 frame library supplies 56.
+    ``pro_capacity_multiplier`` emits the user-supplied nominal scaling
+    scenarios of that factor (4 for the historical unverified 4x readings);
+    ``None`` omits them, as for the measured 2x2 frame.  ``power_interface`` is
+    an explicit mapping from canonical ``PAD_00``.. IDs to net names; GDS text
+    labels are never consulted.
 
     The GDS must contain one top cell, exactly two nested rectangular FRAME14/0
-    contours, and exactly 28 distinct merged 60 x 60 um ML1 pad rectangles.
+    contours, and exactly ``expected_pad_count`` distinct merged 60 x 60 um ML1
+    pad rectangles.
     The available polygon is the die interior clipped to the inner frame contour,
     less the frame/edge reservations and the union of expanded pad rectangles.
     Areas therefore come from Boolean geometry (overlap counted once), not an
@@ -202,6 +217,13 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
     """
     if db is None:
         raise FrameError("KLayout Python bindings are required; use the root Nix devShell")
+    required_pads = EXPECTED_PAD_COUNT if expected_pad_count is None else expected_pad_count
+    if isinstance(required_pads, bool) or not isinstance(required_pads, int) or required_pads < 1:
+        raise FrameError("expected_pad_count must be a positive integer")
+    capacity_factor = (None if pro_capacity_multiplier is None else
+                       _finite_number(pro_capacity_multiplier, "pro_capacity_multiplier"))
+    if capacity_factor is not None and capacity_factor <= 0:
+        raise FrameError("pro_capacity_multiplier must be positive")
     source = Path(gds_path).expanduser().resolve()
     if not source.is_file():
         raise FrameError(f"GDS file does not exist: {source}")
@@ -262,8 +284,8 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
         ml1_region += _shape_region(shape)
     ml1_region = ml1_region.merged()
     pad_polygons = list(ml1_region.each())
-    if len(pad_polygons) != EXPECTED_PAD_COUNT:
-        raise FrameError(f"merged ML1 geometry must contain exactly {EXPECTED_PAD_COUNT} pads; "
+    if len(pad_polygons) != required_pads:
+        raise FrameError(f"merged ML1 geometry must contain exactly {required_pads} pads; "
                          f"found {len(pad_polygons)}")
 
     pad_boxes = []
@@ -321,29 +343,36 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
     frame_area_um2 = _um(frame_outer.width() * frame_outer.height(), dbu_um * dbu_um)
     frame_width_um = _um(frame_outer.width(), dbu_um)
     frame_height_um = _um(frame_outer.height(), dbu_um)
-    area4 = 4.0 * frame_area_um2
-    side4_width = 4.0 * frame_width_um
-    side4_height = 4.0 * frame_height_um
-    frame_scenarios = {
-        "area_multiplier_4": {
-            "user_supplied_unverified": True,
-            "nominal_area_um2": area4,
-            "nominal_square_side_um": math.sqrt(area4),
-            "core_available_area_um2": None,
-            "core_capacity_claimed": False,
-            "interpretation": "four times outer-frame area; not a multiplier on measured core area",
-        },
-        "side_multiplier_4": {
-            "user_supplied_unverified": True,
-            "nominal_bbox_um": [-side4_width / 2, -side4_height / 2,
-                                side4_width / 2, side4_height / 2],
-            "nominal_area_um2": side4_width * side4_height,
-            "nominal_square_side_um": side4_width if side4_width == side4_height else None,
-            "core_available_area_um2": None,
-            "core_capacity_claimed": False,
-            "interpretation": "four times each outer-frame side; not a multiplier on measured core area",
-        },
-    }
+    if capacity_factor is None:
+        # The measured 2x2 frame supersedes the unverified scaling readings;
+        # nominal scenarios would describe a die larger than the measured one.
+        frame_scenarios = {}
+    else:
+        scaled_area = capacity_factor * frame_area_um2
+        scaled_width = capacity_factor * frame_width_um
+        scaled_height = capacity_factor * frame_height_um
+        frame_scenarios = {
+            f"area_multiplier_{capacity_factor:g}": {
+                "user_supplied_unverified": True,
+                "nominal_area_um2": scaled_area,
+                "nominal_square_side_um": math.sqrt(scaled_area),
+                "core_available_area_um2": None,
+                "core_capacity_claimed": False,
+                "interpretation": f"{capacity_factor:g}x the outer-frame area; not a multiplier "
+                                  "on the measured core area",
+            },
+            f"side_multiplier_{capacity_factor:g}": {
+                "user_supplied_unverified": True,
+                "nominal_bbox_um": [-scaled_width / 2, -scaled_height / 2,
+                                    scaled_width / 2, scaled_height / 2],
+                "nominal_area_um2": scaled_width * scaled_height,
+                "nominal_square_side_um": scaled_width if scaled_width == scaled_height else None,
+                "core_available_area_um2": None,
+                "core_capacity_claimed": False,
+                "interpretation": f"{capacity_factor:g}x each outer-frame side; not a multiplier "
+                                  "on the measured core area",
+            },
+        }
 
     keepout_payloads = {
         "pad": {"distance_um": pad_keepout,
@@ -357,6 +386,13 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
                  "region": _region_payload(edge_keepout_region, dbu_um)},
     }
     unassigned_pads = sorted(pad_ids - set(assignments))
+    try:
+        library_dir = source.relative_to(ROOT).parent.parent
+        frame_readme_path = f"{library_dir}/doc/README.md"
+        pad_source_path = f"{library_dir}/doc/pad_map.csv"
+    except ValueError:  # GDS outside the repository tree
+        frame_readme_path = "frame library README (external GDS)"
+        pad_source_path = "frame pad map (external GDS)"
     return {
         "schema_version": 1,
         "units": "um",
@@ -383,8 +419,9 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
             "bbox_um": pad_bbox,
             "rectangles": pads,
             "identity_assignment": (
-                "PAD_00..PAD_27 assigned by center y descending then x ascending, matching the frame "
-                "README's DEF numbering; source pin labels are not read or used as signal functions."),
+                f"PAD_00..PAD_{len(pads) - 1:02d} assigned by center y descending then x ascending, "
+                "matching the frame README's DEF numbering; source pin labels are not read or used "
+                "as signal functions."),
         },
         "keepout_regions": keepout_payloads,
         "available_region": _region_payload(available, dbu_um),
@@ -400,8 +437,8 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
         },
         "pro_capacity_scenarios": frame_scenarios,
         "provenance": {
-            "frame_readme": "libs.ref/ICPS2023_5_fd_base/doc/README.md",
-            "pad_source": "libs.ref/ICPS2023_5_fd_base/doc/pad_map.csv and recursive ML1 geometry",
+            "frame_readme": frame_readme_path,
+            "pad_source": f"{pad_source_path} and recursive ML1 geometry",
             "keepout_source": "explicit measurement arguments; no manufacturing/package clearance qualification",
             "area_method": "KLayout integer-DBU Boolean regions; merged connected polygons and holes",
         },
@@ -594,6 +631,8 @@ def _config_frame_arguments(config_path: Path) -> tuple[Path, dict[str, Any]]:
         "pad_keepout_um": keepouts.get("pad", 20),
         "frame_keepout_um": keepouts.get("frame", 10),
         "edge_keepout_um": keepouts.get("edge", 10),
+        "expected_pad_count": frame.get("expected_pad_count", EXPECTED_PAD_COUNT),
+        "pro_capacity_multiplier": frame.get("pro_capacity_multiplier", 4.0),
         "power_interface": frame.get("power_interface", {}),
     }
     return gds_path, report_args

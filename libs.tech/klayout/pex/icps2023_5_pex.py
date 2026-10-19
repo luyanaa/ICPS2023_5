@@ -17,9 +17,14 @@
 #         Al-P+ contact  200 ohm
 #         Al-TiN contact 0.9 ohm
 #   * capacitance -- only the reported 0.086 fF/um^2 passive-diffusion
-#     density, mapped to global SUB as an explicit assumption because the PDK
-#     does not identify its return terminal. The 2.3 fF/um^2 CAP windows are
-#     LVS-owned devices and are not emitted here.
+#     density, mapped to global SUB.  Physically CONFIRMED 2026-10-17
+#     (libs.tech/klayout/pex/audit_box_capacitance.md): the ideal 400 nm BOX
+#     parallel-plate density eps0*epsr/tBOX = 0.086327 fF/um^2 matches the
+#     measured 0.086 fF/um^2 within rounding, so the return terminal is the
+#     underlying common substrate (the PDK contract's SUB/E terminal).  Area
+#     term only; no perimeter rule is characterized.  The 2.3 fF/um^2 CAP
+#     windows are LVS-owned devices (different dielectric) and are not
+#     emitted here.
 #
 # Ownership: LVS owns MOS devices, RES bodies, CAP devices, and diode I/V.
 # PEX owns TiN/ML1 wiring and eligible passive/diode diffusion access. MOS
@@ -63,14 +68,14 @@ import klayout.pex as pex
 # accepted by this PEX deck.
 # --------------------------------------------------------------------------
 DESIGN = {
-    "DIFF": (3, 0), "TIN": (5, 0), "CNT": (7, 0), "ML1": (8, 0),
-    "TEXT": (13, 0), "RES": (15, 0), "CAP": (16, 0), "DIO": (17, 0),
-    "PAREA": (18, 0), "NAREA": (19, 0),
+    "DIFF": (3, 0), "TIN": (5, 0), "TINBLK": (5, 1), "CNT": (7, 0),
+    "ML1": (8, 0), "TEXT": (13, 0), "RES": (15, 0), "CAP": (16, 0),
+    "DIO": (17, 0), "PAREA": (18, 0), "NAREA": (19, 0), "PWL": (21, 0),
 }
 FAB = {
-    "DIFF": (4, 0), "TIN": (5, 0), "CNT": (6, 0), "ML1": (7, 0),
-    "PAREA": (2, 0), "NAREA": (3, 0), "CAP": (16, 0), "RES": (15, 0),
-    "DIO": (17, 0), "TEXT": (13, 1),
+    "DIFF": (4, 0), "TIN": (5, 0), "TINBLK": (5, 1), "CNT": (6, 0),
+    "ML1": (7, 0), "PAREA": (2, 0), "NAREA": (3, 0), "CAP": (16, 0),
+    "RES": (15, 0), "DIO": (17, 0), "TEXT": (13, 1), "PWL": (13, 0),
 }
 PROFILE_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "process_profiles.json")
@@ -124,9 +129,11 @@ VIAS = [
 # PEX does not emit device capacitance. LVS owns explicit CAP windows, and the
 # MOS model owns intrinsic gate/channel charge.
 
-# The reported density has no identified return terminal. For eligible
-# passive diffusion only, this deck maps it to global SUB as an explicit
-# single-node modeling assumption.
+# The return terminal is CONFIRMED as the underlying common substrate
+# (audit_box_capacitance.md, 2026-10-17): ideal BOX parallel plate
+# eps0*epsr/tBOX = 0.086327 fF/um^2 matches the measured 0.086 fF/um^2
+# within rounding.  For eligible passive diffusion only; the area term is
+# attributed, no perimeter rule exists.
 CAP_TO_SUB = {
     "NAREA": 0.086 * F_PER_UM2,
     "PAREA": 0.086 * F_PER_UM2,
@@ -263,10 +270,14 @@ def voronoi_area_weights(region, node_points):
 
 def carve_mos_terminal_access(
     gate_region, active_region, contact_region, dbu, layer_name,
-    other_active_region=None,
+    other_active_region=None, unclassified_gate_region=None,
 ):
-    """Carve uniquely bounded MOS access; report every unresolved terminal pair."""
+    """Carve bounded MOS access and fail closed on every unresolved gate."""
     gate_polygons = region_polygons(gate_region)
+    unclassified_gate_polygons = region_polygons(
+        unclassified_gate_region if unclassified_gate_region is not None
+        else pya.Region()
+    )
     active_polygons = region_polygons(active_region)
     active_components = [pya.Region(poly) for poly in active_polygons]
     contacts = []
@@ -352,8 +363,13 @@ def carve_mos_terminal_access(
                 near_positive = min(positive, key=lambda item: item[0])
                 unique = (sum(gap == near_negative[0] for gap, _ in negative) == 1
                           and sum(gap == near_positive[0] for gap, _ in positive) == 1)
+                # Parallel CNT cut counts per terminal side: every cut on the
+                # same side of the gate over the same active component is a
+                # parallel access path.  The assembler uses them as N_cnt in
+                # R_cnt = R_unit / N_cnt (AGENTS.md §4.2 contact decoupling).
                 options.append((near_negative[0] + near_positive[0], axis,
-                                near_negative[1], near_positive[1], unique))
+                                near_negative[1], near_positive[1], unique,
+                                len(negative), len(positive)))
 
         if not options:
             failures.append({"gate_bbox_um": gate_bounds, "reason": "unbounded"})
@@ -364,7 +380,8 @@ def carve_mos_terminal_access(
             failures.append({"gate_bbox_um": gate_bounds, "reason": "ambiguous"})
             continue
 
-        _gap, axis, negative_contact, positive_contact, _unique = options[0]
+        (_gap, axis, negative_contact, positive_contact, _unique,
+         negative_cuts, positive_cuts) = options[0]
         negative_box = negative_contact.bbox()
         positive_box = positive_contact.bbox()
         corridor = pya.Region()
@@ -426,11 +443,27 @@ def carve_mos_terminal_access(
                 "gate_center": gate_center,
                 "negative_contact": negative_contact,
                 "positive_contact": positive_contact,
+                "negative_cuts": negative_cuts,
+                "positive_cuts": positive_cuts,
             }
         )
         for poly in region_polygons(corridor & local_active):
             access_region.insert(poly)
         bounded += 1
+
+    for gate in unclassified_gate_polygons:
+        box = gate.bbox()
+        considered += 1
+        orphaned += 1
+        failures.append(
+            {
+                "gate_bbox_um": [
+                    box.left * dbu, box.bottom * dbu,
+                    box.right * dbu, box.top * dbu,
+                ],
+                "reason": "no_associated_active_component",
+            }
+        )
 
     access_region = access_region & active_region
     print(
@@ -538,26 +571,101 @@ def main():
     # keeps fitted RDSW/access out of the additive network without discarding
     # an entire connected external diffusion wire.
     diff = region("DIFF")
-    tin = region("TIN")
+    design_tin = region("TIN")
+    tin_blk = region("TINBLK")
     ml1 = region("ML1")
     cap = region("CAP")
     res = region("RES")
     dio = region("DIO")
+    pwl = region("PWL")
     raw_contacts = region("CNT")
-    mos_gate = (tin & diff) - cap
-    raw_narea = region("NAREA") & diff
-    raw_parea = region("PAREA") & diff
+    base_narea = region("NAREA")
+    base_parea = region("PAREA")
+    raw_narea = base_narea & diff
+    raw_parea = base_parea & diff
+
+    # Match fab prep exactly in design mode: only gate TiN is expanded, while
+    # the original design TiN determines where the dopant masks were cut back.
+    if args.layer_mode == "design":
+        um2dbu = int(round(2.0 / layout.dbu))
+        um4dbu = int(round(4.0 / layout.dbu))
+        prep_gate = design_tin.interacting(diff) - (design_tin & cap.sized(um4dbu))
+        process_bounds = (diff + prep_gate).extents()
+        tin = design_tin + (prep_gate.sized(um2dbu) & process_bounds) + tin_blk
+        dio2 = dio.sized(um2dbu) - (base_parea + base_narea)
+        design_n_dope = (base_narea & diff).sized(um2dbu) - (
+            design_tin - cap + dio2
+        )
+        design_p_dope = (base_parea & diff).sized(um2dbu) - (
+            design_tin - cap + dio2
+        )
+        mos_active = diff - res - cap - dio
+        n_channel_gap = (raw_narea & mos_active) - design_n_dope
+        p_channel_gap = (raw_parea & mos_active) - design_p_dope
+    else:
+        tin = design_tin
+        mos_active = diff - res - cap - dio
+
+        def active_components_overlapping(marker):
+            selected = pya.Region()
+            for poly in region_polygons(mos_active):
+                component = pya.Region(poly)
+                if not (component & marker).is_empty():
+                    selected.insert(poly)
+            return selected
+
+        n_channel_gap = active_components_overlapping(raw_narea) - raw_narea
+        p_channel_gap = active_components_overlapping(raw_parea) - raw_parea
+
+    for polarity, gap in (
+        ("NMOS", n_channel_gap),
+        ("PMOS", p_channel_gap),
+    ):
+        for poly in region_polygons(gap):
+            channel_piece = pya.Region(poly)
+            if (channel_piece & tin).is_empty():
+                continue
+            if not (channel_piece - tin).is_empty():
+                sys.exit(
+                    "ICPS2023_5 PEX: %s dopant gap is not fully covered by final TiN"
+                    % polarity
+                )
+    mos_n_gate = n_channel_gap & tin
+    mos_p_gate = p_channel_gap & tin
+
+    # The ordinary assembler only accepts four-terminal MOS devices. A
+    # TIN_BLK marker or a body-tie extension in the N-channel mask cannot be
+    # represented safely, so fail closed before mapping ordinary access.
+    if not (tin_blk & raw_parea).is_empty():
+        sys.exit("ICPS2023_5 PEX: PMOS body-tie geometry is unsupported")
+    if not tin_blk.is_empty():
+        sys.exit("ICPS2023_5 PEX: NMOS4 body-tie geometry is unsupported by four-terminal assembly")
+    if not (pwl - (design_tin & diff)).is_empty():
+        sys.exit("ICPS2023_5 PEX: N-channel body-tie route is unsupported by four-terminal assembly")
+    # PMOS body ties use the same physical signature as the LVS rule: a
+    # contacted N+ dot inside a PMOS island. The assembler still has no P
+    # terminal, so fail closed instead of silently dropping the body.
+    pmos_islands = mos_active.interacting(raw_parea)
+    if not ((raw_narea & mos_active) & pmos_islands).is_empty():
+        sys.exit("ICPS2023_5 PEX: PMOS body-tie geometry is unsupported by four-terminal assembly")
+
+    tin_res_body = (tin & res) - cap - diff
+    tin_res_anchors = tin_res_body & raw_contacts
+    tin_wire = (tin - tin_res_body) + tin_res_anchors
     narea, mos_n_contacts, n_mos_devices, n_access = carve_mos_terminal_access(
-        mos_gate, raw_narea - mos_gate, raw_contacts, layout.dbu, "NAREA",
-        other_active_region=raw_parea - mos_gate,
+        mos_n_gate, raw_narea - mos_n_gate, raw_contacts, layout.dbu, "NAREA",
+        other_active_region=raw_parea - mos_n_gate,
     )
     parea, mos_p_contacts, p_mos_devices, p_access = carve_mos_terminal_access(
-        mos_gate, raw_parea - mos_gate, raw_contacts, layout.dbu, "PAREA",
-        other_active_region=raw_narea - mos_gate,
+        mos_p_gate, raw_parea - mos_p_gate, raw_contacts, layout.dbu, "PAREA",
+        other_active_region=raw_narea - mos_p_gate,
     )
     access_reports = [n_access, p_access]
-    if not all(report["passed"] for report in access_reports):
-        sys.exit("MOS terminal access mapping is not unique and bounded; see MOS_ACCESS_RESULT")
+    failed_access = [summary["layer"] for summary in access_reports
+                     if not summary["passed"]]
+    if failed_access:
+        sys.exit("ICPS2023_5 PEX: MOS terminal access is not bounded for %s"
+                 % ", ".join(failed_access))
     mos_devices = []
     for polarity, bottom, records in (
         ("NMOS", "NAREA", n_mos_devices),
@@ -591,6 +699,49 @@ def main():
     }
     narea = narea - res_active["NAREA"]
     parea = parea - res_active["PAREA"]
+
+    def polygon_key(poly):
+        box = poly.bbox()
+        return box.left, box.bottom, box.right, box.top
+
+    # R_TIN is LVS-owned. Keep only the real CNT-backed end footprints in the
+    # PEX TIN network so its measured contacts remain represented, while the
+    # marked sheet-resistance body cannot appear in parallel.
+    tin_res_device_candidates = []
+    for body_index, body_poly in enumerate(region_polygons(tin_res_body), 1):
+        body_region = pya.Region(body_poly)
+        terminal_cuts = []
+        for cut_poly in raw_contacts.each():
+            cut_region = pya.Region(cut_poly)
+            if (cut_region & body_region & ml1).is_empty():
+                continue
+            terminal_cuts.append(
+                {"polygon": cut_poly, "key": polygon_key(cut_poly),
+                 "point": poly_centroid(cut_poly)}
+            )
+        if len(terminal_cuts) != 2:
+            box = body_poly.bbox()
+            sys.exit(
+                "ICPS2023_5 PEX: R_TIN body %d needs exactly two CNT/ML1 "
+                "terminal heads; found %d at [%g,%g,%g,%g] um"
+                % (body_index, len(terminal_cuts), box.left * layout.dbu,
+                   box.bottom * layout.dbu, box.right * layout.dbu,
+                   box.top * layout.dbu)
+            )
+        terminal_cuts.sort(key=lambda item: item["key"])
+        box = body_poly.bbox()
+        tin_res_device_candidates.append(
+            {
+                "device": "R_TIN@%.6f,%.6f" % (
+                    ((box.left + box.right) / 2.0) * layout.dbu,
+                    ((box.bottom + box.top) / 2.0) * layout.dbu,
+                ),
+                "center_x": (box.left + box.right) // 2,
+                "center_y": (box.bottom + box.top) // 2,
+                "terminals": terminal_cuts,
+            }
+        )
+
     mos_terminal_contacts = pya.Region()
     for terminal_contacts in (mos_n_contacts, mos_p_contacts):
         for poly in terminal_contacts.each():
@@ -612,7 +763,7 @@ def main():
     # remains PEX-owned. DIO access remains PEX-owned because diode series
     # resistance is not characterized.
     conductor_region = {
-        "TIN": tin,
+        "TIN": tin_wire,
         "ML1": ml1,
         "NAREA": narea,
         "PAREA": parea,
@@ -720,19 +871,41 @@ def main():
 
     # Each CNT cut is assigned to one conductor pair. Stable names follow
     # sorted contact geometry within each lower conductor.
-    def polygon_key(poly):
-        box = poly.bbox()
-        return box.left, box.bottom, box.right, box.top
 
+    via_port_name_by_key = {}
     for cut, bottom, _top, _r in VIAS:
         for index, poly in enumerate(
             sorted(region_polygons(via_regions[cut]), key=polygon_key), 1
         ):
-            add_port(
-                "C_%s_%04d" % (bottom, index),
-                bottom,
-                poly_centroid(poly),
+            name = "C_%s_%04d" % (bottom, index)
+            add_port(name, bottom, poly_centroid(poly))
+            via_port_name_by_key[(cut, polygon_key(poly))] = name
+    for candidate in tin_res_device_candidates:
+        terminal_ports = []
+        for terminal in candidate["terminals"]:
+            contact = (
+                pya.Region(terminal["polygon"])
+                & conductor_region["TIN"]
+                & conductor_region["ML1"]
             )
+            contact_polygons = region_polygons(contact)
+            names = {
+                via_port_name_by_key.get(("CNT_TIN", polygon_key(poly)))
+                for poly in contact_polygons
+            }
+            names.discard(None)
+            if len(contact_polygons) != 1 or len(names) != 1:
+                sys.exit(
+                    "ICPS2023_5 PEX: R_TIN terminal head is not a unique CNT_TIN "
+                    "network anchor for %s" % candidate["device"]
+                )
+            terminal_ports.append(next(iter(names)))
+        if len(set(terminal_ports)) != 2:
+            sys.exit(
+                "ICPS2023_5 PEX: R_TIN terminal heads collapse to one PEX node for %s"
+                % candidate["device"]
+            )
+        candidate["terminal_ports"] = terminal_ports
     mos_tie_port_groups = []
     mos_tie_terminal_ports = {}
     mos_tie_ids = {}
@@ -872,6 +1045,26 @@ def main():
         if object_id is None:
             sys.exit("MOS_MAP port missing from R network: %s" % port_name)
         return node_name[object_id]
+    tin_res_map_records = []
+    for candidate in tin_res_device_candidates:
+        endpoints = []
+        for terminal, port_name in zip(candidate["terminals"], candidate["terminal_ports"]):
+            point = terminal["point"]
+            endpoints.append(
+                {
+                    "node": mapped_port_node(port_name),
+                    "x_um": round(point.x * layout.dbu, 6),
+                    "y_um": round(point.y * layout.dbu, 6),
+                }
+            )
+        tin_res_map_records.append(
+            {
+                "device": candidate["device"],
+                "x_um": round(candidate["center_x"] * layout.dbu, 6),
+                "y_um": round(candidate["center_y"] * layout.dbu, 6),
+                "endpoints": endpoints,
+            }
+        )
 
     mos_map_records = []
     mapped_contact_ids = set()
@@ -892,12 +1085,14 @@ def main():
                 "drain_side": "positive",
                 "drain": mapped_port_node(mos_tie_terminal_ports[drain_contact]),
                 "drain_contact": drain_contact,
+                "drain_contact_cuts": record["positive_cuts"],
                 "gate": mapped_port_node(record["gate_port"]),
                 "gate_x_um": round(record["gate_center"].x * layout.dbu, 6),
                 "gate_y_um": round(record["gate_center"].y * layout.dbu, 6),
                 "source_side": "negative",
                 "source": mapped_port_node(mos_tie_terminal_ports[source_contact]),
                 "source_contact": source_contact,
+                "source_contact_cuts": record["negative_cuts"],
                 "e": "SUB",
                 "x_um": round(record["device_x"] * layout.dbu, 6),
                 "y_um": round(record["device_y"] * layout.dbu, 6),
@@ -909,6 +1104,49 @@ def main():
 
 
     elements = [element for element in all_elements if element.resistance() != 0.0]
+    physical_layer_by_id = {
+        layer_id(layers[name]): name for name in ("TIN", "ML1", "NAREA", "PAREA")
+    }
+    contact_material_by_pair = {}
+    for cut, bottom, top, _resistance in VIAS:
+        contact_material_by_pair[
+            frozenset((layer_id(layers[bottom]), layer_id(layers[top])))
+        ] = cut
+
+    def node_location_um(node):
+        location = node.location()
+        if location is None:
+            return None
+        center = location.center()
+        return [round(center.x, 6), round(center.y, 6)]
+
+    resistor_map_records = []
+    for index, element in enumerate(elements, 1):
+        a_node, b_node = element.a(), element.b()
+        a_layer, b_layer = a_node.layer(), b_node.layer()
+        if a_layer == b_layer:
+            material = physical_layer_by_id.get(a_layer, "UNKNOWN/MIXED")
+        else:
+            material = contact_material_by_pair.get(
+                frozenset((a_layer, b_layer)), "UNKNOWN/MIXED"
+            )
+        resistor_map_records.append(
+            {
+                "name": "RPEX%04d" % index,
+                "a": node_name.get(a_node.object_id(), "n%d" % a_node.object_id()),
+                "b": node_name.get(b_node.object_id(), "n%d" % b_node.object_id()),
+                "resistance_ohm": element.resistance(),
+                "material": material,
+                "ownership": "pex_network",
+                "a_location_um": node_location_um(a_node),
+                "b_location_um": node_location_um(b_node),
+                "geometry_qualification": (
+                    "bounded_sheet_or_contact_edge"
+                    if material != "UNKNOWN/MIXED"
+                    else "unknown_or_mixed_after_network_simplification"
+                ),
+            }
+        )
     print(
         "MOS terminal graph contractions: %d ties, %d zero-ohm edges"
         % (len(mos_tie_port_groups), zero_resistor_count)
@@ -1074,14 +1312,20 @@ def main():
         f.write("* extracted by libs.tech/klayout/pex/icps2023_5_pex.py\n")
         f.write("* layout: %s  top cell: %s  layer_mode: %s\n" % (args.input, cell.name, args.layer_mode))
         f.write("* process profile: %s\n" % profile_name)
+        f.write("* upper-metal layers: %s\n" % json.dumps([], separators=(",", ":")))
         f.write("* R model: KLayout RNetExtractor, square counting, per-conductor\n")
         f.write("* C model: diffusion-area Voronoi shares to located same-layer nodes; return assumed SUB\n")
         f.write(
-            "* MOS terminal CNT access is omitted from additive PEX; "
-            "RDSW versus physical access is uncharacterized\n"
+            "* MOS source/drain diffusion access is omitted from additive PEX, not "
+            "assumed 0 ohm; RDSW versus physical access is uncharacterized\n"
         )
-        f.write("* MOS terminal ties are ideal graph contractions; contact R is excluded\n")
+        f.write("* MOS terminal ties contract graph anchors only; they are not total-access models\n")
+        f.write(
+            "* MOS CNT contact terms are omitted from PEX; assembly adds measured "
+            "R_unit/N_cnt contact resistors\n"
+        )
         f.write("* MOS terminal mapping binds LVS D/G/S to physical PEX nodes\n")
+        f.write("* R_TIN bodies are LVS-owned; bounded CNT_TIN endpoint anchors are mapped separately\n")
         for summary in access_reports:
             f.write("* MOS_ACCESS_RESULT " + json.dumps(summary, sort_keys=True) + "\n")
         for record in physical_labels:
@@ -1097,6 +1341,12 @@ def main():
         for mapping in mos_map_records:
             f.write("* MOS_MAP %s\n" %
                     json.dumps(mapping, sort_keys=True, separators=(",", ":")))
+        for mapping in tin_res_map_records:
+            f.write("* R_TIN_MAP %s\n" %
+                    json.dumps(mapping, sort_keys=True, separators=(",", ":")))
+        for mapping in resistor_map_records:
+            f.write("* RESISTOR_MAP %s\n" %
+                    json.dumps(mapping, sort_keys=True, separators=(",", ":")))
         subckt_ports = list(dict.fromkeys(record["physical"] for record in physical_labels))
         subckt_ports.append("SUB")
         f.write(".SUBCKT %s_pex %s\n" % (cell.name, " ".join(subckt_ports)))
@@ -1104,15 +1354,23 @@ def main():
             f.write("* no TEXT-labelled physical terminals found\n")
             f.write("* conductor nodes use generated internal names\n")
         f.write("* ---- resistors ----\n")
-        for i, el in enumerate(elements, 1):
-            aid, bid = el.a().object_id(), el.b().object_id()
-            a = node_name.get(aid, "n%d" % aid)
-            b = node_name.get(bid, "n%d" % bid)
-            f.write("R%-5d %s %s %.6g\n" % (i, a, b, el.resistance()))
+        for record in resistor_map_records:
+            # %.9g keeps the element within the assembler's 1e-6 relative
+            # agreement check against the full-precision RESISTOR_MAP record,
+            # which %.6g output (up to 5e-6 relative rounding) violates.
+            f.write(
+                "%s %s %s %.9g\n"
+                % (
+                    record["name"],
+                    record["a"],
+                    record["b"],
+                    record["resistance_ohm"],
+                )
+            )
         if caps:
             f.write("* ---- capacitors (eligible diffusion to SUB) ----\n")
             for i, (a, b, val) in enumerate(caps, 1):
-                f.write("C%-5d %s %s %.6g\n" % (i, a, b, val))
+                f.write("C%-5d %s %s %.9g\n" % (i, a, b, val))
         f.write(".ENDS %s_pex\n" % cell.name)
 
     print("wrote %s" % output)

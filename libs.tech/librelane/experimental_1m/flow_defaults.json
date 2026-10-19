@@ -3,5 +3,5 @@
   "RT_CLOCK_MIN_LAYER": "M1",
   "RT_CLOCK_MAX_LAYER": "M1",
   "GRT_ALLOW_CONGESTION": false,
-  "RUN_ANTENNA_REPAIR": true
+  "RUN_ANTENNA_REPAIR": false
 }

@@ -1,0 +1,16 @@
+# LibreLane/KLayout LEF-DEF-to-GDS map for the post-2025 experimental 2M overlay.
+# Router aliases map to canonical ICPS2023_5 design layers.
+5 0 TIN
+7 0 CNT
+8 0 M1
+9 0 VIA1
+10 0 M2
+13 0 TEXT
+14 0 FRAME
+50 0 PAD
+
+# Local engineering IDs only; not entries in the ICPS2023_5 mask layer table.
+200 0 POLY
+201 0 VIA_POLY_TIN_CUT
+202 0 VIA_TIN_M1_CUT
+203 0 VIA_POLY_M1_CUT

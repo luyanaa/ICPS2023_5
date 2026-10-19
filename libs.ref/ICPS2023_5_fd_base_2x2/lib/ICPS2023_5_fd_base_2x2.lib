@@ -1,0 +1,41 @@
+/* ICPS2023_5_fd_base_2x2 -- physical-only Liberty view of the pad cell
+ *
+ * Generated from libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds.
+ * No pad-to-substrate capacitance or timing constraint is characterized.
+ * ML1 and TiN are electrically shorted in the drawn pad; a return-net
+ * capacitance cannot be inferred from their intervening dielectric.
+ *
+ * Do not use this library for timing-driven optimization or electrical
+ * signoff. It carries physical cell and pin identity only.
+ */
+library (ICPS2023_5_fd_base_2x2) {
+  comment : "minimal Fab SOI-CMOS 3200x3200 um frame and 60 um pad ring";
+  delay_model : generic_cmos ;
+  time_unit : "1ns";
+  voltage_unit : "1V";
+  current_unit : "1mA";
+  capacitive_load_unit (1, ff);
+  pulling_resistance_unit : "1kohm";
+  leakage_power_unit : "1nW";
+  nom_process : 1.0;
+  nom_temperature : 25.0;
+  nom_voltage : 3.3;
+  operating_conditions (typical) {
+    process : 1.0;
+    temperature : 25.0;
+    voltage : 3.3;
+  }
+  default_operating_conditions : typical;
+  voltage_map (VDD, 3.3);
+  voltage_map (VSS, 0.0);
+
+  cell (pad_60_m1_tin) {
+    area : 3600.0;
+    pad_cell : true;
+    cell_footprint : "pad_60_m1_tin";
+    pin (PAD) {
+      direction : inout;
+    }
+  }
+
+}

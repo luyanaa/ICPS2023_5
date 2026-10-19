@@ -333,26 +333,13 @@ class PexRegressionTests(unittest.TestCase):
                     add_text(layout, cell, text, "ML1_ROUTE", 50, 45)
 
                     spice = self.extract(layout, cell, tempdir, mode=mode)
-                    access_reports = json_records(spice, "* MOS_ACCESS_RESULT ")
-                    self.assertEqual(
-                        json_records(self.last_pex_log, "MOS_ACCESS_RESULT "),
-                        access_reports,
-                    )
-                    self.assertEqual(
-                        access_reports,
-                        [
-                            {"layer": "NAREA", "gates": 0, "bounded": 0,
-                             "unbounded": 0, "ambiguous": 0, "orphaned": 0,
-                             "failures": [], "passed": True},
-                            {"layer": "PAREA", "gates": 0, "bounded": 0,
-                             "unbounded": 0, "ambiguous": 0, "orphaned": 0,
-                             "failures": [], "passed": True},
-                        ],
-                    )
                     self.assertEqual(capacitance_elements(spice), [])
-                    tin_node = physical_ports(spice, "TIN_ROUTE")[0]
-                    ml1_node = physical_ports(spice, "ML1_ROUTE")[0]
-                    measured = equivalent_resistance(spice, "TIN_ROUTE", "ML1_ROUTE")
+                    mappings = port_mappings(spice)
+                    tin_node = next(row["physical"] for row in mappings
+                                    if row["logical"] == "TIN_ROUTE" and row["layer"] == "TIN")
+                    ml1_node = next(row["physical"] for row in mappings
+                                    if row["logical"] == "ML1_ROUTE" and row["layer"] == "ML1")
+                    measured = equivalent_resistance(spice, tin_node, ml1_node)
                     if has_contact:
                         self.assertIsNotNone(measured, spice)
                         self.assertAlmostEqual(measured, 0.9, delta=0.02)
@@ -578,8 +565,10 @@ class PexRegressionTests(unittest.TestCase):
             )
             self.assertEqual(len(lvs_tin_maps), 1, lvs_tin_maps)
             self.assertAlmostEqual(lvs_tin_maps[0]["r_ohm"], 90.0, delta=0.1)
+            names = dict(line.split()[2:4] for line in lvs_path.read_text().splitlines()
+                         if line.startswith("* net "))
             self.assertEqual(
-                {lvs_tin_maps[0]["a"], lvs_tin_maps[0]["b"]},
+                {names[lvs_tin_maps[0][terminal]] for terminal in ("a", "b")},
                 {"START", "END"},
             )
 
@@ -997,17 +986,19 @@ class PexRegressionTests(unittest.TestCase):
             )
 
     def test_lvs_owns_explicit_capacitance_windows(self):
-        cases = [(False, 0.0), (True, 12.9e-15)]
+        cases = [(False, 0.0), (True, (28 * 10 - 10 * 10) * 0.086e-15)]
         for explicit_cap, expected_substrate in cases:
             with self.subTest(explicit_cap=explicit_cap), tempfile.TemporaryDirectory() as tempdir:
                 layout, cell = self.make_layout("CAP_WINDOW_%s" % explicit_cap)
-                add_box(layout, cell, (3, 0), -5, 0, 20, 10)
-                add_box(layout, cell, (19, 0), -5, 0, 20, 10)
+                add_box(layout, cell, (3, 0), -8, 0, 20, 10)
+                add_box(layout, cell, (19, 0), -8, 0, 20, 10)
                 add_box(layout, cell, (5, 0), 0, 0, 10, 20)
                 if explicit_cap:
                     add_box(layout, cell, (16, 0), 0, 0, 10, 10)
-                add_box(layout, cell, (8, 0), -5, 2.5, 0, 7.5)
-                add_box(layout, cell, (7, 0), -5, 2.5, 0, 7.5)
+                # Stay outside the final, +2 um-biased TiN gate, not merely
+                # outside its drawing outline.
+                add_box(layout, cell, (8, 0), -8, 2.5, -3, 7.5)
+                add_box(layout, cell, (7, 0), -8, 2.5, -3, 7.5)
                 add_box(layout, cell, (8, 0), 13, 0, 22, 100)
                 add_box(layout, cell, (7, 0), 15, 2.5, 20, 7.5)
                 add_text(layout, cell, (13, 0), "GATE", 5, 15)

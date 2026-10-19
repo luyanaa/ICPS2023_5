@@ -105,10 +105,12 @@ defaults are not additional calibrated geometries. The library does not set
 simulator-global options.
 
 Direct fifth-P syntax is not a claim of physical body-contact support. The
-current LVS deck compares the NMOS-only `NMOS4`/`NCH4` body-tie structure;
-there is no PMOS4/PCH4 extraction path. PEX/postlayout assembly accepts
-ordinary four-terminal N/P devices only. Do not convert the historical bulk
-BSIM3 `B=S` approximation into a BSIMSOI `E=S` connection or invent a P contact.
+LVS deck maps only the N-channel five-terminal `NCH` line to `NCH4`; every
+PMOS body-contact reference (`PCH` with a fifth terminal, `PCH4`, `PMOS4`) is
+rejected before output, and no PMOS4/PCH4 extraction path exists.
+PEX/postlayout assembly accepts ordinary four-terminal N/P devices only. Do not
+convert the historical bulk BSIM3 `B=S` approximation into a BSIMSOI `E=S`
+connection or invent a P contact.
 
 ## Model provenance: the bridge fit
 
@@ -303,6 +305,22 @@ with their own area-scaled via resistance; `N_cnt` counts actual openings
 per terminal side, so such layouts are conservative (lower total access R)
 until the LVS/PEX ownership boundary is revisited.
 
+**`RDSW_RCNT_SEPARATION_UNCALIBRATED`.** The explicit `RCNT` term is a
+modeling assumption, not proof that the fitted `RDSW` excludes contact
+resistance. The original W24/L6 I–V fit is not contact-deembedded, so
+`R_effective = R_BSIM_fit + R_CNT,explicit` may still contain a partially
+double-counted component. PEX/assembly geometry (no duplicate access slivers
+inside the bounded corridor) prevents an *implementation* duplicate; it does
+not establish *physical* separation. `assemble_postlayout.py` now emits this
+status in the deck comments and on every `RESISTOR_MAP` contact record.
+`tools/audit_mos_contact_ownership.py` re-evaluates the frozen digitized PDK
+curves with the same nominal card for the bare fit, the explicit-`RCNT`
+network, and the full native post-layout network; see
+`audit/mos_contact_ownership.md`. Independent Kelvin/TLM contact-count
+measurements (TEG item 3) remain required before the two terms can be
+declared separate, and only then may the residual be read as
+access-resistance evidence rather than a model artifact.
+
 ```sh
 python3 libs.tech/ngspice/tools/assemble_postlayout.py \
   --lvs inverter_min_fit.extracted.cir \
@@ -320,6 +338,32 @@ PEX component. That source-tied fourth node is not the BSIMSOI E terminal:
 every assembled MOS gets the separate `E_SUB` formal. The assembler supports
 ordinary MOS-only inverter/NAND extraction, not NMOS4/PCH4 body contacts or
 arbitrary LVS elements.
+
+## Post-layout ERC
+
+`tools/check_postlayout_erc.py` checks actual GDS connectivity against explicit
+logical/netlist evidence. Its JSON config **must** set `"layer_mode": "design"`
+or `"fab"`; the report records that mode and its resolved layer map. Optional
+`"layers"` entries are explicit per-layer overrides and may not alias another
+physical role or silently use the other mode's mapping.
+
+Design mode reproduces fab-prep's effective-dopant derivation and final TiN
+bias; fab mode reads the actual P+ 2/0 and N+ 3/0 masks.
+
+The graph keeps SOI `DIFF` separate from effective N+ and P+ ohmic domains.
+Only complete legal CNT landings connect a single same-polarity domain to ML1;
+validated TiN/ML1 vias connect those metal layers. Channels, mixed/unknown film,
+and opposite dopant types are not DC edges. RES-marked regions do not form
+ohmic domains; CAP bottom diffusion remains within its own doped domain, and
+DIO N+/P+ sides remain separate. NCH is a mask, not blanket ohmic body
+conduction. Unsupported upper metal blocks topology claims; a local P+ contact
+alone does not qualify an assembled body path. This is a research screen, not
+foundry signoff.
+
+```sh
+python3 libs.tech/ngspice/tools/check_postlayout_erc.py \
+  --config postlayout-erc.json --report postlayout-erc.report.json
+```
 
 Run the native integration regression inside the KLayout/ngspice development
 shell:
@@ -390,6 +434,26 @@ silicon timing.
 ngspice writes `b4soiv1check.log` in the invoking directory; `*check.log` is
 ignored by the repository. Run simulations from a scratch directory if the
 checker log should not be left beside a netlist.
+
+## Capability status: what the current PDK does and does not claim
+
+Evidence grades follow AGENTS.md §5; nothing below is foundry signoff.
+
+| Item | Status | Boundary |
+|---|---|---|
+| Stage-1 card (`SOIMOD=0`, `NCH=1.7e17`) | frozen nominal | Historical fit; its low-doping numerical pathology is documented, not hidden |
+| FD / unified bridge cards (`SOIMOD=2` / `SOIMOD=1`, `NCH=1e15`) | experimental, version-scoped | Xyce 7.10 / BSIMSOI 4.5.0 for the FD card; W24/L6, 3 V, 25 °C; not promoted to nominal |
+| `NCH=1e15` in the experimental cards | **modeling prior per polarity** | It is not a measured NMOS N_CH mask dose nor an effective PMOS film concentration; both polarity net dopings remain unmeasured |
+| `TSI=95 nm`, `TBOX=400 nm`, `TOX=15 nm` | 2021 cross-section prior | The 2021 `AIST-SOI-CMOS.xs` and the 2023 device cross-sections (250 nm vs 300 nm TEOS) are not version-unified; no single qualified stack exists |
+| `NSUB`, FD flatband/`K1B`/`K2B`/`VBSA`, back-gate work function | inherited/uncalibrated | No body/back-gate C–V measurement exists for this revision |
+| `SHMOD` self-heating, PVT, aging | uncalibrated | No thermal test data; no qualified local junction temperature or BOX thermal resistance |
+| Ordinary NMOS/PMOS 3-terminal DC/AC decks | regression-verified | L=6 µm/W=24 µm, 25 °C, 3 V; geometry scaling, other temperatures and other biases are extrapolation |
+| NMOS4 | `LVS_VERIFIED / PEX_UNSUPPORTED / BODY_ACCESS_UNQUALIFIED` | Geometry can match a fifth-terminal reference; PEX/assembly and physical body access are not implemented or measured |
+| PMOS4 | `EXCLUDED_FROM_LVS_PEX / PCELL_GEOMETRY_ONLY` | Body-contact references are rejected before output; only the PCh `experimental_nplus_island` geometry experiment remains |
+| `R_SOI` (250 MΩ/sq helper) | legacy compatibility | Available only where an explicit `RES` marker selects it; never a generic model for undoped SOI film conduction |
+| Contact resistance `RDSW` + explicit `RCNT` | implementation separated, physical separation **uncalibrated** | See `audit/mos_contact_ownership.md`; Kelvin/TLM contact-count measurements are required (TEG item 3) |
+| BOX diffusion capacitance return | `BOX_RETURN_ANALYTICALLY_SUPPORTED / MEASUREMENT_UNCONFIRMED` | Analytically strongest candidate, not a measured terminal identification (`libs.tech/klayout/pex/audit_box_capacitance.md`) |
+| Numerical engine version | pinned CI: ngspice 44 | Some earlier records (delay tables, dynamic audits) were taken on ngspice 47; they are regression records, not cross-version equivalence proofs |
 
 ## Depletion-mode audit: reference versus candidates
 

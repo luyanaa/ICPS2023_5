@@ -281,26 +281,28 @@ class LvsContractTests(unittest.TestCase):
             )
 
 
-    def test_pmos_external_body_terminal_requires_a_physical_tie(self):
-        """The reader accepts PCH4; a layout without a physical PMOS tie (the
-        shipped sample has none) must not match a four-terminal reference."""
-        with tempfile.TemporaryDirectory() as tempdir:
-            tempdir = Path(tempdir)
-            schematic = tempdir / "pmos_body.cir"
-            schematic.write_text(
-                ".GLOBAL SUB\n"
-                ".SUBCKT PMOSBody D G S B\n"
-                "M1 D G S SUB B PCH L=10U W=40U\n"
-                ".ENDS PMOSBody\n"
-                "XTOP D G S B PMOSBody\n.END\n",
-                encoding="utf-8",
-            )
-            result = run_lvs(tempdir, schematic, input_layout=LAYOUT,
-                             layer_mode="fab")
-            self.assertEqual(result.returncode, 0,
-                             result.stdout + result.stderr)
-            self.assertIn("ICPS2023_5 LVS NO MATCH",
-                          result.stdout + result.stderr)
+    def test_pmos_external_body_terminal_is_excluded_from_lvs(self):
+        """A PMOS body reference must be rejected before producing a netlist."""
+        for terminals, model in (("D G S SUB B", "PCH"),
+                                 ("D G S SUB", "PCH4"),
+                                 ("D G S SUB", "PMOS4")):
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as temporary:
+                tempdir = Path(temporary)
+                schematic = tempdir / "pmos_body.cir"
+                schematic.write_text(
+                    ".GLOBAL SUB\n"
+                    ".SUBCKT PMOSBody D G S B\n"
+                    "M1 %s %s L=10U W=40U\n"
+                    ".ENDS PMOSBody\n"
+                    "XTOP D G S B PMOSBody\n.END\n" % (terminals, model),
+                    encoding="utf-8",
+                )
+                result = run_lvs(tempdir, schematic, input_layout=LAYOUT,
+                                 layer_mode="fab")
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertFalse((tempdir / "extracted.cir").exists())
+
     def test_common_but_wrong_e_net_is_rejected(self):
         with tempfile.TemporaryDirectory() as tempdir:
             tempdir = Path(tempdir)

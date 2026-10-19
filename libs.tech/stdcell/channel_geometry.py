@@ -13,11 +13,12 @@ import math
 from typing import Any
 
 
-BUS_PITCH_UM = 14.0
-# A 10um CNT_TIN_ML1 landing is 10um tall and sits on a 6um bus, so two
-# landings on adjacent buses need 5+4+5 = 14um centre-to-centre: the pads, not
-# the bus bodies, set the pitch.  The supply buses additionally clear the
-# full-width rail bands (applied below).
+# A 10 um TiN landing needs 12 um drawing clearance when both neighbours can
+# belong to gate-connected TiN: fab-prep adds 2 um per side, then the DRC tinA
+# view adds another 2 um per side before checking 4 um space. This also exceeds
+# the ML1 landing requirement (10 + 4 = 14 um pitch). Do not route drawing-only
+# clearances and discover the lost mask spacing after conversion.
+BUS_PITCH_UM = 22.0
 POWER_BUS_GAP_UM = 0.0
 # Space the topmost bus must leave under the VDD rail band: the rail tie's 10um
 # CNT_TIN_ML1 landing (half on each side) plus one ML1 space.
@@ -53,16 +54,25 @@ def _bus_order(nets, pins):
 
 
 def _channel_height(devices, net_count, bus_order=None, *, active_y):
-    escape_y = active_y + max(device["w_um"] for device in devices) + 26.0
+    import geometry as g
+    # The source/drain landing must clear the *final* gate-contact pad. Only
+    # the gate-connected component grows here; the off-SOI S/D TiN does not.
+    drawing_gap = max(g.TIN_SPACE + g.SOI_EDGE_FAB_TIN_BIAS_UM,
+                      4.0 + g.SOI_EDGE_FAB_TIN_BIAS_UM + 2.0)
+    escape_y = (active_y + max(device["w_um"] for device in devices) +
+                g.SOI_EDGE_CONTACT_OFFSET_UM + g.GATE_CONTACT / 2 +
+                g.VIA_CONTACT / 2 + drawing_gap)
     bus_floor = escape_y + 24.0
     if bus_order is None:
         span = BUS_PITCH_UM * (net_count - 1)
     else:
         positions = _bus_positions(bus_order, bus_floor)
         span = max(positions.values()) - bus_floor
-    # The topmost bus has to stay clear of the VDD rail band by the rail tie's
-    # 10um landing plus ML1 spacing, so the template reserves that tail.
-    tail = 10.0 if not bus_order else max(10.0, VIA_TAIL_UM)
+    # Include the full rail budget used by build_channel_cell's VDD clamp.
+    # Otherwise an accepted minimum height can push VDD into the previous bus.
+    rail_headroom = (g.POWER_RAIL_HEIGHT_UM + g.VIA_CONTACT +
+                     g.ML1_SPACE + 3.0)
+    tail = max(10.0, VIA_TAIL_UM, rail_headroom)
     minimum = math.ceil((bus_floor + span + tail) / 10.0) * 10.0
     return escape_y, bus_floor, minimum
 

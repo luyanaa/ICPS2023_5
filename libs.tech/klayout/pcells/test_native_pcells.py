@@ -33,6 +33,11 @@ raise "registered PCells: #{actual_cells.inspect}" unless actual_cells == EXPECT
 def variant(layout, lib, name, parameters = {})
   id = lib.layout.pcell_id(name)
   raise "missing PCell #{name}" if id < 0
+  # Reject stale names before passing the parameter map to KLayout.
+  declaration = lib.layout.pcell_declaration(id)
+  valid_parameters = declaration.get_parameters.map(&:name)
+  unknown = parameters.keys.map(&:to_s) - valid_parameters
+  raise "unknown parameters for #{name}: #{unknown.join(', ')}" unless unknown.empty?
   layout.cell(layout.add_pcell_variant(lib, id, parameters))
 end
 
@@ -55,6 +60,18 @@ end
 def expect_absent(layout, cell, layer_number, datatype = 0)
   layer = layout.layer(RBA::LayerInfo.new(layer_number, datatype))
   raise "#{cell.name} unexpectedly emitted mask #{layer_number}/#{datatype}" unless cell.shapes(layer).size == 0
+end
+
+def boxes_um(layout, cell, layer_number, datatype = 0)
+  layer = layout.layer(RBA::LayerInfo.new(layer_number, datatype))
+  boxes = []
+  RBA::Region.new(cell.begin_shapes_rec(layer)).merged.each do |polygon|
+    box = polygon.bbox
+    boxes << [box.left, box.bottom, box.right, box.top].map do |value|
+      (value * layout.dbu).round(3)
+    end
+  end
+  boxes
 end
 
 nch = variant(layout, lib, "Nch")
@@ -88,15 +105,38 @@ expect_bbox(layout, pch, 3, [0.0, 0.0, 48.0, 40.0])
 expect_bbox(layout, pch, 18, [-2.0, -2.0, 50.0, 42.0])
 expect_bbox(layout, pch, 1, [-2.0, -2.0, 50.0, 42.0])
 expect_absent(layout, pch, 19)
+pmos_diff = boxes_um(layout, pch, 3)
+raise "ordinary Pch must have only its channel/S-D diffusion, not a body-contact island" unless pmos_diff == [[0.0, 0.0, 48.0, 40.0]]
+pplus_area = boxes_um(layout, pch, 18)
+raise "ordinary Pch must retain only its device P+ area" unless pplus_area == [[-2.0, -2.0, 50.0, 42.0]]
+
 
 psub_nch = variant(layout, lib, "Nch", {"with_psubcont" => true})
 expect_bbox(layout, psub_nch, 3, [-6.5, 0.0, 48.0, 44.5])
 expect_bbox(layout, psub_nch, 18, [-8.5, 29.5, 8.5, 46.5])
 expect_absent(layout, psub_nch, 1)
 
-pch_nsub = variant(layout, lib, "Pch", {"with_nsubcont" => true})
-expect_bbox(layout, pch_nsub, 19, [-8.5, 49.5, 8.5, 66.5])
-expect_bbox(layout, pch_nsub, 1, [-8.5, -2.0, 50.0, 66.5])
+pch_nplus_island = variant(
+    layout, lib, "Pch", {"experimental_nplus_island" => true}
+)
+expect_bbox(layout, pch_nplus_island, 19, [-8.5, 49.5, 8.5, 66.5])
+expect_bbox(layout, pch_nplus_island, 1, [-8.5, -2.0, 50.0, 66.5])
+channel_diff = [0.0, 0.0, 48.0, 40.0]
+nplus_island_diff = [-6.5, 51.5, 6.5, 64.5]
+island_diff = boxes_um(layout, pch_nplus_island, 3)
+unless island_diff.length == 2 &&
+       island_diff.include?(channel_diff) &&
+       island_diff.include?(nplus_island_diff) &&
+       nplus_island_diff[1] > channel_diff[3]
+  raise "experimental Pch N+ SOI island must be separate from the PMOS channel diffusion"
+end
+nplus_island = boxes_um(layout, pch_nplus_island, 19)
+pmos_parea = boxes_um(layout, pch_nplus_island, 18)
+unless nplus_island == [[-8.5, 49.5, 8.5, 66.5]] &&
+       pmos_parea == [[-2.0, -2.0, 50.0, 42.0]] &&
+       nplus_island[0][1] > pmos_parea[0][3]
+  raise "experimental Pch N+ SOI island must not overlap the PMOS P+ area"
+end
 
 # Protected gate bays are formula-derived; the minimum bay preserves the
 # native source/drain contact clearance while retaining the physical channel L.
@@ -173,8 +213,10 @@ expect_bbox(layout, nbridge, 19, [-0.5, -0.5, 33.5, 53.5])
 expect_absent(layout, nbridge, 5)
 
 # Default-profile corpus must not leak unqualified upper-metal masks.
-[nch, pch, nch_no_bus, nch_bus, tied_nch, psub_nch, pch_nsub,
- r_ndiff, r_pdiff, ncap, pcap, tin_cap, bridge, nbridge].each do |cell|
+[
+ nch, pch, nch_no_bus, nch_bus, tied_nch, psub_nch, pch_nplus_island,
+ r_ndiff, r_pdiff, ncap, pcap, tin_cap, bridge, nbridge
+].each do |cell|
   expect_absent(layout, cell, 9)
   expect_absent(layout, cell, 10)
 end

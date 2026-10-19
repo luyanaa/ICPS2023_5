@@ -642,6 +642,9 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
     lines.append("* Explicit contact resistors R_cnt = R_unit/N_cnt sit between")
     lines.append("* each PEX node and its MOS D/S terminal (p.8 measured openings;")
     lines.append("* the gate side is PEX-owned CNT_TIN and is not repeated here)")
+    lines.append("* RDSW_RCNT_SEPARATION_UNCALIBRATED: the fitted MOS has not")
+    lines.append("* been contact-deembedded; adding RCNT is a model assumption,")
+    lines.append("* not proof of independent physical resistance ownership.")
     contact_resistor_count = 0
     for index, device in enumerate(lvs["devices"], 1):
         mapping = maps_by_key[device["key"]]
@@ -682,6 +685,7 @@ def assemble(lvs_path, pex_path, schematic_path, top, output_path,
                     "parallel_cuts": n_cuts,
                     "unit_contact_resistance_ohm": r_unit,
                     "ownership": "assembled_mos_contact",
+                    "fit_separation_status": "RDSW_RCNT_SEPARATION_UNCALIBRATED",
                 },
                 sort_keys=True, separators=(",", ":")))
             lines.append("%s %s %s %.6g"

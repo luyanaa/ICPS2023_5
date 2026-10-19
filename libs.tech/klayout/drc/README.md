@@ -139,6 +139,75 @@ Three derivations in `icps2023_5_fab_prep.drc` change manufacturing geometry;
   (120 µm² vs 1568 µm² for `nmos_min`), so it is a behaviour change that needs
   recipe confirmation, not a bug fix.
 
+## Report-only N_CH mask audit (`audit_nch_mask.py`)
+
+The N_CH audit inventories geometry and compares source/fab mask provenance;
+it is **not** a DRC deck or manufacturing qualification. It accepts explicit
+design or fab input and emits JSON to standard output (or `--output`):
+
+```bash
+python3 libs.tech/klayout/drc/audit_nch_mask.py \
+  --input design.gds --mode design [--top CELL] [--output nch-report.json]
+
+python3 libs.tech/klayout/drc/audit_nch_mask.py \
+  --input fab.gds --mode fab [--top CELL] \
+  [--source design.gds [--source-top CELL] \
+   [--source-provenance explicit|legacy]]
+```
+
+For multi-top files, select the cell with `--top` (and `--source-top` for a
+multi-top source). The report records each input path, selected top, SHA-256,
+database unit, and layer mapping. Drawing `21/0` maps to fab `13/0`. A design
+input reports the explicit NCH candidate and the historical legacy candidate
+separately; the latter is exactly
+`NAREA.interacting(TIN).sized(2.0 um) + NCH`, with fab-prep's `MASK`/`EXCLUDE`
+subtraction applied first. Neither candidate is asserted to be the physically
+correct recipe.
+
+For fab input, `--source` enables geometry XORs against both candidates.
+`--source-provenance explicit|legacy` declares which candidate is compared for
+the provenance category; omit the declaration to record the source as
+unconfirmed. XORs use direct coordinates after DBU normalization only; there
+is no overlay correction. If no source is provided, `source` is reported as
+unknown. A `PROVENANCE_MISMATCH` is a source/recipe discrepancy only; it is
+distinct from process validity and never makes the report a manufacturing error.
+
+Report categories and evidence grades:
+
+* `NCH_MASK_INVENTORY` — merged mask components with bounding boxes and areas,
+  plus area, empty-layer state, and raw degenerate NCH shapes retained by
+  KLayout (if any).
+* `NCH_SOI_RELATION` — on-SOI and off-SOI area/components, including parts
+  disjoint from SOI. These are geometry observations; NCH is not assumed to be
+  confined beneath a gate.
+* `NCH_CHANNEL_COVERAGE` — reports the geometric candidate
+  `(SOI ∩ TiN) − (effective P+ ∪ effective N+)`, not the biased overlap edges;
+  it stays `UNCONFIRMED` because no accepted manufacturing coverage criterion
+  exists and a mask gap is not a measured electrical channel.
+* `NCH_EFFECTIVE_P_PLUS_OVERLAP` and `NCH_EFFECTIVE_N_PLUS_OVERLAP` — overlap
+  areas/components against fab P+/N+ masks (or design-derived masks using the
+  existing fab-prep formula). Overlap is observational, not a violation.
+* `PROVENANCE_COMPARISON` — source/fab XOR evidence with
+  `PROVENANCE_MATCH`, `PROVENANCE_MISMATCH`, or `UNCONFIRMED`.
+* `PROCESS_LIMITS` — `UNCONFIRMED`; minimum size, spacing, exposure/polarity,
+  overlay tolerance, allowed N_CH regions, and the intended recipe need
+  foundry confirmation.
+
+All reports remain `REPORT_ONLY`, `UNQUALIFIED`, and not suitable for sign-off.
+Geometry-only evidence never promotes unknown size, spacing, exposure,
+overlay, coverage, or allowed-region requirements to `PASS`.
+
+Focused verification (run in an environment with `klayout.db` and `klayout`):
+
+```bash
+python3 -m unittest discover -s libs.tech/klayout/drc -p 'test_nch_mask_audit.py'
+```
+
+The tests generate separate ordinary NMOS, body-tied NMOS4, and ordinary
+no-body PMOS native PCells, compare both candidates to actual fab-prep
+conversions, and exercise hierarchy, `MASK`/`EXCLUDE`, source XORs, and unknown
+provenance. They do not imply PMOS4 LVS support.
+
 ## `icps2023_5_fab_prep.drc`
 
 Design numbering -> foundry mask numbering, applying the mask biases of the

@@ -60,18 +60,19 @@ output_file = ($output && !$output.to_s.empty?) ? $output.to_s : File.expand_pat
 puts "ICPS2023_5 LVS  layer_mode=#{layer_mode}  profile=#{profile_name}  input=#{$input}  schematic=#{$schematic}"
 puts "ICPS2023_5 LVS  layout_top=#{layout_top}  report=#{report_file}  output=#{output_file}"
 
-# BSIMSOI uses D/G/S/E, with optional P for an external body contact. KLayout's
-# SPICE reader accepts only four MOS nodes, so five-node instances are rewritten
-# as D/G/S/P with a private model alias after E is checked against the declared
-# global substrate (default SUB). Layout has no substrate/BOX geometry, so E is
-# still projected out of comparison. P remains the fourth terminal matched to
-# the extracted body tie.
+# BSIMSOI uses D/G/S/E. Only NCH accepts an optional fifth P: after E is
+# validated, the reader projects D/G/S/E/P to D/G/S/P for NMOS4 comparison.
+# PMOS body-contact devices are excluded from the LVS device set. Layout has
+# no substrate/BOX geometry, so E is projected out of comparison, not tied to S.
 class MOS4ToSOIReader < RBA::NetlistSpiceReaderDelegate
   def element(circuit, el, name, model, value, nets, params)
     return super unless el == "M" && nets.size == 4
 
-    body_contact = model.to_s =~ /__P\z/i
-    class_name = body_contact ? model.to_s.sub(/__P\z/i, "4") : model.to_s
+    body_contact = model.to_s.casecmp("NCH__P").zero?
+    if model.to_s =~ /(?:__P|PCH4|PMOS4)\z/i && !body_contact
+      raise ArgumentError, "ICPS2023_5 LVS: unsupported body-contact model #{model}"
+    end
+    class_name = body_contact ? "NCH4" : model.to_s
     cls = circuit.netlist.device_class_by_name(class_name)
     unless cls
       cls = body_contact ? RBA::DeviceClassMOS4Transistor::new : RBA::DeviceClassMOS3Transistor::new
@@ -117,6 +118,11 @@ spice_lines.map! do |line|
   first_parameter = fields.index { |field| field.include?("=") }
   model_index = first_parameter ? first_parameter - 1 : fields.length - 1
   terminal_count = model_index - 1
+  model = fields[model_index].to_s
+  if model =~ /\A(?:PCH4|PMOS4)\z/i ||
+     (terminal_count == 5 && !model.casecmp("NCH").zero?)
+    raise ArgumentError, "ICPS2023_5 LVS: body-contact references are restricted to NCH D/G/S/E/P"
+  end
   next line unless [4, 5].include?(terminal_count)
 
   substrate = fields[4].to_s.downcase
@@ -225,20 +231,25 @@ bulk = polygon_layer
 diode_region = diff.overlapping(dio)
 cnt_d = cnt_a & diode_region
 cnt = cnt_a - cnt_d
-diff_nores = diff - res - cap - diode_region
+mos_active = diff - res - cap - diode_region
 if layer_mode == "design"
-  ndiff = diff_nores & narea
-  pdiff = diff_nores & parea
+  ndiff = mos_active & narea
+  pdiff = mos_active & parea
   dio2 = dio.sized(2.0.um) - (parea + narea)
-  design_n_dope = (narea & diff).sized(2.0.um) - (tin - cap + dio2)
-  design_p_dope = (parea & diff).sized(2.0.um) - (tin - cap + dio2)
-  n_channel_gap = ndiff - design_n_dope
-  p_channel_gap = pdiff - design_p_dope
+  n_dope = ((narea & diff).sized(2.0.um) - (tin - cap + dio2)) & diff
+  p_dope = ((parea & diff).sized(2.0.um) - (tin - cap + dio2)) & diff
+  n_channel_gap = ndiff - n_dope
+  p_channel_gap = pdiff - p_dope
 else
-  ndiff = diff_nores.overlapping(narea)
-  pdiff = diff_nores.overlapping(parea)
-  n_channel_gap = ndiff - narea
-  p_channel_gap = pdiff - parea
+  ndiff = mos_active.overlapping(narea)
+  pdiff = mos_active.overlapping(parea)
+  n_dope = narea & diff
+  p_dope = parea & diff
+  n_channel_gap = ndiff - n_dope
+  p_channel_gap = pdiff - p_dope
+end
+unless cnt_a.interacting(n_dope).interacting(p_dope).is_empty?
+  raise ArgumentError, "ICPS2023_5 LVS: CNT spans N+/P+ domains; no ohmic junction crossing is permitted"
 end
 
 # A gate candidate is a dopant-free SOI region with TiN over it, and the channel
@@ -274,32 +285,25 @@ if layer_mode == "fab"
   bt_marker_gate = ngate.interacting(contacted_paths)
 end
 
-# PMOS body ties: the foundry mask set has no P-ch channel mask and NWL has no
-# fab mask. A mask-visible tie requires a continuous N-type neck that leaves the
-# channel and stays outside the P+ dope - but this PCell's channel-adjacent neck
-# is covered by the gate extension (it cannot be separated from the channel) and
-# a neck outside TiN is cut by the 2 um P+ bias. PMOS4 extraction therefore
-# remains PMOS4_EXPERIMENTAL and fails closed: an in-island N+ dot aborts
-# instead of silently dropping the body terminal.
-pmos_islands = diff.interacting(parea)
+# No PMOS body-contact device is extracted. Keep the unsupported mixed-island
+# guard so a layout carrying body-contact intent cannot silently become PMOS3.
+# The separate N+ island offered by the PCell is geometry only, not body access.
+pmos_islands = mos_active.interacting(parea)
 p_tie_dots = (narea & diff) & pmos_islands
 unless p_tie_dots.is_empty?
-  raise "ICPS2023_5 LVS: PMOS body-tie extraction is not supported yet " \
-        "(N+ dot inside a PMOS island)"
+  raise ArgumentError, "ICPS2023_5 LVS: mixed N+/P+ PMOS island is outside the supported device set"
 end
 
 bt_ngate = bt_marker_gate
 ngate = ngate - bt_ngate
 bt_ndiff = ndiff.interacting(bt_ngate)
 ndiff = ndiff - bt_ndiff
-nsd = ndiff - ngate
-bt_nsd = bt_ndiff - bt_ngate
-psd = pdiff - pgate
+nsd = (ndiff - ngate) & n_dope
+bt_nsd = (bt_ndiff - bt_ngate) & n_dope
+psd = (pdiff - pgate) & p_dope
 lv_ngate = ngate
 lv_pgate = pgate
 lv_bt_ngate = bt_ngate
-
-diff_nores = diff_nores - ngate - pgate - bt_ngate
 
 diff_in_pwl = diff & pwl
 ptie = diff_in_pwl & parea
@@ -328,16 +332,23 @@ ndiff_c1 = cap & tin & diff & narea
 ndiff_c2 = cap & tin & diff & narea
 
 tin_res = (res & tin) - cap - diff
-# Only a CNT cut on the TiN resistor and connected to ML1 can terminate R_TIN.
-# Keep the actual cut footprint as the extractor contact: extending it across
-# the body would alter KLayout's perimeter-based resistance calculation.
+# A real CNT/ML1 must touch each terminal. Use the touched strip end face for
+# the sheet-R electrode width, not the narrower CNT footprint: otherwise the
+# perimeter extractor mistakes a 10 um strip for a 5 um-wide resistor. This is
+# a full-width electrode approximation, not a contact-spreading model.
 tin_res_contact_cuts = tin_res.sized(0.5.um) & cnt & ml1
-tin_res_contacts = tin_res_contact_cuts
+tin_res_end_faces = tin_res.edges.interacting(tin_res_contact_cuts)
+tin_res_contacts = tin_res_contact_cuts + tin_res_end_faces.extended(0, 0, 0.5.um, 0)
 tin_conn = tin - tin_res
 nres = narea & res & diff
 pres = parea & res & diff
 soi_res = (res & diff) - nres - pres
-diff_nores = diff - nres - pres - soi_res - ngate - pgate - bt_ngate - pdiff_c2 - ndiff_c2
+# Geometric SOI continuity is not an ohmic connection. Keep the two implanted
+# domains separate; unknown film, channels, and declared device bodies are
+# boundaries. R_SOI is represented only where RES explicitly selects it.
+diff_device_bodies = nres + pres + soi_res + ngate + pgate + bt_ngate + pdiff_c2 + ndiff_c2 + diode_region
+n_ohmic = n_dope - diff_device_bodies
+p_ohmic = p_dope - diff_device_bodies
 rs_layer = soi_res.sized(0.5.um) & (diff - soi_res)
 rn_layer = nres.sized(0.5.um) & (diff - nres)
 rp_layer = pres.sized(0.5.um) & (diff - pres)
@@ -375,7 +386,8 @@ connect(cnt, ml1)
 connect(ml1, text_labels)  # attaches logical top-level labels for extraction/assembly
 connect(ml1, via1)
 connect(via1, ml2)
-connect(diff_nores, cnt)
+connect(n_ohmic, cnt)
+connect(p_ohmic, cnt)
 connect(cnt, ptie)
 connect(pwl, ptie)
 connect(mim_c1, ml1)
@@ -383,12 +395,14 @@ connect(mim_c2, ml2)
 connect(tin_c1, ml1)
 connect(tin_c2, tin)
 connect(pdiff_c1, tin)
-connect(pdiff_c2, diff_nores)
+connect(pdiff_c2, p_ohmic)
 connect(ndiff_c1, tin)
-connect(ndiff_c2, diff_nores)
-connect(rn_layer, diff_nores)
-connect(rp_layer, diff_nores)
-connect(rs_layer, diff_nores)
+connect(ndiff_c2, n_ohmic)
+connect(rn_layer, n_ohmic)
+connect(rp_layer, p_ohmic)
+connect(rs_layer, n_ohmic)
+connect(rs_layer, p_ohmic)
+connect(rs_layer, cnt)
 connect(pplus, cnt_d)
 connect(ml1, cnt_d)
 connect(nplus, ncnt)
@@ -450,7 +464,7 @@ class ICPS2023_5PhysicalNetlistWriter < RBA::NetlistSpiceWriterDelegate
       end
       position = device.trans.disp
       record = {
-        "instance" => device.name,
+        "instance" => "R" + format_name(device.expanded_name),
         "a" => net_to_string(a),
         "b" => net_to_string(b),
         "r_ohm" => device.parameter("R"),

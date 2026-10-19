@@ -39,14 +39,13 @@ The deck requires every `E` terminal to use the declared global substrate;
 default is `.GLOBAL SUB`, overridable with `-rd substrate=NET`. `E` is still
 projected out of comparison because this PDK has no matching substrate/BOX
 geometry, so this checks the schematic substrate contract, not a physical
-backside contact or layout-to-E connection. A five-terminal `D G S E P` line
-maps `P` to an extracted four-terminal device (`NCH4`/`PCH4`). NMOS4 is
-extracted physically (see below). PMOS body ties have no mask-visible body path
-in the current foundry mask set: there is no P-ch channel mask and `NWL` has no
-fab mask, and the PCell's off-island n-substrate contact is therefore not
-visible to the LVS. The reader accepts `PCH4`, but an in-island N+ dot (the only
-mask-visible tie signature) aborts the extraction instead of silently dropping
-the body terminal; full PMOS4 extraction is an open item.
+backside contact or layout-to-E connection. Only an N-channel five-terminal
+`D G S E P NCH` line maps `P` to `NCH4` for comparison with extracted `NMOS4`.
+PMOS body-contact references (`PCH` with a fifth terminal, `PCH4`, `PMOS4`)
+are rejected before extraction; there is no PMOS4 class or reader mapping.
+An in-island N+ dot on a PMOS layout is also rejected, never silently projected
+to PMOS3. The Pch `experimental_nplus_island` option retains only a separate
+N+ SOI island for geometry experiments; it is not a local body connection.
 
 MOS `L` is measured geometrically from the SOI dopant-free gap: design mode
 reproduces fab-prep's dopant-mask derivation, while fab mode uses the N/P
@@ -62,13 +61,12 @@ GDS has a 14 um TiN gate window (the 10 um drawing gate plus 2 um per end) over
 a 10 um physical dopant gap. That reference preserves the measured geometry; it
 is separate from the current native PCell test geometry (`L=6` um).
 
-### PMOS4 manufacturable-geometry contract (PMOS4_EXPERIMENTAL)
+### PCell-only PMOS body-access geometry evidence
 
-`mos4.W` does not require a dedicated manufacturing mask: it may be a layer
-derived from several masks. What it does require is a mask-geometry rule that
-guarantees the derived W is the correct physical network. `SOI - P_DIFF - N_CH`
-is only a candidate: it does not make every remaining SOI region one conductor,
-it must exclude the P+ source/drain, and a fully depleted path may not conduct.
+PMOS4 is excluded from the LVS/PEX device sets, not an extractor awaiting
+enablement. The retained mask experiments test geometric boundaries only:
+`SOI - P_DIFF - N_CH` does not make the remaining low-doped SOI an ohmic
+conductor, and continuity cannot establish body access through a depleted film.
 
 `test_pmos4_mask_contract.py` draws a minimal fabrication-mask reference with no
 drawing-to-fab conversion and pins four contracts: C1 a continuous N-type body
@@ -79,10 +77,10 @@ neck reproduces the documented `L_E = L(1 + L_V/W)` distortion: the 9.09/6 test
 ratio implies `L_V/W ~ 0.515`); C5 the N+ dot has a legal CNT/ML1 terminal. C4
 (gate CNT not on the body path) is covered by the same fixture.
 
-Two layouts are frozen as permanent negative regressions: a P+ intrusion that
-cuts the neck, and a neck under the gate. Neither may ever match a normal
-rectangular PMOS4; the current deck refuses every PMOS tie because the
-experimental extractor is not implemented.
+Two layouts are frozen as negative geometry evidence: a P+ intrusion that cuts
+the neck, and a neck under the gate. The hand-built reference and both failure
+layouts are rejected when paired with a PMOS body-contact schematic; a passing
+mask-contract test is not a positive PMOS4 LVS result.
 
 Drawing-to-fab realizability is gated in the same file: a legal drawing input
 is converted and XOR-compared per mask against the reference. SOI, `P_DIFF`,
@@ -121,8 +119,27 @@ model, not a PMOS4 with an ideal `P` connection.
 
 The PDIFF/NDIFF geometry is the TiN/diffusion capacitor shown on PDK p.18 and
 uses the measured 2.3 fF/um² gate-oxide Cox from p.9. The PDFs do not qualify
-the listed `R_SOI`, MIMCAP, or TiN/Al-capacitance values; `R_SOI` and MIM/TIN
-extraction remain legacy compatibility entries.
+the listed `R_SOI`, MIMCAP, or TiN/Al-capacitance values. `R_SOI` is selected
+only by an explicit `RES` marker and remains an experimental legacy
+250 Mohm/square approximation, not a transport model for unmarked SOI.
+
+### Ohmic partition and resistor terminals
+
+The conductor contract uses separate final N+ and P+ domains, never the whole
+SOI island. Design mode derives the dopant masks exactly as fab-prep; fab mode
+uses the actual masks. MOS channels and unknown low-doped film are not DC wire,
+and a CNT spanning both dopant domains is rejected, including on a declared
+diode. A `DIO` marker owns a junction device, not an ideal PN short. Explicit
+resistor/capacitor terminals connect only to their own implanted domain.
+`test_soi_partition.py` compares real LVS terminal nets with PEX resistive
+reachability and independent ERC component roots for these boundaries.
+
+`R_TIN` uses the full strip end face touched by each real CNT/ML1 stack as its
+sheet-resistor electrode. The narrower CNT cut must not redefine the strip's
+electrical width. This is a full-width-electrode approximation; current
+spreading and resistor-head access are not independently characterized.
+PEX retains the actual CNT footprints and measured contact terms separately.
+
 
 In the experimental profile, the connectivity stack is TiN, contact, ML1,
 VIA1, and ML2, with the legacy capacitor, resistor, and diode connections
@@ -178,8 +195,8 @@ The upstream [design LVS](https://github.com/mineda-support/ICPS2023_5/blob/main
 and [fabrication LVS](https://github.com/mineda-support/ICPS2023_5/blob/main/Technology/tech/lvs/lvs_fabrication.lylvs)
 are separate wrapper-driven decks. This consolidated deck selects design or
 fab layers explicitly and removes the Anagix/MinedaCommon, spreadsheet, and
-symlink runtime. It retains the original extraction/connectivity rules, with
-the following behavior changes:
+symlink runtime. Semiconductor conductors now use the explicit dopant
+partition above rather than the legacy residual-SOI connection:
 
 * The MOS reader preserves `D/G/S`, validates the common B4SOI `E` substrate,
   and supports only the explicit N-channel `P` body-tie mapping to `NMOS4`.
@@ -189,7 +206,7 @@ the following behavior changes:
 * An extracted `R_TIN` is explicit LVS-owned resistance; its body is excluded
   from the PEX conductor wire to avoid parallel counting.
 * NMOS4 body-tie gate geometry is removed from the source/drain diffusion
-  regions; PMOS body ties have no mask-visible body path; an in-island N+ dot fails closed until PMOS4 extraction lands.
+  regions; mixed N+/P+ PMOS islands fail closed, and PMOS body-contact references are excluded.
 
 Use `-rd filters=legacy` only for the established pad-array compatibility
 comparison. Strict mode remains a preliminary LVS check, not complete SOI

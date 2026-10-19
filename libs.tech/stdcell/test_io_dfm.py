@@ -60,7 +60,9 @@ class IoDfmGeometryTests(unittest.TestCase):
         return path
 
     def test_existing_bare_frame_reports_missing_openings_and_blocked_acceptance(self):
-        report = io_dfm.check_io_dfm(FRAME_GDS, expected_pad_count=28)
+        # The shipped 1x1 frame GDS is foundry numbered (ML1 7/0, PAD 10/0).
+        report = io_dfm.check_io_dfm(FRAME_GDS, layer_mode="fab",
+                                     expected_pad_count=28)
         self.assertEqual(report["checks"]["engineering_frame"]["status"], "MEASURED")
         self.assertEqual(report["checks"]["engineering_frame"]["pad_count"], 28)
         self.assertEqual(report["checks"]["pad_openings"]["status"], "MISSING")
@@ -213,11 +215,13 @@ class IoDfmGeometryTests(unittest.TestCase):
         structural_json = self.directory / "structural.json"
         manufacturing_json = self.directory / "manufacturing.json"
         structural_exit = io_dfm.main([
-            "--gds", str(path), "--expected-pad-count", "1",
+            "--gds", str(path), "--layer-mode", "design",
+            "--expected-pad-count", "1",
             "--mode", "structural", "--out", str(structural_json),
         ])
         manufacturing_exit = io_dfm.main([
-            "--gds", str(path), "--expected-pad-count", "1",
+            "--gds", str(path), "--layer-mode", "design",
+            "--expected-pad-count", "1",
             "--mode", "manufacturing", "--out", str(manufacturing_json),
         ])
         self.assertEqual(structural_exit, 0)

@@ -11,7 +11,7 @@ geometry-only; the electrical models live in `libs.tech/ngspice/`.
 | `pcont` | 13 × 13 | gate/TiN contact cluster | `Nch`, `Pch`, `TIN_cap` PCells |
 | `pcont_min` | 9 × 13 | minimum gate contact | `Nch`, `Pch` PCells |
 | `psubcont` | 12 × 12 | p-substrate (body) contact | `Nch` PCell (`with_psubcont`) |
-| `nsubcont` | 12 × 12 | n-substrate (body) contact | `Pch` PCell (`with_nsubcont`) |
+| `nsubcont` | 12 × 12 | n-substrate contact | `Pch` PCell (`experimental_nplus_island`: separate N+ SOI island; not a PMOS body contact) |
 | `DCNT` | 13 × 13 | double contact | `psubcont`, `nsubcont` |
 | `DCNT2` | 9 × 9 | double contact, small | device contacts |
 | `Via` | 13 × 13 | ML1–ML2 via | resistor and capacitor PCells |

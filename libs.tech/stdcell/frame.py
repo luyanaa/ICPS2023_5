@@ -35,7 +35,9 @@ except ImportError:  # pragma: no cover - supplied by the pinned KLayout toolcha
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.json")
 FRAME_LAYER = (14, 0)
-ML1_LAYER = (8, 0)
+# Migrated frame libraries are foundry numbered: their pads are on fab ML1 7/0.
+# layer_mode is an explicit caller/config input; no layer is guessed from content.
+ML1_LAYERS = {"design": (8, 0), "fab": (7, 0)}
 EXPECTED_PAD_COUNT = 28
 EXPECTED_PAD_SIZE_UM = 60.0
 
@@ -188,7 +190,8 @@ def _power_assignments(power_interface: Any, pad_ids: set[str]) -> dict[str, str
     return dict(sorted(assignments.items()))
 
 
-def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = None,
+def measure_frame(gds_path: str | Path, *, layer_mode: str,
+                  die_bbox: Sequence[float] | None = None,
                   pad_keepout_um: float = 20, frame_keepout_um: float = 10,
                   edge_keepout_um: float = 10,
                   expected_pad_count: int | None = None,
@@ -196,7 +199,10 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
                   power_interface: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Measure die/frame/pad geometry and reserved core area from a real GDS.
 
-    ``die_bbox`` is an optional [left, bottom, right, top] die override in um;
+    ``layer_mode`` is mandatory: ``design`` reads drawing ML1 8/0 and ``fab``
+    reads foundry-numbered ML1 7/0.  The migrated frame GDS files are ``fab``;
+    synthetic drawing fixtures are ``design``.  ``die_bbox`` is an optional
+    [left, bottom, right, top] die override in um;
     otherwise the outer FRAME14/0 contour is used.  Keepouts are nonnegative
     distances in um.  ``expected_pad_count`` defaults to the canonical 28-pad
     1x1 frame; the derived 3200 x 3200 um 2x2 frame library supplies 56.
@@ -244,12 +250,16 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
     # Flatten only the in-memory read copy so contours and physical plates can
     # be reconstructed from the complete hierarchy, including array members.
     top.flatten(-1)
+    if layer_mode not in ML1_LAYERS:
+        raise FrameError("layer_mode must be 'design' or 'fab' (got %r)" % (layer_mode,))
+    ml1_layer = ML1_LAYERS[layer_mode]
     frame_index = layout.find_layer(db.LayerInfo(*FRAME_LAYER))
-    ml1_index = layout.find_layer(db.LayerInfo(*ML1_LAYER))
+    ml1_index = layout.find_layer(db.LayerInfo(*ml1_layer))
     if frame_index is None:
         raise FrameError("GDS is missing FRAME14/0 geometry")
     if ml1_index is None:
-        raise FrameError("GDS is missing ML1 8/0 pad geometry")
+        raise FrameError("GDS is missing ML1 %d/%d pad geometry for layer_mode=%r"
+                         % (ml1_layer[0], ml1_layer[1], layer_mode))
 
     frame_boxes = []
     for shape in top.shapes(frame_index).each():
@@ -413,7 +423,7 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
         "die_bbox_source": "FRAME14/0 outer contour" if die_bbox is None else "explicit die_bbox override",
         "die_area_um2": die_area_um2,
         "pads": {
-            "layer": [ML1_LAYER[0], ML1_LAYER[1]],
+            "layer": [ml1_layer[0], ml1_layer[1]],
             "count": len(pads),
             "merged_rectangle_count": len(pads),
             "bbox_um": pad_bbox,
@@ -436,6 +446,7 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
             "signal_or_power_inferred_from_gds_labels": False,
         },
         "pro_capacity_scenarios": frame_scenarios,
+        "layer_mode": layer_mode,
         "provenance": {
             "frame_readme": frame_readme_path,
             "pad_source": f"{pad_source_path} and recursive ML1 geometry",
@@ -448,9 +459,13 @@ def measure_frame(gds_path: str | Path, *, die_bbox: Sequence[float] | None = No
             "signoff_claimed": False,
             "frame": "drawing only; no documented seal-ring width or seal-ring qualification",
             "technology": {
-                "ML1": "8/0, width 6 um, spacing 4 um",
+                "ML1": ("drawing 8/0 input, width 6 um, spacing 4 um"
+                        if layer_mode == "design" else
+                        "foundry-numbered 7/0 input, width 6 um, spacing 4 um"),
                 "TiN": "5/0, width 6 um, spacing 6 um, sheet resistance 20 ohm/square",
-                "CNT": "7/0, 5 x 5 um; ML1/TiN enclosure at least 2.5 um outside active 3/0",
+                "CNT": ("7/0, 5 x 5 um; ML1/TiN enclosure at least 2.5 um outside active 3/0"
+                        if layer_mode == "design" else
+                        "6/0, 5 x 5 um; ML1/TiN enclosure at least 2.5 um outside SOI 4/0"),
                 "source_drain_contact_enclosure": "4 um",
                 "unsupported": "no Poly/VIA1/ML2 routing; direct TiN/diffusion CNT is unqualified",
             },
@@ -627,6 +642,7 @@ def _config_frame_arguments(config_path: Path) -> tuple[Path, dict[str, Any]]:
     if not isinstance(keepouts, dict):
         raise FrameError("config frame.keepout_um must be an object")
     report_args = {
+        "layer_mode": frame.get("layer_mode"),
         "die_bbox": frame.get("die_bbox_um"),
         "pad_keepout_um": keepouts.get("pad", 20),
         "frame_keepout_um": keepouts.get("frame", 10),

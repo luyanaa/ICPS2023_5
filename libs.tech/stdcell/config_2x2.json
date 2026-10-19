@@ -12,6 +12,7 @@
   },
   "frame": {
     "gds": "libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds",
+    "layer_mode": "fab",
     "die_bbox_um": [
       -1600,
       -1600,

@@ -283,10 +283,6 @@ end
                     env=clean_environment(profile),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                if profile == ONE_METAL:
-                    self.assertIn(
-                        "forbids VIA1/ML2 PCell geometry", result.stdout + result.stderr
-                    )
 
     def test_bridge_metal_option_is_profile_gated(self):
         ruby = r'''require "rexml/document"
@@ -299,12 +295,29 @@ layout.dbu = 0.001
 bridge = layout.cell(layout.add_pcell_variant(
   lib, lib.layout.pcell_id("Bridge"), {"mb" => true}
 ))
-via_count = bridge.shapes(layout.layer(RBA::LayerInfo.new(9, 0))).size +
-  bridge.shapes(layout.layer(RBA::LayerInfo.new(10, 0))).size
+counts = [9, 10].map do |number|
+  bridge.shapes(layout.layer(RBA::LayerInfo.new(number, 0))).size
+end
+gate = Object.new.extend(ICPS2023_5NativeGeometry)
 if ICPS2023_5NativeGeometry::PROFILE_NAME == "icps2023_5_1m"
-  raise "1M profile emitted Bridge.mb upper-metal geometry" unless via_count == 0
+  begin
+    gate.validate_via_profile!(true)
+    raise "1M profile accepted a VIA1/ML2 request"
+  rescue ArgumentError
+    # The invalid parameter combination must be rejected before production.
+  end
+  raise "1M profile emitted Bridge.mb upper-metal geometry" unless counts.all?(&:zero?)
 else
-  raise "experimental Bridge.mb omitted upper-metal geometry" unless via_count > 0
+  gate.validate_via_profile!(true)
+  raise "experimental Bridge.mb omitted VIA1 or ML2" unless counts.all?{|count| count > 0}
+end
+plain = layout.cell(layout.add_pcell_variant(
+  lib, lib.layout.pcell_id("Bridge"), {"mb" => false}
+))
+raise "TiN Bridge omitted its conductor" if plain.shapes(
+  layout.layer(RBA::LayerInfo.new(5, 0))).is_empty?
+raise "TiN Bridge emitted upper metal" unless [9, 10].all? do |number|
+  plain.shapes(layout.layer(RBA::LayerInfo.new(number, 0))).is_empty?
 end
 '''.replace("@PCELL_MACRO@", json.dumps(str(PCELL_MACRO)))
         with tempfile.TemporaryDirectory() as tempdir:
@@ -316,10 +329,6 @@ end
                     env=clean_environment(profile),
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                if profile == ONE_METAL:
-                    self.assertIn("forbids ML2 layer", result.stdout + result.stderr)
-                else:
-                    self.assertNotIn("forbids ML2 layer", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

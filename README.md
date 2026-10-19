@@ -28,12 +28,11 @@ ICPS2023_5/
 
 The LibreLane overlay is user-authorized experimental collateral only. It does
 not qualify POLY-Si or the specified narrow TiN routes, and does not override
-canonical DRC/LVS/PEX layers. The accepted standard-cell package and its partial
-SCL config expose LEF/GDS/SPICE views only; no published Liberty/Verilog/CDL,
-compatible cell-layer alias, qualified placement site, or process-qualified
-timing/RC/PDN data exists. Full PnR is unavailable. After cell characterization,
-LibreLane closure is the first integration task; see
-`libs.tech/librelane/README.md` for the dependency order.
+the DRC/LVS/PEX layer contracts. The generated standard-cell output directories
+were cleared for redesign: there is no currently published standard-cell
+GDS/LEF/SPICE/Liberty/characterization package. The retained generator and
+development sources do not make a qualified library or full PnR flow; see
+`libs.tech/librelane/README.md` for the overlay boundary.
 
 ## Documentation
 
@@ -106,30 +105,65 @@ All KLayout decks are plain, headless DRC/LVS DSL — no external Ruby gems, no
 `MinedaCommon` runtime. The root Nix flake pins the non-LibreLane verification
 toolchain (Nix-EDA 6.11.0; KLayout 0.30.7, Python 3.13.9, ngspice 44, and Ruby
 3.3.10); enter it with `nix develop`. CI runs the non-LibreLane regressions.
-LibreLane is excluded until cell characterization; closure is the first
-integration task afterward, as documented in `libs.tech/librelane/README.md`.
+The LibreLane overlay is not a qualified integration flow; standard-cell
+collateral is being redesigned, as documented in
+`libs.tech/librelane/README.md`.
 
 ```bash
-# DRC (design numbering; add -rd layer_mode=fab for foundry-numbered data)
+# Native PCell/designer GDS: run design-numbered decks explicitly.
 klayout -b -r libs.tech/klayout/drc/icps2023_5.drc \
-        -rd input=design.gds -rd report=drc.lyrdb \
+        -rd input=design.gds -rd layer_mode=design -rd report=drc.lyrdb \
         -rd process_profile=icps2023_5_1m
 
-# design -> foundry mask numbering
+# Fab-prep is a one-way conversion for a native design-numbered input.
 klayout -b -r libs.tech/klayout/drc/icps2023_5_fab_prep.drc \
         -rd input=design.gds -rd output=fab.gds \
         -rd process_profile=icps2023_5_1m
 
-# LVS against a schematic netlist
-klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
-        -rd input=design.gds -rd schematic=design.cir -rd output=extracted.cir \
+# Already fab-numbered GDS: check it directly; do not run fab-prep again.
+klayout -b -r libs.tech/klayout/drc/icps2023_5.drc \
+        -rd input=fab.gds -rd layer_mode=fab -rd report=fab_drc.lyrdb \
         -rd process_profile=icps2023_5_1m
 
-# parasitic extraction (R network + lumped C)
+# LVS against a schematic: select the mode that matches the input GDS.
+klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
+        -rd input=design.gds -rd layer_mode=design \
+        -rd schematic=design.cir -rd output=design_extracted.cir \
+        -rd process_profile=icps2023_5_1m
+klayout -b -r libs.tech/klayout/lvs/icps2023_5.lvs \
+        -rd input=fab.gds -rd layer_mode=fab \
+        -rd schematic=design.cir -rd output=fab_extracted.cir \
+        -rd process_profile=icps2023_5_1m
+
+# PEX: select the mode that matches the input GDS.
 nix develop --command python3 \
   libs.tech/klayout/pex/icps2023_5_pex.py \
-  --input design.gds --top CELL --process-profile icps2023_5_1m
+  --input design.gds --top CELL --layer-mode design \
+  --process-profile icps2023_5_1m
+nix develop --command python3 \
+  libs.tech/klayout/pex/icps2023_5_pex.py \
+  --input fab.gds --top CELL --layer-mode fab \
+  --process-profile icps2023_5_1m
 ```
+
+The `layer_mode`/`--layer-mode` setting selects how a deck interprets layer
+numbers; it does not convert the GDS. DRC, LVS, and PEX retain their design-mode
+defaults for compatibility, but examples select the mode explicitly. Fab-prep
+takes a native design-numbered layout and writes a foundry-mask-numbered view.
+The committed frame, primitive, and NAND sample GDS files listed below are
+already fab-numbered; use `fab` mode directly and never reconvert them.
+
+| Input GDS | Numbering and use |
+|-----------|-------------------|
+| Native layouts authored with the KLayout PCells (including a fresh PCell GDS) | `design`; use design-mode DRC/LVS/PEX, then run fab-prep once if producing a mask view |
+| `libs.ref/ICPS2023_5_fd_base/gds/ICPS2023_5_fd_base.gds` and `libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds` | `fab`; run fab-mode decks directly; do not reconvert |
+| `libs.ref/ICPS2023_5_fd_pr/gds/ICPS2023_5_fd_pr.gds` | `fab`; flattened primitive mask view; run fab-mode decks directly; do not reconvert |
+| `Samples/Semicon2023/NAND/nand_sample.GDS` | `fab`; run fab-mode decks directly; do not reconvert |
+| `Samples/Semicon2023/base_contest2023.GDS` | Drawing-numbered authoring source; use design mode when checking the source, not as an already prepared mask view |
+
+Fab-prep changes geometry as well as layer numbering; its derivations and
+regressions are described in `libs.tech/klayout/drc/README.md` and
+`libs.tech/klayout/drc/test_conversion_semantics.py`.
 
 SPICE:
 
@@ -157,291 +191,93 @@ source `libs.tech/xschem/xschemrc`).
 | Pads / frame | `libs.ref/ICPS2023_5_fd_base` | 1600 × 1600 µm frame, 28 × 60 µm pads |
 | Pads / frame (2x2) | `libs.ref/ICPS2023_5_fd_base_2x2` | derived 3200 × 3200 µm frame, 56 × 60 µm pads; the foundry ships no 2x2 GDS |
 
-## Experimental 1M standard cells
+Ordinary PMOS3 remains supported. The `Pch` `experimental_nplus_island` PCell
+option is retained only as experimental separate N+ island geometry; it does
+not establish a PMOS body tie or a fourth electrical terminal. PMOS4 is excluded from the
+LVS/PEX device sets. NMOS4 extraction remains experimental and LVS-only.
 
-`libs.tech/stdcell/` contains canonical MOS truth/topology data, a Yosys-to-X1
-mapper, and an area-first geometry generator restricted to the native
-`icps2023_5_1m` conductors. The standard-cell regression runs 22 combinational
-transistor-reference truth tables, four sequential capture/hold benches,
-Boolean-fallback and Yosys-mapped RTL simulations, strict DRC/LVS/PEX/assembly
-plus postlayout characterization for AOI21, and pin-window coverage/bounds
-checks:
+## Standard-cell redesign status and historical evidence
 
-```bash
-nix develop --command python3 libs.tech/stdcell/test_stdcell.py
-```
+The published output directories under `libs.ref/ICPS2023_5_gen_sc/`
+(`gds/`, `lef/`, `liberty/`, `spice/`, `characterization/`, and `doc/`) now
+contain only `.gitkeep`; `tools/make_gen_sc.py` remains as source. There is no
+current standard-cell GDS, LEF, SPICE, Liberty, manifest, or characterization
+package. Prior generation, characterization, ALU, routing, and cell-area results
+describe historical experiments only; they are not current published views or
+qualification evidence. The verification table below documents the guarded
+publication checks and their NOT RUN status when the manifest is absent.
 
-The scalar RTL in `libs.tech/stdcell/alu4.v` defines a four-operation unsigned
-4-bit ALU: `S1S0=00` AND, `01` OR, `10` `A+B+CIN`, and `11` `A-B-CIN` with
-`CIN` as borrow-in. `COUT` is zero for logic operations, carry-out for
-addition, and no-borrow for subtraction. `alu.py` builds the canonical
-physical-mapped netlist using only cells accepted by the manifest;
-`test_alu.py` checks RTL synthesis, accepted-cell mapping, and exhaustive
-operation vectors:
+The nominal PDK model remains the stage-1 `SOIMOD=0` BSIMSOI v4.4 card
+(`LEVEL=58`); the bridge candidates did not replace it. The separate
+`SOIMOD=2` ideal-FD and `SOIMOD=1` unified bridge candidates are experimental
+and version-scoped to Xyce 7.10 / BSIMSOI 4.5.0. The candidate fit evidence
+uses W=24 µm, L=6 µm, 3 V, 25 °C, four-terminal D/G/S/E; individual transient
+audits have their own conditions. They do not establish the physical depletion
+mode of either polarity, constitute silicon calibration, or provide PVT or
+timing signoff evidence.
 
-```bash
-nix develop --command python3 libs.tech/stdcell/test_alu.py
-```
+Historical FD-bridge simulation measurements and their definitions remain in
+the model audit reports:
 
-**Status: the generated standard-cell library was cleared for redesign.** The
-six output directories under `libs.ref/ICPS2023_5_gen_sc/` (`gds`, `lef`,
-`liberty`, `spice`, `characterization`, `doc`) now contain only `.gitkeep`;
-`tools/make_gen_sc.py` is retained. The paragraphs below describe the previous
-generation and the intended contract; regenerate the library before relying on
-any artifact path in them.
+* [`b4soi_fd_bridge_timing.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_timing.md)
+  records FO1/FO4 transients at 2 ns and 10 ns input slew across the report's
+  2.5/3.0/3.5 V cases; unresolved loaded cases are not timing data.
+* [`b4soi_fd_bridge_sweep_ro.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_sweep_ro.md)
+  records 5/11/21-stage ring-oscillator simulations (about 11.7/5.3/2.8 MHz)
+  and about 8.6 ns/stage for the recorded closed-loop case.
+* [`b4soi_fd_bridge_cin_definitions.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_cin_definitions.md)
+  distinguishes the edge-start dynamic input-capacitance result (2258.3 fF)
+  from the historical 2636 fF half-crossing pairing. `C_eff_energy` (previously
+  reported as 2377 fF) remains frozen pending re-integration.
 
-The experimental reference package is `libs.ref/ICPS2023_5_gen_sc/`: its SPICE
-subcircuits cover all 26 canonical cell specifications, while GDS and LEF are
-published only for cells that pass strict native-1M DRC/LVS/PEX and postlayout
-assembly. See its `doc/README.md` and per-cell `doc/cell_manifest.json`.
-`libs.tech/stdcell/export_views.py` emits structural Verilog and black-box
-declarations for accepted cells, but its generic model-metadata path refuses
-Liberty. The explicit experimental Xyce Liberty artifact is
-`libs.ref/ICPS2023_5_gen_sc/liberty/ICPS2023_5_gen_sc_experimental_xyce.lib`; it is
-evidence-scoped and not a qualified timing library.
-### Version-scoped FD-bridge FO/RO planning evidence
-
-The Xyce FD-bridge experiments are recorded separately from nominal stdcell
-feasibility arcs:
-
-* [`libs.tech/ngspice/audit/b4soi_fd_bridge_timing.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_timing.md)
-  reports the 2 ns-edge FO1/FO4 table with real inverter gate loads.
-* [`libs.tech/ngspice/audit/b4soi_fd_bridge_sweep_ro.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_sweep_ro.md)
-  reports DUT/load scaling and 5/11/21-stage closed-loop RO results. The
-  observed planning values are approximately 11.7, 5.3, and 2.8 MHz; the
-  closed-loop mean propagation delay is approximately 8.6 ns/stage. These are
-  Xyce 7.10 / BSIMSOI 4.5.0 FD-bridge simulations, not silicon measurements.
-* [`libs.tech/ngspice/audit/b4soi_fd_bridge_cin_definitions.md`](libs.tech/ngspice/audit/b4soi_fd_bridge_cin_definitions.md)
-  separates dynamic charge-derived input capacitance, intrinsic Cgg, and the
-  energy-derived definition. The closure-consistent dynamic result is 2258.3
-  fF for the recorded edge-start window; the historical 2635 fF pairing and
-  `C_eff_energy` remain explicitly non-frozen quantities.
-
-The nominal `libs.tech/stdcell/characterize.py` transient bench remains a
-fixed-slew, ideal-lumped-load feasibility stimulus. It is not silently
-reinterpreted as the FD-bridge timing bench. The checked-in
-`ICPS2023_5_gen_sc_experimental_xyce.lib` is rendered only from complete
-Xyce 7.10 / BSIMSOI 4.5.0 evidence at nominal 3 V / 25 °C: 17 combinational
-cells have measured arcs, the two constant tie cells carry their function with
-no arcs, and the two sequential cells are explicitly excluded. The evidence
-itself is checked in under `libs.ref/ICPS2023_5_gen_sc/characterization/` and
-produced by `libs.tech/stdcell/xyce_characterization.py`, which re-runs strict
-physical verification whenever a published cell's layout changed. This artifact
-is experimental only; it has no PVT extrapolation, power model, sequential
-setup/hold model, or signoff claim.
-
-
-`frame.py` measures the actual frame polygons of a configured frame library.
-The canonical `config.json` measures the 1600 × 1600 µm / 28-pad 1x1 frame:
-with explicit 20/10/10 µm pad/frame/edge engineering reservations the Boolean
-available polygon is 1,997,200 µm², whose largest 10 µm-grid square routing
-envelope is 1340 × 1340 µm. `config_2x2.json` measures the derived
-3200 × 3200 µm / 56-pad library (`libs.ref/ICPS2023_5_fd_base_2x2/doc/README.md`)
-with the same reservations: 9,097,200 µm² available and a 2940 × 2940 µm
-envelope, 4.55× the 1x1 capacity. Neither is a process-qualified usable core or
-a bondout/power assignment. The two unverified “4×” interpretations stay
-attached to the 1x1 measurement only; the measured 2x2 frame supersedes them
-and reports no scaling scenario.
-
-`feasibility.py` compares INV/NAND2/AOI21 template heights and three physically
-drawn PDNs (`edge_rails`, `segmented_rails`, `local_clusters`) on one fixed
-NAND+INV benchmark. Before shared-diffusion generation, sparse-channel H200
-candidates closed strict DRC/LVS/PEX, postlayout assembly, DC truth and
-sensitized path arcs for all three PDNs: 548×272 =149,056µm² experimental
-logic core, including signal/supply routing and whitespace, excluding
-unintegrated frame/IO. A mirrored experiment also closed all three PDNs.
-The 50/60/70µm candidates fail that template's height bounds; this is neither a
-global 5/6/7-track impossibility proof nor a qualified row/site. Run selected
-current experiments rather than repeating unchanged historical failures:
-
-```bash
-nix develop --command python3 libs.tech/stdcell/feasibility.py --out build/m0-selected --height 50 --height 60 --height 70 --height 200 --architecture channel --mirror
-nix develop --command python3 libs.tech/stdcell/benchmarks.py all --out build/rtl-benchmarks
-```
-
-`metrics.py` requires complete observed physical/functional/routing gates and
-ranks routed-core area first, routing robustness next, electrical/contact/PDN
-costs last. Missing measurements stay unknown, never zero. No clock target is
-specified, so measured delay is not a ranking objective. `benchmarks.py`
-provides real RTL and independent reference semantics for tiny logic,
-INV/NAND2/AOI21, mux4+decoder, counter, shift-register4, ALU8 and ripple-adder8;
-mapped-netlist success alone is not routed or electrical acceptance.
-
-`channel_geometry.py` now reuses topology-safe native Euler diffusion sharing.
-The private W24/L6, reverse-signal-order bank has 16 strict physical passes.
-Its 14 combinational cells have 13 complete nominal truth/arc passes; OAI21's
-arc convergence failure remains explicit. Example channel-template dimensions
-are below; these are **A_cell**, not completed core area or process minima:
-
-| Cell | Width × height (µm) | A_cell (µm²) |
-|------|---------------------|--------------|
-| INV | 166 × 150 | 24,900 |
-| NAND2 / NOR2 | 236 × 170 | 40,120 |
-| AOI21 / OAI21 | 306 × 200 | 61,200 |
-| BUF | 236 × 160 | 37,760 |
-| XOR2 | 516 × 240 | 123,840 |
-| MUX2 TG6T / static | 372 × 190 / 652 × 260 | 70,680 / 169,520 |
-
-Six minimum logic cells passed 24 actual zero-gap array cases: 2×2, 4×4,
-mirrored rows and reversed R180 rows, including strict checks, per-instance
-truth, pin windows and conductor isolation. Their supplies are instance-scoped
-and ideally driven by the bench, not a completed shared row/core PDN.
-
-Build a new private bank and exercise a real RTL core:
-
-```bash
-nix develop --command python3 libs.ref/ICPS2023_5_gen_sc/tools/make_gen_sc.py \
-  --candidate-output build/channel-bank --auto-channel-height \
-  --pin-order-mode reverse_signals \
-  --build-cell INV_X1 --build-cell BUF_X1 \
-  --build-cell NAND2_X1 --build-cell NAND3_X1 \
-  --build-cell NOR2_X1 --build-cell NOR3_X1 \
-  --build-cell AOI21_X1 --build-cell OAI21_X1 \
-  --build-cell AOI22_X1 --build-cell OAI22_X1 \
-  --build-cell XOR2_X1 --build-cell XNOR2_X1 \
-  --build-cell MUX2_TG6T_X1 --build-cell MUX2_STATIC_X1 \
-  --build-cell LATCH_GATE_X1 --build-cell DFF_TG_X1
-nix develop --command python3 libs.tech/stdcell/routed_benchmarks.py \
-  --manifest build/channel-bank/doc/cell_manifest.json \
-  --out build/tiny-routed --benchmark tiny_and
-```
-
-`--config libs.tech/stdcell/config.json` (default) routes inside the canonical
-1x1 frame; `--config libs.tech/stdcell/config_2x2.json` routes the same
-fixtures inside the measured 2x2 frame library with the same engineering
-reservations. Omit `--benchmark` to run all seven RTL fixtures. Outputs must be
-new directories. The flow retains both accepted-only area-oriented ABC and
-primitive covers: ABC is heuristic, so neither an ABC cover nor a smaller
-A_cell sum is declared the routed winner. Actual ML1/TiN/CNT connectivity,
-strict physical checks, full-top electrical behavior and exact polygon fit
-gate ranking. Multirow placement is width-bounded, not a qualified site or an
-optimal placement proof; wrapped row origins are snapped back to the route
-lattice, and opposing-row rail spacing evidence is reported in µm. Complete
-A_core remains separate from frame/pad and power-source integration; failed
-routing, SPICE or frame fit stays ineligible.
-
-### Current closure boundary
-
-The all-fixture routed runs (same 16-cell private channel bank, all seven RTL
-fixtures, three physical PDNs) reproduce one eligible experimental result in
-both frames: `tiny_and/primitive/segmented_rails` at 116,644 µm² routed-core
-area, with exact measured-polygon fit, strict native-1M DRC/LVS/PEX, whole-core
-postlayout behavior, and zero route overflow/shorts; its two sibling PDN
-variants pass every gate as well and ranking selects one winner.
-`inv_nand2_aoi21`, `mux4_decoder`, `counter`, and `shift_register4` remain
-failed by observed route or physical-conductor gates. In the 1x1 frame the
-first, second and fourth occupy only 12–73% of the measured envelope, while
-`counter`'s 1298 × 2272 µm allocation exceeds the 1340 × 1340 µm envelope
-altogether; they fail with 4–30 unrouted or overflowing connections.
-
-Routing the same fixtures inside the measured 3200 × 3200 µm / 56-pad 2x2
-frame (`--config libs.tech/stdcell/config_2x2.json`: 9,097,200 µm² available,
-2940 × 2940 µm square envelope, 4.55× the 1x1 capacity) makes the two
-area-rejected fixtures route for the first time and resolves the
-placement-fit gate for `counter`, but closes nothing new. `alu8/area_abc`
-needs 2906 × 4932 µm after row packing — taller than the 2x2 die band of
-3080 µm — and fails with 154–178 overflowing connections; its primitive
-cover (9,777,420 µm²) is still rejected by the 2x2 capacity before routing.
-All six `ripple_adder8` candidates fit the envelope and fail with 49–80
-overflowing connections. The wider frame re-packs the rows, so three
-candidates gain and three lose the `power_connectivity` gate relative to the
-1x1 runs. The limiting resource is therefore single-layer ML1/TiN routing
-capacity and the allocated row geometry, not die area: closing these fixtures
-needs cheaper wiring demand (smaller cells, better row/channel strategy), not
-a larger die. The comparison remains an experimental core result, not
-frame/pad, power-source, or I/O integration.
-
-The remaining blockers are explicit:
-
-* **Device and timing calibration:** the nominal BSIMSOI fit is only W=24 µm,
-  L=6 µm at 25 °C. No measured geometry scaling, PVT/corner, body/back-gate,
-  C–V, silicon, jitter, metastability, or qualified clock/timing library is
-  available. Reported storage bounds and cell arcs are feasibility evidence,
-  not fMAX or timing signoff.
-* **Physical implementation qualification:** accepted cells and routed cores
-  are checked against repository DRC/LVS/PEX/assembly decks, but no qualified
-  placement site, row/abutment contract, density, CTS, clock network, PDN,
-  IR-drop, EM, or application-scale routed sequential core exists. The
-  sequential evidence is leaf-cell evidence; counter and shift-register
-  routing did not close.
-* **Frame, I/O, and power delivery:** the measured frame Boolean polygon is a
-  geometric fit envelope only. There is no qualified pad-to-net assignment,
-  VDD/VSS source path, M3–M4/M5 I/O acceptance, ESD qualification, or assembled
-  frame/core DRC/LVS/PEX closure.
-* **Library and process contract:** no qualified Liberty, CDL, Verilog, site,
-  timing corners, or LibreLane/OpenROAD flow is shipped. Upper metals remain
-  outside the canonical 1M contract, and SRAM is deferred.
-
- 
-The shared-diffusion gated latch and TG DFF separately passed both stored
-states and 10/1000µs stopped clocks at nominal 3V/25°C, 10fF, 2ns slew with
-explicit Gear integration. Their conservative tested setup/hold bounds are
-16/−4ns and 8/2ns; DFF high/low pulse bounds are 8/16ns. Six DFF aperture
-samples failed numerically and remain failed, never interpolated into passing
-bounds. These leaf experiments are not routed counter/shift-register closure,
-fMAX, PVT, metastability, retention qualification or measured model calibration.
-This is an experimental cell-generation and model-validation path, not a
-qualified standard-cell library or placed-core flow. Generated dimensions and
-route lengths are geometric candidate metrics; they do not establish a
-qualified row/site, abutment, placement density, clock/power network, timing
-corner, Liberty/LEF contract, or process qualification. The only device-model
-calibration is the documented nominal W=24 µm/L=6 µm point. No timing or
-silicon-performance claim is made.
-
-I/O design remains gated on M3–M4 standard-cell acceptance. The M5 I/O classes
-and ESD validation states are reserved in `libs.tech/stdcell/config.json`, but
-there is no qualified frame-to-pad map or ESD qualification; simplified ESD
-wrappers and absolute-maximum voltages are not ESD ratings. SRAM is deferred.
-
+These are version-limited simulations, not silicon measurements, a nominal
+model replacement, a physical FD/PD decision, a qualified standard-cell
+library, or a signoff claim.
 
 ## Verification status
 
-| Check | Result |
-|-------|--------|
-| Default 1M DRC on shipped NAND sample | Rejected at preflight: unmasked VIA1/ML2 are outside the default profile |
-| Experimental DRC on shipped NAND GDS | 0 markers in design mode with `strict=false`; compatibility smoke only |
-| Strict 1M DRC on shipped samples | Same preflight rejection; earlier marker counts are historical, not current default-profile evidence |
-| Profile-specific DRC/PCell checks | `libs.tech/klayout/test_process_profiles.py` exercises the 1M and experimental gates |
-| Experimental fab prep + fab-mode DRC on NAND GDS | 0 markers with explicit experimental profile and `strict=false`; compatibility smoke only |
-| NAND legacy fab-prep/LVS compatibility | Requires explicit experimental profile; compatibility does not qualify VIA1/ML2 |
-| LVS `nand_sample_b4soi_reference.cir` compatibility smoke | MATCH, 0 mismatches with `filters=legacy` and explicit experimental profile in design and fab modes |
-| LVS strict compare on NAND reference | NO MATCH under explicit experimental process profile; unmodelled pad-array parasitics remain in scope |
-| PEX on shipped NAND GDS | Rejected in either profile for unmasked upper-metal geometry; no extraction output |
-| PEX regression fixtures | 17 tests cover sheet/contact R, MOS/RES/CAP/DIO ownership, physical-port mapping, distributed passive C, masks, fab labels, orphaned-gate rejection, and unqualified-coupling omission |
-| Layered FEM matrix fixtures | `libs.tech/klayout/pex/test_fieldsolve_box.py` checks matrix symmetry, passivity, charge conservation, material sensitivity, and layer-boundary validation; test permittivities are synthetic |
-| Pad LEF/DEF consistency | 28 fixed independent DEF pins match the frame GDS; LEF/Liberty remain physical-only |
-| 2x2 frame derivative | `ICPS2023_5_fd_base_2x2` holds by construction and by read-back: 3200 × 3200 µm die, 50 µm ring, 56 60 µm pads at 200 µm pitch; 56 fixed DEF pins match the GDS; 0 DRC markers on the bare overlay in default and strict 1M profiles; the foundry ships no 2x2 frame GDS |
-| 2x2 frame routing experiment | Same 16-cell bank and seven RTL fixtures routed inside the measured 2x2 frame (9,097,200 µm² available, 2940 µm envelope): the eligible set is unchanged (`tiny_and/primitive` at 116,644 µm², all three PDN variants), ALU8 and ripple-adder8 route for the first time and fail on 154–178 / 49–80 overflowing connections, and no new fixture closes |
-| ngspice 47 ESD wrapper smoke | Both wrappers run with common `SUB`; expected zero-perimeter and RDSW warnings are nonfatal |
-| ngspice 47 two-input NAND transient | Finite-slew states `00/10/01/11` at 1/6/14/21 ns: 3.000/3.019/3.012/0.121 V (the low state was still falling) |
-| xschem symbol validator | 45 symbols validated; ESD pin order checked against ngspice `.subckt` definitions |
-| Automated CI | `.github/workflows/ci.yml` runs process-profile, LVS, native-PCell/golden, PEX, pad-view, experimental stdcell and ALU contract, ngspice, xschem, and FEM regressions; LibreLane/OpenROAD remains excluded because the SCL config is partial and has no usable site or timing library. |
-| Experimental stdcell pilot | H160 `AOI21_X1` (183 × 160 µm; 29,280 µm²): strict DRC/LVS/PEX and postlayout assembly passed; 8 truth rows and 5 model-based arcs passed. Not process or timing qualification. |
-| LibreLane configuration checks | LibreLane 3.0.11 loads the partial SCL. A normal invocation stops at PDK validation with missing timing/site/drive/tie/buffer, PDN/RC/CTS, and `MAGIC_PDK_SETUP` inputs; an isolated Classic config substituting Magic-dependent and selected KLayout/signoff steps removes the Magic setup prerequisite from that check but still stops on the remaining PDK inputs. No floorplan, placement, or routing ran; native KLayout DRC/LVS/PEX remains the independent verification path. CI remains non-LibreLane. |
-| ALU view and native route evidence | Accepted-cell ALU4 mapping/export and reference semantics were exercised; its earlier native-route attempts timed out without completed area evidence. New RTL fixtures cover ALU8 and ripple-adder8. Neither a mapped instance-area sum nor a timeout is promoted to routed-core area. |
-| Sequential geometry pilot | Native sparse-channel TG/gated latch and DFF layouts passed strict DRC/LVS/PEX/assembly and real postlayout capture/hold without internal loads. Gated latch/DFF and TG DFF also passed nominal both-polarity setup/hold/pulse and 10/1000µs stopped-clock experiments. One TG-latch hold0ns sample failed ngspice convergence; no pass is claimed for that candidate. No row/application/PVT/metastability qualification follows. |
+| Check | Current scope |
+|-------|---------------|
+| Input numbering | Native PCell/designer GDS is `design`; fab-prep output and the named frame, primitive, and NAND GDS files above are already `fab`. DRC/LVS/PEX mode defaults remain `design` for compatibility. |
+| Foundry migration | `libs.tech/klayout/drc/test_foundry_migration.py` checks the 1x1/2x2 frame mask layers and hierarchy, the flattened primitive mask layer set, and the NAND sample's mask-numbering fingerprint. It runs migrated views in fab mode; it does not reconvert them. |
+| Fab-prep semantics | `libs.tech/klayout/drc/test_conversion_semantics.py` pins derived doping windows, whole-connected-polygon TiN bias, and explicit NCH output versus opt-in legacy PWell generation. These geometry checks are not foundry qualification. |
+| SOI conductor partition | `libs.tech/klayout/lvs/test_soi_partition.py` checks actual LVS/PEX/ERC networks in both input modes: ordinary MOS S/D isolation, nonohmic low-doped necks and PN junctions, rejected ambiguous CNT landings, and preserved same-polarity diffusion. ERC requires explicit `layer_mode`; geometric SOI continuity is not an ideal conductor. |
+| NAND sample DRC | `Samples/Semicon2023/NAND/nand_sample.GDS` is fab-numbered. Run `layer_mode=fab`; the experimental-profile migration check expects only the `TIN.SOIEDGE` screen. The sample's unqualified VIA1/ML2 geometry remains outside default 1M acceptance. |
+| NAND sample LVS | `libs.tech/klayout/lvs/test_lvs_contract.py` exercises the already-fab-numbered sample in fab mode. The explicit experimental-profile/`filters=legacy` compatibility comparison matches; strict comparison remains NO MATCH because pad-array parasitics are unmodelled. This is compatibility evidence, not foundry qualification. |
+| NAND sample PEX | Use `--layer-mode fab`; PEX rejects its unqualified upper-metal geometry in either profile and emits no extraction output. |
+| PEX and FEM regressions | `libs.tech/klayout/pex/test_pex.py` covers extraction ownership and supported parasitics. `test_fieldsolve_box.py` covers numerical matrix properties with synthetic permittivities; it supplies no qualified process coefficients. |
+| Pad/frame views | `libs.ref/ICPS2023_5_fd_base/tools/test_pad_views.py` and `libs.ref/ICPS2023_5_fd_base_2x2/tools/test_pad_views_2x2.py` cover physical pad views and their frame contracts. The 2x2 frame is derived; no foundry-published 2x2 GDS exists. |
+| Frame measurement | `libs.tech/stdcell/test_frame.py` measures the foundry-numbered 1x1 (28-pad) and derived 2x2 (56-pad) frames with an explicit `layer_mode="fab"`; drawing fixtures stay `design`, and the configs declare the mode. Missing or wrong-mode input fails closed instead of inferring a layer. |
+| Capacitance ownership | The single-owner matrix (`BSIMSOI` / LVS device / PEX) is in `libs.tech/klayout/pex/README.md`. The BOX diffusion return is `BOX_RETURN_ANALYTICALLY_SUPPORTED / MEASUREMENT_UNCONFIRMED` (`audit_box_capacitance.md`); implementation ownership is not a measured deembedding. |
+| Contact `RDSW`/`RCNT` | `libs.tech/ngspice/tools/audit_mos_contact_ownership.py` re-evaluates the frozen digitized curves for bare, explicit-`RCNT`, and full post-layout networks on the nominal card; every report is `RDSW_RCNT_SEPARATION_UNCALIBRATED` (`audit/mos_contact_ownership.md`). Kelvin/TLM data is still required. |
+| Standard-cell output state | The six published output directories under `libs.ref/ICPS2023_5_gen_sc/` contain only `.gitkeep`; see the redesign and historical-evidence section above. Source-level geometry regressions do not publish the withdrawn library views. |
+| CI and publication boundary | `.github/workflows/ci.yml` runs the six migration/SOI suites unconditionally (`test_fab_body_tie`, `test_pmos4_mask_contract`, `test_channel_length_pipeline`, `test_conversion_semantics`, `test_soi_edge_protection`, and `test_foundry_migration`), plus cross-engine partition, NCH mask audit, ERC, and assembly regressions. `test_stdcell.py` and `test_frame.py` remain unconditional; generated-library inverter simulation runs, while the absent published-library simulation is explicitly skipped. `make_gen_sc.py --check`, `test_library.py`, `test_mapping_views.py`, `test_alu.py`, and `array_acceptance.py` run only when `cell_manifest.json` exists; otherwise publication-dependent checks are NOT RUN. This is not a complete standard-cell publication or CI pass. |
+| Runtime boundary | The observed local `nix-shell ../librelane/shell.nix` runtime has KLayout 0.30.7, Python 3.13.9, and ngspice 47; pinned CI uses ngspice 44. Local ngspice evidence is not a pinned-CI result. |
+| LibreLane/OpenROAD | The current partial SCL/configuration is not a qualified PnR flow; no placement, routing, or signoff claim follows from the experimental overlay. |
 
 ## Known limits
 
-* **Model accuracy.** The active cards are a stage-1 BSIMSOI v4.4 fit to the
-  local PDK PDF, not a bulk-card conversion or a silicon-calibrated model.
-  Output-curve relative RMS residuals are 1.8–14.5%; transfer-curve
-  log-current RMS is 0.17–0.69 decades. The PMOS transfer fit is poor. The
-  fit covers only L=6 µm, W=24 µm at 25 °C and does not characterize body,
-  back-gate, C–V, temperature, or geometry scaling. See
-  `libs.tech/ngspice/README.md` and `libs.tech/ngspice/fit/`.
-* **Automated CI.** `.github/workflows/ci.yml` runs the non-LibreLane
-  verification suites with versions pinned by `flake.lock` and
-  `requirements-fem.txt`. LibreLane/OpenROAD is deliberately excluded until
-  cell characterization completes.
+* **Model accuracy.** The nominal stage-1 BSIMSOI v4.4 fit is to the local PDK
+  PDF, not a bulk-card conversion or a silicon-calibrated model. Output-curve
+  relative RMS residuals are 1.8–14.5%; transfer-curve log-current RMS is
+  0.17–0.69 decades, with a poor PMOS transfer fit. The nominal fit covers only
+  L=6 µm, W=24 µm at 25 °C and does not characterize body, back-gate, C–V,
+  temperature, or geometry scaling. The separate version-scoped bridge
+  experiments are described above. See `libs.tech/ngspice/README.md` and
+  `libs.tech/ngspice/fit/`.
+* **Automated CI.** The workflow and its conditional standard-cell publication
+  checks are described in the verification table above. An absent generated
+  manifest means publication-dependent checks are not run; this is not a
+  complete publication or CI pass.
 * **ML2 / VIA2 / ML3 are not qualified.** The reference manual marks them
   T.B.D. Experimental DRC and fab prep permit only VIA1/ML2; VIA2/ML3 are
   rejected because their connectivity and mask handling are undefined. PEX
   rejects all upper-metal geometry.
-* **DRC document limits.** Strict checks remain opt-in. The shipped NAND sample
-  is rejected before rule evaluation by the default 1M profile due to unmasked
-  VIA1/ML2, so earlier strict-marker counts are not current default-profile
-  evidence. See `libs.tech/klayout/drc/README.md` for per-rule limits.
+* **DRC document limits.** Strict checks remain opt-in. The NAND sample GDS is
+  already fab-numbered, so check it with `layer_mode=fab`; its unqualified
+  VIA1/ML2 geometry is rejected by the default 1M profile before rule
+  evaluation. Experimental-profile `TIN.SOIEDGE` markers are a design-practice
+  screen, not a process limit. See `libs.tech/klayout/drc/README.md`.
 * **LVS scope.** Strict resistor/capacitor comparison is the default. Explicit
   `-rd filters=legacy` enables the old `max_res`/`min_caps` compatibility
   behavior; even strict LVS cannot check layout substrate/backgate connectivity

@@ -119,7 +119,8 @@ def make_single_mos(name, pcell)
 end
 
 def make_inverter
-  p_y = 45.0
+  # Opposing 5 um gate cuts need 4 um separation: centres differ by 9 um.
+  p_y = MOS_WIDTH + 32.0
   n_sd_y = mos_sd_y(0.0)
   p_sd_y = mos_sd_y(p_y)
   n_gate_y = mos_gate_y(0.0)
@@ -140,7 +141,8 @@ def make_inverter
 end
 
 def make_nand2
-  p_y = 70.0
+  # Keep a >=4 um opening between the same-net edge straps, not a 2 um notch.
+  p_y = [70.0, MOS_WIDTH + 48.0].max
   n_sd_y = mos_sd_y(0.0)
   p_sd_y = mos_sd_y(p_y)
   n_gate_y = mos_gate_y(0.0)
@@ -220,7 +222,7 @@ end
 def make_ring(stages)
   name = "ring_oscillator_#{stages}"
   pitch = 100.0
-  p_y = 45.0
+  p_y = MOS_WIDTH + 32.0
   n_sd_y = mos_sd_y(0.0)
   p_sd_y = mos_sd_y(p_y)
   n_gate_y = mos_gate_y(0.0)

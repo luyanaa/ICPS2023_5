@@ -366,10 +366,12 @@ def _fabprep_comparison(design_layout: Any, design_top: Any, design_dbu: float,
     }
 
 
-def _frame_evidence(gds_path: Path, expected_pad_count: int | None) -> tuple[dict[str, Any], list[str] | None]:
+def _frame_evidence(gds_path: Path, expected_pad_count: int | None,
+                    layer_mode: str) -> tuple[dict[str, Any], list[str] | None]:
     try:
         measured = frame.measure_frame(
             gds_path,
+            layer_mode=layer_mode,
             pad_keepout_um=0,
             frame_keepout_um=0,
             edge_keepout_um=0,
@@ -497,7 +499,7 @@ def check_io_dfm(
     upper = _upper_layer_check(layout, top, layer_mode, profile_data, profile)
     upper["process_profile"] = profile_name
     pad_openings = _pad_opening_check(layout, top, layer_mode, dbu_um)
-    frame_info, actual_pad_ids = _frame_evidence(source_path, expected_pad_count)
+    frame_info, actual_pad_ids = _frame_evidence(source_path, expected_pad_count, layer_mode)
     mapping_info = _mapping_evidence(pad_mapping, actual_pad_ids, expected_pad_count)
     esd_info = _esd_evidence(esd_devices)
     fabprep = (None if fab_gds_path is None else
@@ -629,7 +631,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="frame/profile JSON config")
     parser.add_argument("--gds", help="design or fab GDS (overrides config frame.gds)")
     parser.add_argument("--fab-gds", help="actual fab-prep output GDS for design-to-fab comparison")
-    parser.add_argument("--layer-mode", choices=("design", "fab"), default="design")
+    parser.add_argument("--layer-mode", choices=("design", "fab"), default=None,
+                        help="input numbering; defaults to config frame.layer_mode")
     parser.add_argument("--process-profile", help="shared ICPS2023_5 process profile")
     parser.add_argument("--expected-pad-count", type=int, help="engineering frame measurement contract")
     parser.add_argument("--pad-mapping", help="explicit PAD_XX-to-function/net JSON object or file")
@@ -654,12 +657,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                  else frame_config.get("expected_pad_count", frame.EXPECTED_PAD_COUNT))
         profile = (args.process_profile or os.environ.get("ICPS2023_5_PROCESS_PROFILE") or
                    config.get("process_profile"))
+        layer_mode = args.layer_mode if args.layer_mode is not None else frame_config.get("layer_mode")
+        if layer_mode not in ("design", "fab"):
+            raise IoDfmError(
+                "input numbering is not declared: pass --layer-mode or set "
+                "frame.layer_mode in the config (got %r)" % (layer_mode,))
         report = check_io_dfm(
             args.gds or configured_gds,
             fab_gds_path=args.fab_gds,
             pad_mapping=mapping,
             process_profile=profile,
-            layer_mode=args.layer_mode,
+            layer_mode=layer_mode,
             expected_pad_count=count,
             esd_devices=esd_devices,
             engineering_reservations_um={

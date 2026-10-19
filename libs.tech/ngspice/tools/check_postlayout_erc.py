@@ -25,15 +25,24 @@ except ImportError:  # direct invocation from libs.tech/ngspice/tools
     from reliability_netlist import ReliabilityNetlistError, read_network
 
 
-DEFAULT_LAYERS = {
-    "DIFF": (3, 0),
-    "TIN": (5, 0),
-    "CNT": (7, 0),
-    "ML1": (8, 0),
-    "TEXT": (13, 0),
-    "PAREA": (18, 0),
-    "NAREA": (19, 0),
+DESIGN_LAYERS = {
+    "DIFF": (3, 0), "TIN": (5, 0), "TINBLK": (5, 1), "CNT": (7, 0),
+    "ML1": (8, 0), "VIA1": (9, 0), "ML2": (10, 0), "VIA2": (11, 0),
+    "ML3": (12, 0), "TEXT": (13, 0), "RES": (15, 0), "CAP": (16, 0),
+    "DIO": (17, 0), "PAREA": (18, 0), "NAREA": (19, 0), "MASK": (20, 0),
+    "NCH": (21, 0), "PAD": (50, 0), "EXCLUDE": (63, 63),
 }
+FAB_LAYERS = {
+    "DIFF": (4, 0), "TIN": (5, 0), "TINBLK": (5, 1), "CNT": (6, 0),
+    "ML1": (7, 0), "VIA1": (8, 0), "ML2": (9, 0), "VIA2": (11, 0),
+    "ML3": (12, 0), "TEXT": (13, 1), "RES": (15, 0), "CAP": (16, 0),
+    "DIO": (17, 0), "PAREA": (2, 0), "NAREA": (3, 0), "MASK": (20, 0),
+    "NCH": (13, 0), "PAD": (10, 0), "EXCLUDE": (63, 63),
+}
+_LAYER_TABLES = {"design": DESIGN_LAYERS, "fab": FAB_LAYERS}
+_ANCHOR_LAYERS = {"DIFF", "NPLUS", "PPLUS", "TIN", "ML1"}
+_UNSUPPORTED_METAL_LAYERS = ("VIA1", "ML2", "VIA2", "ML3")
+_CONDUCTOR_LAYERS = ("NPLUS", "PPLUS", "TIN", "ML1")
 _DEVICE_COMMENT = re.compile(
     r"^device instance\s+(\S+)\s+(\S+)\s+\S+\s+"
     r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)),"
@@ -61,9 +70,53 @@ def _casefold(value: Any) -> str:
 def _layer_name(value: Any) -> str:
     if isinstance(value, str):
         name = value.upper()
-        if name in DEFAULT_LAYERS:
+        if name in _ANCHOR_LAYERS:
             return name
-    raise PostlayoutERCError("anchor layer must be one of %s, got %r" % (sorted(DEFAULT_LAYERS), value))
+    raise PostlayoutERCError("anchor layer must be one of %s, got %r" % (sorted(_ANCHOR_LAYERS), value))
+
+
+def _resolve_layer_mapping(layer_config: Any, layer_mode: Any) -> dict[str, tuple[int, int]]:
+    if not isinstance(layer_mode, str) or layer_mode not in _LAYER_TABLES:
+        raise PostlayoutERCError("layer_mode must be exactly 'design' or 'fab'")
+    resolved = dict(_LAYER_TABLES[layer_mode])
+    if layer_config is None:
+        return resolved
+    if not isinstance(layer_config, dict):
+        raise PostlayoutERCError("layers must be an object mapping layer names to [layer, datatype]")
+    seen_names: set[str] = set()
+    other_mode = "fab" if layer_mode == "design" else "design"
+    for name, pair in layer_config.items():
+        if not isinstance(name, str):
+            raise PostlayoutERCError("layer override names must be strings")
+        canonical = name.upper()
+        if canonical not in resolved:
+            raise PostlayoutERCError("unsupported layer override %r" % name)
+        if canonical in seen_names:
+            raise PostlayoutERCError("duplicate layer override for %s" % canonical)
+        seen_names.add(canonical)
+        if not isinstance(pair, list) or len(pair) != 2 or any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in pair):
+            raise PostlayoutERCError("layer %s must be [nonnegative_integer_layer, nonnegative_integer_datatype]" % name)
+        spec = (pair[0], pair[1])
+        if spec == _LAYER_TABLES[other_mode][canonical] and spec != resolved[canonical]:
+            raise PostlayoutERCError(
+                "layer %s override %s conflicts with explicit layer_mode=%s" %
+                (canonical, list(spec), layer_mode)
+            )
+        other_owners = {
+            owner for table in _LAYER_TABLES.values()
+            for owner, known_spec in table.items()
+            if known_spec == spec and owner != canonical
+        }
+        if other_owners:
+            raise PostlayoutERCError(
+                "layer %s override %s aliases different physical layer(s) %s" %
+                (canonical, list(spec), sorted(other_owners))
+            )
+        resolved[canonical] = spec
+    if len(set(resolved.values())) != len(resolved):
+        raise PostlayoutERCError("resolved layer mapping assigns one GDS layer to multiple physical roles")
+    return resolved
 
 
 def _klayout_db():
@@ -158,7 +211,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> dict[str, Any]:
+def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any, *,
+                   layer_mode: str) -> dict[str, Any]:
+    layer_ids = _resolve_layer_mapping(layer_config, layer_mode)
     db = _klayout_db()
     layout = db.Layout()
     try:
@@ -177,47 +232,84 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
     dbu_um = float(layout.dbu)
     if not math.isfinite(dbu_um) or dbu_um <= 0:
         raise PostlayoutERCError("GDS database unit is not positive and finite")
-    layer_ids = dict(DEFAULT_LAYERS)
-    if layer_config is not None:
-        if not isinstance(layer_config, dict):
-            raise PostlayoutERCError("layers must be an object mapping layer names to [layer, datatype]")
-        for name, pair in layer_config.items():
-            canonical = _layer_name(name)
-            if not isinstance(pair, list) or len(pair) != 2 or any(
-                    isinstance(item, bool) or not isinstance(item, int) for item in pair):
-                raise PostlayoutERCError("layer %s must be [integer_layer, integer_datatype]" % name)
-            layer_ids[canonical] = (pair[0], pair[1])
 
     index_by_pair = {}
     for index in layout.layer_indices():
         info = layout.get_info(index)
         index_by_pair[(int(info.layer), int(info.datatype))] = index
-    regions: dict[str, Any] = {}
+    raw_regions: dict[str, Any] = {}
     raw_contacts: list[Any] = []
-    text_labels: list[dict[str, Any]] = []
+    raw_labels: list[dict[str, Any]] = []
     layer_presence: dict[str, bool] = {}
     for name, pair in layer_ids.items():
         layer_index = index_by_pair.get(pair)
         layer_presence[name] = layer_index is not None
         if layer_index is None:
-            regions[name] = db.Region()
+            raw_regions[name] = db.Region()
             continue
         region, labels, shapes = _shape_region_and_labels(
             top, layer_index, db, collect_text=(name == "TEXT")
         )
-        regions[name] = region
+        raw_regions[name] = region
         if name == "CNT":
             raw_contacts.extend(shapes)
         if name == "TEXT":
-            text_labels.extend(labels)
+            raw_labels.extend(labels)
 
-    components = {name: _region_components(regions[name], db)
-                  for name in ("DIFF", "TIN", "ML1")}
-    # The metal graph follows core_router._electrical_components: same-layer
-    # merged conductors, connected only by an enclosed native CNT away from DIFF.
+    exclusions = raw_regions["MASK"] + raw_regions["EXCLUDE"]
+    regions = {
+        name: (region if name in ("MASK", "EXCLUDE") else (region - exclusions).merged())
+        for name, region in raw_regions.items()
+    }
+    contacts: list[Any] = []
+    for shape in raw_contacts:
+        clipped = shape - exclusions
+        contacts.extend(db.Region(poly) for poly in clipped.each())
+    text_labels = []
+    for label in raw_labels:
+        point = tuple(label["point_dbu"])
+        if not _point_ids(point, _region_components(exclusions, db), db):
+            text_labels.append(label)
+
+    diff = regions["DIFF"]
+    design_tin = regions["TIN"]
+    if layer_mode == "design":
+        um2 = _um_to_dbu(2.0, dbu_um, "fab-prep mask bias")
+        um4 = _um_to_dbu(4.0, dbu_um, "fab-prep CAP guard")
+        prep_gate = design_tin.interacting(diff) - (design_tin & regions["CAP"].sized(um4))
+        process_bounds = (diff + prep_gate).extents()
+        final_tin = design_tin + (prep_gate.sized(um2) & process_bounds) + regions["TINBLK"]
+        dio2 = regions["DIO"].sized(um2) - (regions["PAREA"] + regions["NAREA"])
+        n_dope = (regions["NAREA"] & diff).sized(um2) - (
+            design_tin - regions["CAP"] + dio2
+        )
+        p_dope = (regions["PAREA"] & diff).sized(um2) - (
+            design_tin - regions["CAP"] + dio2
+        )
+    else:
+        final_tin = design_tin
+        n_dope = regions["NAREA"]
+        p_dope = regions["PAREA"]
+    regions["TIN"] = final_tin.merged()
+
+    # SOI is physical geometry, not a conductor. Only explicitly doped
+    # same-polarity regions form ohmic domains; the undoped film, MOS channel,
+    # and ambiguous overlap between N+ and P+ remain nonconductive.
+    res_body = regions["RES"] & diff
+    n_candidate = (n_dope & diff) - res_body
+    p_candidate = (p_dope & diff) - res_body
+    mixed_implant = n_candidate & p_candidate
+    regions["MIXED"] = mixed_implant.merged()
+    regions["NPLUS"] = (n_candidate - mixed_implant).merged()
+    regions["PPLUS"] = (p_candidate - mixed_implant).merged()
+
+    components = {
+        name: _region_components(regions[name], db)
+        for name in ("DIFF", "NPLUS", "PPLUS", "TIN", "ML1")
+    }
     parents: dict[tuple[str, int], tuple[str, int]] = {
         (name, index): (name, index)
-        for name in ("DIFF", "TIN", "ML1")
+        for name in _CONDUCTOR_LAYERS
         for index in range(len(components[name]))
     }
 
@@ -238,9 +330,9 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
     cnt_size = um(5.0)
     route_enclosure = um(2.5)
     sd_enclosure = um(2.0)
-    gate_core = regions["TIN"] & regions["DIFF"]
+    gate_core = regions["TIN"] & diff
     contact_report: list[dict[str, Any]] = []
-    for index, cut in enumerate(raw_contacts):
+    for index, cut in enumerate(contacts):
         box = cut.bbox()
         exact_size = (
             box.width() == cnt_size and box.height() == cnt_size and
@@ -252,32 +344,49 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
         gate_overlap = not (cut & gate_core).is_empty()
         implant_hits = [name for name in ("PAREA", "NAREA")
                         if not (cut & regions[name]).is_empty()]
+        ohmic_hits = {
+            name: _intersecting_ids(cut, components[name])
+            for name in ("NPLUS", "PPLUS")
+        }
+        ohmic_types = [name for name, ids in ohmic_hits.items() if ids]
+        mixed_overlap = not (cut & regions["MIXED"]).is_empty()
         status = "legal"
         kind = "unclassified"
         reasons: list[str] = []
         touched_roots: list[tuple[str, int]] = []
-        if gate_overlap:
-            reasons.append("CNT overlaps TiN/DIFF MOS gate core")
-        elif diff_hits:
+        if diff_hits:
             kind = "diffusion_contact"
+            if gate_overlap:
+                reasons.append("CNT overlaps final TiN/DIFF MOS gate geometry")
             if not exact_size:
                 reasons.append("diffusion CNT is not an exact 5x5 um cut")
-            if len(implant_hits) != 1:
-                reasons.append("diffusion CNT must overlap exactly one PAREA/NAREA type")
+            if len(ohmic_types) != 1:
+                reasons.append("diffusion CNT must overlap exactly one effective N+ or P+ ohmic domain")
+            if mixed_overlap:
+                reasons.append("diffusion CNT overlaps ambiguous mixed N+/P+ implant geometry")
             landing = cut.sized(sd_enclosure)
             diff_cover = _contained_ids(landing, components["DIFF"])
             ml1_cover = _contained_ids(landing, components["ML1"])
-            if not diff_cover:
-                reasons.append("DIFF does not enclose the contact by 2.0 um")
-            if not ml1_cover:
-                reasons.append("ML1 does not enclose the diffusion contact by 2.0 um")
+            if len(diff_cover) != 1:
+                reasons.append("one DIFF component must enclose the complete contact landing by 2.0 um")
+            if len(ml1_cover) != 1:
+                reasons.append("one ML1 component must enclose the complete diffusion-contact landing by 2.0 um")
+            domain_cover: list[int] = []
+            domain_name = ohmic_types[0] if len(ohmic_types) == 1 else None
+            if domain_name is not None:
+                domain_cover = _contained_ids(landing, components[domain_name])
+                if len(domain_cover) != 1:
+                    reasons.append(
+                        "one effective %s domain must enclose the complete contact landing by 2.0 um" %
+                        domain_name
+                    )
+            if not (landing & regions["RES"]).is_empty():
+                reasons.append("diffusion contact landing overlaps a RES device body")
             if tin_hits:
                 reasons.append("diffusion contact also overlaps TiN; conductor ownership is ambiguous")
-            if not reasons:
-                touched_roots.extend(("DIFF", item) for item in diff_hits)
-                touched_roots.extend(("ML1", item) for item in ml1_hits)
-                for node in touched_roots[1:]:
-                    union(touched_roots[0], node)
+            if not reasons and domain_name is not None:
+                touched_roots = [(domain_name, domain_cover[0]), ("ML1", ml1_cover[0])]
+                union(touched_roots[0], touched_roots[1])
         elif tin_hits or ml1_hits:
             kind = "tin_ml1_via"
             if not exact_size:
@@ -287,15 +396,13 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
             landing = cut.sized(route_enclosure)
             tin_cover = _contained_ids(landing, components["TIN"])
             ml1_cover = _contained_ids(landing, components["ML1"])
-            if not tin_cover:
-                reasons.append("TiN does not enclose the CNT by 2.5 um")
-            if not ml1_cover:
-                reasons.append("ML1 does not enclose the CNT by 2.5 um")
+            if len(tin_cover) != 1:
+                reasons.append("one TiN component must enclose the CNT by 2.5 um")
+            if len(ml1_cover) != 1:
+                reasons.append("one ML1 component must enclose the CNT by 2.5 um")
             if not reasons:
-                touched_roots.extend(("TIN", item) for item in tin_hits)
-                touched_roots.extend(("ML1", item) for item in ml1_hits)
-                for node in touched_roots[1:]:
-                    union(touched_roots[0], node)
+                touched_roots = [("TIN", tin_cover[0]), ("ML1", ml1_cover[0])]
+                union(touched_roots[0], touched_roots[1])
         else:
             reasons.append("CNT touches no supported conductor/contact stack")
         if reasons:
@@ -310,6 +417,11 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
             "intersects_ml1": bool(ml1_hits),
             "intersects_mos_gate_core": gate_overlap,
             "implant_layers": implant_hits,
+            "effective_ohmic_domains": ohmic_types,
+            "mixed_implant_overlap": mixed_overlap,
+            "touched_components": [
+                {"layer": layer, "index": component} for layer, component in touched_roots
+            ],
             "reason": reasons,
         })
 
@@ -317,13 +429,13 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
     root_ids = {root: index for index, root in enumerate(roots)}
     electrical_ids = {
         name: [root_ids[find((name, index))] for index in range(len(components[name]))]
-        for name in components
+        for name in _CONDUCTOR_LAYERS
     }
     component_rows: list[dict[str, Any]] = []
     for root in roots:
         regions_for_root = []
         layers = []
-        for layer_name in components:
+        for layer_name in _CONDUCTOR_LAYERS:
             for component_index, component in enumerate(components[layer_name]):
                 if find((layer_name, component_index)) == root:
                     regions_for_root.append(component)
@@ -343,20 +455,25 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
                 ) for layer_name in sorted(set(layers))
             },
         })
-    required = ("DIFF", "TIN", "CNT", "ML1", "TEXT", "PAREA", "NAREA")
+    required = ("DIFF", "TIN", "CNT", "ML1", "TEXT")
     missing_required = [name for name in required if not layer_presence[name]]
     missing_required.extend(
         name + "(no geometry)" for name in ("DIFF", "TIN", "CNT", "ML1")
         if regions[name].is_empty()
     )
-    if regions["PAREA"].is_empty() and regions["NAREA"].is_empty():
-        missing_required.append("PAREA/NAREA(no geometry)")
+    if regions["NPLUS"].is_empty() and regions["PPLUS"].is_empty():
+        missing_required.append("NPLUS/PPLUS(no effective ohmic domain)")
+    unsupported_metal = [
+        name for name in _UNSUPPORTED_METAL_LAYERS if not regions[name].is_empty()
+    ]
     return {
         "db": db,
         "layout": layout,
         "top": top,
         "top_name": top.name,
         "dbu_um": dbu_um,
+        "layer_mode": layer_mode,
+        "resolved_layers": {name: list(pair) for name, pair in sorted(layer_ids.items())},
         "regions": regions,
         "components": components,
         "electrical_ids": electrical_ids,
@@ -364,12 +481,14 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
         "contacts": contact_report,
         "labels": text_labels,
         "layer_presence": layer_presence,
+        "unsupported_metal_layers": unsupported_metal,
         "missing_required_layers": sorted(set(missing_required)),
         "required_layers_present": not missing_required,
         "sha256": _sha256(path),
         "method": (
-            "merged same-layer ML1/TiN/DIFF plus only validated native CNT contacts; "
-            "TiN/ML1 overlap without CNT remains insulated; MOS channels excluded"
+            "separate effective N+/P+ ohmic domains, SOI geometry isolated from the electrical graph, "
+            "and only complete legal CNT landings connect domains to ML1 or TiN to ML1; "
+            "channels, mixed implants, and unknown film do not conduct"
         ),
     }
 
@@ -377,6 +496,13 @@ def _layout_inputs(path: Path, requested_top: str | None, layer_config: Any) -> 
 def _physical_anchor(anchor: Any, geometry: dict[str, Any], pex: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(anchor, dict):
         return {"status": "BLOCKED", "error": "anchor descriptor must be an object"}
+    unsupported = geometry.get("unsupported_metal_layers", [])
+    if unsupported:
+        return {
+            "status": "BLOCKED",
+            "error": "electrical anchors are unqualified because upper-metal geometry is unsupported",
+            "unsupported_layers": unsupported,
+        }
     kind = anchor.get("kind")
     layer: str | None = None
     point_um: list[float] | None = None
@@ -451,6 +577,20 @@ def _physical_anchor(anchor: Any, geometry: dict[str, Any], pex: dict[str, Any] 
     else:
         return {"status": "BLOCKED", "error": "unsupported anchor kind %r" % kind}
 
+    requested_layer = layer
+    if layer == "DIFF":
+        nplus_ids = _point_ids(point_dbu, geometry["components"]["NPLUS"], geometry["db"])
+        pplus_ids = _point_ids(point_dbu, geometry["components"]["PPLUS"], geometry["db"])
+        if len(nplus_ids) + len(pplus_ids) != 1:
+            return {
+                "status": "BLOCKED",
+                "error": "SOI island geometry is not a uniquely classified N+/P+ ohmic conductor at this point",
+                "kind": kind,
+                "name": anchor.get("name", anchor.get("instance", anchor.get("device"))),
+                "point_um": point_um,
+                "layer": "DIFF",
+            }
+        layer = "NPLUS" if nplus_ids else "PPLUS"
     ids = _point_ids(point_dbu, geometry["components"][layer], geometry["db"])
     if len(ids) != 1:
         return {
@@ -462,7 +602,23 @@ def _physical_anchor(anchor: Any, geometry: dict[str, Any], pex: dict[str, Any] 
             "layer": layer,
         }
     root_id = geometry["electrical_ids"][layer][ids[0]]
-    return {
+    if kind == "body_contact":
+        error = (
+            "an isolated P+ contact does not qualify assembled local body access"
+            if layer == "PPLUS" else
+            "body_contact anchor is not on an effective P+ ohmic domain"
+        )
+        return {
+            "status": "BLOCKED",
+            "error": error,
+            "kind": kind,
+            "name": anchor.get("name", anchor.get("instance")),
+            "point_um": point_um,
+            "layer": layer,
+            "component_id": root_id,
+            "unqualified_boundary": True,
+        }
+    result = {
         "status": "PASS",
         "kind": kind,
         "name": anchor.get("name", anchor.get("instance", anchor.get("device"))),
@@ -473,6 +629,9 @@ def _physical_anchor(anchor: Any, geometry: dict[str, Any], pex: dict[str, Any] 
         "component_id": root_id,
         "network_node": anchor.get("network_node"),
     }
+    if requested_layer != layer:
+        result["requested_layer"] = requested_layer
+    return result
 
 
 def _lvs_comments(network: dict[str, Any]) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
@@ -1196,28 +1355,37 @@ def _body_checks(config: dict[str, Any], networks: dict[str, dict[str, Any] | No
                             coords_valid = False
                             point_dbu = (0, 0)
                         diff_ids = _point_ids(point_dbu, geometry["components"]["DIFF"], geometry["db"])
-                        parea_ids = _point_ids(point_dbu, _region_components(geometry["regions"]["PAREA"], geometry["db"]), geometry["db"])
+                        parea_ids = _point_ids(
+                            point_dbu, _region_components(geometry["regions"]["PAREA"], geometry["db"]),
+                            geometry["db"]
+                        )
+                        pplus_ids = _point_ids(point_dbu, geometry["components"]["PPLUS"], geometry["db"])
                         bias = associations.get(bias_net.casefold())
-                        contact_root = (geometry["electrical_ids"]["DIFF"][diff_ids[0]]
-                                        if len(diff_ids) == 1 else None)
+                        contact_root = (geometry["electrical_ids"]["PPLUS"][pplus_ids[0]]
+                                        if len(pplus_ids) == 1 else None)
                         if not coords_valid or float(bias_range[0]) > float(bias_range[1]):
                             errors.append("invalid explicit body-bias range for %s" % mos["name"])
                             row["status"] = "FAIL"
-                        elif len(diff_ids) != 1 or len(parea_ids) != 1:
-                            errors.append("%s body contact is not on one actual SOI DIFF/PAREA component" % mos["name"])
+                        elif len(diff_ids) != 1 or len(parea_ids) != 1 or len(pplus_ids) != 1:
+                            errors.append("%s body contact is not on one effective P+ SOI domain" % mos["name"])
                             row["status"] = "FAIL"
                         elif (bias is None or contact_root not in bias["component_ids"] or
-                                mos["p"].casefold() not in {
-                                    node.casefold() for node in bias["assembled_nodes"]
-                                }):
-                            errors.append("%s local P contact/terminal is not physically continuous to bias net %s" %
+                              mos["p"].casefold() not in {
+                                  node.casefold() for node in bias["assembled_nodes"]
+                              }):
+                            errors.append("%s local P+ contact/terminal is not physically continuous to bias net %s" %
                                           (mos["name"], bias_net))
                             row["status"] = "FAIL"
                         else:
-                            row.update({"status": "PASS", "body_contact_um": point,
+                            row.update({"status": "BLOCKED", "body_contact_um": point,
                                         "bias_net": bias_net, "bias_source": bias_source,
                                         "bias_range_v": bias_range, "p_node": mos["p"],
-                                        "component_id": contact_root})
+                                        "component_id": contact_root,
+                                        "qualification": "isolated P+ contact does not establish assembled local body access"})
+                            missing.append(
+                                "%s local body-access qualification is unsupported by isolated P+ contact evidence" %
+                                mos["name"]
+                            )
         else:
             errors.append("%s has undeclared body_state %r" % (mos["name"], state))
             row["status"] = "FAIL"
@@ -1523,10 +1691,17 @@ def _contact_check(geometry: dict[str, Any] | None) -> dict[str, Any]:
         return _check("BLOCKED", "required native contact/conductor layers are absent", missing_layers=absent,
                       contacts=geometry["contacts"])
     bad = [item for item in geometry["contacts"] if item["status"] != "legal"]
-    return _check("FAIL" if bad else "PASS",
-                  "only physically validated CNT stacks connect ML1/TiN/DIFF; gate-core cuts are illegal",
-                  method="5x5 um contacts; ML1/TiN 2.5 um enclosure outside DIFF; diffusion/ML1 2.0 um enclosure; gate-core overlap rejected",
-                  illegal_contacts=bad, contacts=geometry["contacts"])
+    if bad:
+        return _check("FAIL",
+                      "an illegal CNT is present; only complete same-polarity diffusion landings or validated TiN/ML1 vias connect",
+                      illegal_contacts=bad, contacts=geometry["contacts"])
+    if geometry["unsupported_metal_layers"]:
+        return _check("BLOCKED", "upper-metal connectivity is unsupported and cannot be qualified",
+                      unsupported_layers=geometry["unsupported_metal_layers"], contacts=geometry["contacts"])
+    return _check("PASS",
+                  "only validated same-polarity CNT landings connect N+/P+ domains to ML1; MOS channels are excluded",
+                  method="5x5 um contacts; ML1/TiN 2.5 um enclosure away from DIFF; diffusion/ML1 2.0 um complete landing",
+                  illegal_contacts=[], contacts=geometry["contacts"])
 
 
 def _signal_path_check(config: dict[str, Any], geometry: dict[str, Any] | None,
@@ -1552,6 +1727,7 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
         "schema_version": 1,
         "tool": "check_postlayout_erc.py",
         "qualification": "research_PDK_screen_only_not_foundry_signoff",
+        "layer_mode": config.get("layer_mode"),
         "checks": {},
         "inputs": {},
         "findings": [],
@@ -1620,24 +1796,39 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
             gds_top = config.get("gds_top")
             if gds_top is not None and not isinstance(gds_top, str):
                 raise PostlayoutERCError("gds_top must be a string when supplied")
-            geometry = _layout_inputs(gds_path, gds_top, config.get("layers"))
-            report["inputs"]["gds"].update({"sha256": geometry["sha256"], "top_cell": geometry["top_name"],
-                                             "dbu_um": geometry["dbu_um"]})
-            if geometry["required_layers_present"]:
+            geometry = _layout_inputs(
+                gds_path, gds_top, config.get("layers"), layer_mode=config.get("layer_mode")
+            )
+            report["inputs"]["gds"].update({
+                "sha256": geometry["sha256"],
+                "top_cell": geometry["top_name"],
+                "dbu_um": geometry["dbu_um"],
+                "layer_mode": geometry["layer_mode"],
+                "resolved_layers": geometry["resolved_layers"],
+            })
+            if geometry["required_layers_present"] and not geometry["unsupported_metal_layers"]:
                 report["checks"]["gds_geometry"] = _check(
-                    "PASS", "actual GDS conductor/contact geometry loaded",
-                    top_cell=geometry["top_name"], layer_presence=geometry["layer_presence"],
+                    "PASS", "actual GDS loaded with explicit mode-specific layer mapping",
+                    top_cell=geometry["top_name"], layer_mode=geometry["layer_mode"],
+                    resolved_layers=geometry["resolved_layers"],
+                    layer_presence=geometry["layer_presence"],
                     electrical_components=geometry["component_rows"], method=geometry["method"])
             else:
-                absent = sorted(name for name, present in geometry["layer_presence"].items() if not present)
                 report["checks"]["gds_geometry"] = _check(
-                    "BLOCKED", "actual GDS loaded but required physical layers are absent",
-                    top_cell=geometry["top_name"], missing_layers=absent,
+                    "BLOCKED", "actual GDS geometry has missing required evidence or unsupported upper metal",
+                    top_cell=geometry["top_name"], layer_mode=geometry["layer_mode"],
+                    resolved_layers=geometry["resolved_layers"],
+                    missing_layers=geometry["missing_required_layers"],
+                    unsupported_metal_layers=geometry["unsupported_metal_layers"],
                     electrical_components=geometry["component_rows"], method=geometry["method"])
         except (PostlayoutERCError, OSError, ValueError, RuntimeError) as error:
-            report["checks"]["gds_geometry"] = _check("BLOCKED", "actual GDS could not be assessed", error=str(error))
+            report["checks"]["gds_geometry"] = _check(
+                "BLOCKED", "actual GDS could not be assessed with the required explicit layer mode",
+                layer_mode=config.get("layer_mode"), error=str(error))
     else:
-        report["checks"]["gds_geometry"] = _check("BLOCKED", "actual GDS path is unavailable")
+        report["checks"]["gds_geometry"] = _check(
+            "BLOCKED", "actual GDS path is unavailable or explicit layer_mode=design|fab is absent",
+            layer_mode=config.get("layer_mode"))
 
     report["checks"]["map_correspondence"] = _map_audit(networks, config)
     report["checks"]["illegal_contacts"] = _contact_check(geometry)
@@ -1679,7 +1870,10 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
     else:
         report["status"] = "PASS"
     report["limitations"] = [
-        "MOS channels are not treated as always-on DC wires.",
+        "GDS connectivity requires an explicit design or fab layer_mode; the resolved mapping is reported.",
+        "N+ and P+ are separate ohmic domains; channels, mixed implants, and unknown SOI film are not DC wires.",
+        "A local P+ contact alone does not qualify assembled body access; PMOS fifth-P support remains blocked.",
+        "Upper-metal connectivity is unsupported and blocks topology qualification when present.",
         "External E/SUB bias is not proved by .GLOBAL or a net name.",
         "No current-density, lifetime, thermal, FD/PD, or foundry qualification is inferred.",
         "Only explicit configured logical anchors are classified; unassigned geometry is reported unassessed.",
@@ -1690,7 +1884,7 @@ def run_erc(config: dict[str, Any], config_path: str | Path | None = None) -> di
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True,
-                        help="JSON config with explicit gds/lvs/pex/assembled paths, sources, loads, associations, and paths")
+                        help="JSON config with explicit paths and layer_mode=design|fab, plus configured sources, loads, associations, and paths")
     parser.add_argument("--report", help="optional JSON report path; stdout if omitted")
     args = parser.parse_args(argv)
     config_path = Path(args.config).resolve()

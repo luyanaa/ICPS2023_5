@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PMOS4 manufacturable-geometry contract (PMOS4_EXPERIMENTAL).
+"""PCell-only PMOS body-access mask experiments; excluded from LVS.
 
 The reference is drawn directly as fabrication masks (no drawing->fab
 conversion): SOI, P_DIFF, N_DIFF, TiN, CNT, ML1, TEXT.  It establishes that a
@@ -20,8 +20,8 @@ Two failure layouts are frozen as permanent negative regressions:
       gate geometry (the documented L_E = L(1 + L_V/W) mechanism), so a normal
       rectangular PMOS4 extraction must be refused, not silently corrected.
 
-The current deck refuses every PMOS tie (extraction is experimental), so these
-tests pin the refusal now and the required outcomes for the future extractor.
+The mask reference and both failure layouts are retained as geometry evidence,
+not a plan to enable a PMOS4 extractor. LVS rejects PMOS body-contact references.
 """
 
 import os
@@ -234,9 +234,8 @@ class Pmos4GeometryContractTests(unittest.TestCase):
         self.assertGreaterEqual((cut_box.bottom - n_box.bottom) * DBU, 2.0)
         self.assertGreaterEqual((n_box.top - cut_box.top) * DBU, 2.0)
 
-    def test_current_deck_refuses_every_pmos_tie(self):
-        """Transition gate: the experimental extractor is not implemented, so
-        the reference and both frozen failure layouts must be refused."""
+    def test_body_contact_reference_is_excluded_from_lvs(self):
+        """Neither the mask reference nor either failure layout enables LVS."""
         reference = self.work / "reference.cir"
         reference.write_text(REFERENCE, encoding="utf-8")
         for name, gds in (("reference", self.reference),
@@ -258,8 +257,7 @@ class Pmos4GeometryContractTests(unittest.TestCase):
                     text=True, capture_output=True, env=environment)
                 details = result.stdout + result.stderr
                 self.assertNotEqual(result.returncode, 0, details)
-                self.assertIn("PMOS body-tie extraction is not supported yet",
-                              details)
+                self.assertFalse(output.exists(), details)
 
 
     def test_drawing_prep_realizes_every_mask_except_the_gate_bias(self):

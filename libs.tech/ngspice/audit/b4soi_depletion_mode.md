@@ -84,7 +84,7 @@ flowchart LR
 |---|---|
 | xschem | Ordinary symbols emit D/G/S/E in order. The structural validator checked 45 symbols; no xschem GUI/netlisting session was exercised. |
 | LVS | Requires a declared common `.GLOBAL SUB` E before projecting E out for ordinary MOS3 matching. It is not extracting the substrate/BOX physical structure. |
-| Optional P | Direct simulator syntax accepts fifth P; physical LVS only maps NMOS4↔NCH4. No PMOS4/PCH4 extraction path exists. |
+| Optional P | Direct simulator syntax accepts fifth P; physical LVS maps only NMOS4↔NCH4 and rejects every PMOS body-contact reference before output. No PMOS4/PCH4 extraction path exists. |
 | PEX | MOS_MAP binds D/G/S geometry and declares `e=SUB`; SUB is a separate final return. Diffusion capacitance returned to SUB remains an explicit extraction assumption, not a measured BOX return. |
 | Assembly | Accepts ordinary NMOS/PMOS. The source-tied MOS4 fourth node in serialized LVS output is an extraction artifact, not E or a real body tie. Every emitted MOS uses the separate E_SUB formal; body-contact classes are not assembled. |
 | Simulation | New physical-style benches drive one explicit common substrate source and use four nodes. Fifth-P cases are separate syntax diagnostics only. |

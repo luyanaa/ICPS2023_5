@@ -103,7 +103,7 @@ def _fields(line: str) -> list[str]:
 
 
 def _strip_inline_comment(line: str) -> str:
-    """Remove unquoted '$' and ';' comments, not text inside parameter braces."""
+    """Strip unquoted comments; embedded '$' remains part of SPICE identifiers."""
     depth = 0
     quote: str | None = None
     escaped = False
@@ -121,7 +121,8 @@ def _strip_inline_comment(line: str) -> str:
             depth += 1
         elif char == "}":
             depth -= 1
-        elif depth == 0 and char in "$;":
+        elif depth == 0 and (char == ";" or
+                             (char == "$" and (index == 0 or line[index - 1].isspace()))):
             return line[:index].rstrip()
     return line.rstrip()
 

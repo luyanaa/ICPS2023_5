@@ -17,11 +17,12 @@
 #         Al-P+ contact  200 ohm
 #         Al-TiN contact 0.9 ohm
 #   * capacitance -- only the reported 0.086 fF/um^2 passive-diffusion
-#     density, mapped to global SUB.  Physically CONFIRMED 2026-10-17
-#     (libs.tech/klayout/pex/audit_box_capacitance.md): the ideal 400 nm BOX
-#     parallel-plate density eps0*epsr/tBOX = 0.086327 fF/um^2 matches the
-#     measured 0.086 fF/um^2 within rounding, so the return terminal is the
-#     underlying common substrate (the PDK contract's SUB/E terminal).  Area
+#     density, mapped to global SUB as an explicit return contract.  BOX is the
+#     strongest analytical candidate (ideal 400 nm BOX parallel-plate density
+#     eps0*epsr/tBOX = 0.086327 fF/um^2 matches the measured 0.086 fF/um^2
+#     within displayed rounding), but the measured return electrode is
+#     UNCONFIRMED; see libs.tech/klayout/pex/audit_box_capacitance.md, status
+#     BOX_RETURN_ANALYTICALLY_SUPPORTED / MEASUREMENT_UNCONFIRMED.  Area
 #     term only; no perimeter rule is characterized.  The 2.3 fF/um^2 CAP
 #     windows are LVS-owned devices (different dielectric) and are not
 #     emitted here.
@@ -103,9 +104,9 @@ OHM_PER_SQ = {
     "PAREA": 1200.0,        # p.8 Table of Sheet & Contact Resistance, P+
 }
 
-# GDS uses one untyped CNT layer. Partition each cut to one internal via
-# layer based on the conductor pair it touches. TiN wins when a cut also
-# overlaps an implant mask, so gate contacts cannot short to diffusion.
+# GDS uses one untyped CNT layer. Each cut must have one physical stack.
+# On SOI, an ambiguous or incompletely implanted landing is rejected before
+# classification; TiN/ML1 contacts outside SOI remain insulated from diffusion.
 CUT_LAYERS = {
     "CNT_TIN": (1000, 0),
     "CNT_NAREA": (1001, 0),
@@ -129,11 +130,12 @@ VIAS = [
 # PEX does not emit device capacitance. LVS owns explicit CAP windows, and the
 # MOS model owns intrinsic gate/channel charge.
 
-# The return terminal is CONFIRMED as the underlying common substrate
-# (audit_box_capacitance.md, 2026-10-17): ideal BOX parallel plate
-# eps0*epsr/tBOX = 0.086327 fF/um^2 matches the measured 0.086 fF/um^2
-# within rounding.  For eligible passive diffusion only; the area term is
-# attributed, no perimeter rule exists.
+# The return terminal is an explicit modeling contract, not a measured
+# terminal identification (audit_box_capacitance.md): ideal BOX parallel plate
+# eps0*epsr/tBOX = 0.086327 fF/um^2 matches the measured 0.086 fF/um^2 within
+# displayed rounding, so BOX->SUB is analytically supported but
+# MEASUREMENT_UNCONFIRMED.  For eligible passive diffusion only; the area term
+# is attributed, no perimeter rule exists.
 CAP_TO_SUB = {
     "NAREA": 0.086 * F_PER_UM2,
     "PAREA": 0.086 * F_PER_UM2,
@@ -602,6 +604,10 @@ def main():
         mos_active = diff - res - cap - dio
         n_channel_gap = (raw_narea & mos_active) - design_n_dope
         p_channel_gap = (raw_parea & mos_active) - design_p_dope
+        # Drawing implants are intent regions, not conductors through a gate or
+        # undoped neck. Use the same final dopant domains as fab-prep and LVS.
+        raw_narea = design_n_dope & diff
+        raw_parea = design_p_dope & diff
     else:
         tin = design_tin
         mos_active = diff - res - cap - dio
@@ -616,6 +622,18 @@ def main():
 
         n_channel_gap = active_components_overlapping(raw_narea) - raw_narea
         p_channel_gap = active_components_overlapping(raw_parea) - raw_parea
+    # A CNT cannot select one side of a PN boundary by extractor priority.
+    # Reject ambiguous/undoped SOI landings before they create graph edges.
+    for cut_poly in raw_contacts.each():
+        cut = pya.Region(cut_poly)
+        if (cut & diff).is_empty():
+            continue
+        domains = [active for active in (raw_narea, raw_parea)
+                   if not (cut & active).is_empty()]
+        if (not (cut & tin).is_empty() or len(domains) != 1 or
+                not (cut - diff).is_empty() or
+                not (cut - domains[0]).is_empty()):
+            sys.exit("ICPS2023_5 PEX: CNT has no unique fully implanted SOI landing")
 
     for polarity, gap in (
         ("NMOS", n_channel_gap),
@@ -652,13 +670,18 @@ def main():
     tin_res_body = (tin & res) - cap - diff
     tin_res_anchors = tin_res_body & raw_contacts
     tin_wire = (tin - tin_res_body) + tin_res_anchors
+    unclassified_gate = (mos_active & tin) - (
+        raw_narea + raw_parea + mos_n_gate + mos_p_gate
+    )
     narea, mos_n_contacts, n_mos_devices, n_access = carve_mos_terminal_access(
         mos_n_gate, raw_narea - mos_n_gate, raw_contacts, layout.dbu, "NAREA",
         other_active_region=raw_parea - mos_n_gate,
+        unclassified_gate_region=unclassified_gate,
     )
     parea, mos_p_contacts, p_mos_devices, p_access = carve_mos_terminal_access(
         mos_p_gate, raw_parea - mos_p_gate, raw_contacts, layout.dbu, "PAREA",
         other_active_region=raw_narea - mos_p_gate,
+        unclassified_gate_region=unclassified_gate,
     )
     access_reports = [n_access, p_access]
     failed_access = [summary["layer"] for summary in access_reports

@@ -23,7 +23,7 @@
     routing_scale_factor: $rsf || 1, pcell_scale_factor: $psf || 1,
     path: {'ML1' =&gt; {path_width_scale: $ml1_pws, path_width_min: $ml1_pwm, path_width_max: $ml1_pwx},
             'TIN' =&gt; {path_width_scale: $tin_pws, path_width_min: $tin_pwm, path_width_max: $tin_pwx}},
-    force_defaults: [:dg, :use_nwell, :with_nsubcont, :with_psubcont]
+    force_defaults: [:dg, :use_nwell, :experimental_nplus_island, :with_psubcont]
   })
 end</text>
 </klayout-macro>

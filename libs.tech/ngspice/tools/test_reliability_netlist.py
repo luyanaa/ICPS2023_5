@@ -63,6 +63,25 @@ M1 n1 IN VSS SUB BODY pch L=6u W=48u
         self.assertTrue(result["metadata"]["access_provenance"])
         self.assertEqual(len(result["sha256"]), 64)
 
+    def test_native_dollar_identifiers_survive_inline_comments(self):
+        result = self.read_text(
+            ".SUBCKT Core D$pad G S E\n"
+            "R$1 D$pad D 2k $ ignored inline comment\n"
+            "C$1 D E 5f ; ignored inline comment\n"
+            "M$1 D G S E nch L=6u W=24u $ W=999u\n"
+            ".ENDS Core\n"
+        )
+        resistor = result["resistors"][0]
+        capacitor = result["capacitors"][0]
+        mos = result["mos"][0]
+        self.assertEqual(resistor["name"], "R$1")
+        self.assertEqual(resistor["a"], "D$pad")
+        self.assertEqual(resistor["resistance_ohm"], 2000.0)
+        self.assertEqual(mos["name"], "M$1")
+        self.assertEqual(mos["d"], resistor["b"])
+        self.assertEqual(capacitor["a"], mos["d"])
+        self.assertAlmostEqual(capacitor["capacitance_f"], 5e-15)
+
     def test_selects_subcircuit_case_insensitively_and_requires_selection_if_ambiguous(self):
         text = ".SUBCKT A a b\nR1 a b 1k\n.ENDS A\n.SUBCKT B c d\nR2 c d 2k\n.ENDS B\n"
         self.assertEqual(self.read_text(text, "a")["name"], "A")

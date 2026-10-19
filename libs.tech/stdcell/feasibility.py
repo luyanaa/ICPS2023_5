@@ -223,9 +223,12 @@ def run_feasibility(output_dir: str | Path, *, config_path: str | Path = HERE / 
     frame_config = config["frame"]
     keepout = frame_config["keepout_um"]
     measured_frame = frame.measure_frame(
-        ROOT / frame_config["gds"], die_bbox=frame_config["die_bbox_um"],
+        ROOT / frame_config["gds"], layer_mode=frame_config.get("layer_mode"),
+        die_bbox=frame_config["die_bbox_um"],
         pad_keepout_um=keepout["pad"], frame_keepout_um=keepout["frame"],
-        edge_keepout_um=keepout["edge"], power_interface=frame_config["power_interface"])
+        edge_keepout_um=keepout["edge"], power_interface=frame_config["power_interface"],
+        expected_pad_count=frame_config.get("expected_pad_count", frame.EXPECTED_PAD_COUNT),
+        pro_capacity_multiplier=frame_config.get("pro_capacity_multiplier", 4.0))
     _save(output_dir / "frame.json", measured_frame)
     generator = _generator()
     report: dict[str, Any] = {

@@ -462,7 +462,10 @@ class SoiEdgeProtectionPhysicalTests(unittest.TestCase):
         ]
         self.assertEqual(len(records), 1, correct_details)
         self.assertAlmostEqual(records[0]["r_ohm"], 90.0, delta=0.1)
-        self.assertEqual({records[0]["a"], records[0]["b"]}, {"START", "END"})
+        names = dict(line.split()[2:4] for line in extracted.read_text().splitlines()
+                     if line.startswith("* net "))
+        self.assertEqual({names[records[0][terminal]] for terminal in ("a", "b")},
+                         {"START", "END"})
 
     def test_protected_nmos_pmos_multifinger_and_legacy_switch_independence(self):
         for name in (

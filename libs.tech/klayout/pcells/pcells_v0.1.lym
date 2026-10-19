@@ -64,8 +64,8 @@ module ICPS2023_5NativeGeometry
   def validate_via_profile!(enabled)
     return unless enabled &amp;&amp; !ICPS2023_5ProcessProfile.supports_via_pcells?(PROFILE_NAME)
 
-    raise "Process profile #{PROFILE_NAME} forbids VIA1/ML2 PCell geometry; " \
-          "set ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental before launching KLayout"
+    raise ArgumentError, "Process profile #{PROFILE_NAME} forbids VIA1/ML2 PCell geometry; " \
+                         "set ICPS2023_5_PROCESS_PROFILE=icps2023_5_multimetal_experimental before launching KLayout"
   end
 
   # Single source for the parameter combinations the native PCells support.
@@ -225,7 +225,7 @@ class ICPS2023_5NativeMOS &lt; RBA::PCellDeclarationHelper
       add_box(NWL, -2.0, -2.0, total_x + 2.0, width + 2.0) if use_pwell
     else
       enclosure_box(PAREA, 0.0, 0.0, total_x, width, 2.0)
-      add_box(NWL, -2.0, -2.0, total_x + 2.0, width + 2.0) if use_nwell || with_nsubcont
+      add_box(NWL, -2.0, -2.0, total_x + 2.0, width + 2.0) if use_nwell || experimental_nplus_island
     end
 
     gate_centers = fingers.times.map do |finger|
@@ -341,13 +341,15 @@ class Pch &lt; ICPS2023_5NativeMOS
 
   def initialize
     super
-    param(:with_nsubcont, TypeBoolean, "Use nsub contact", :default => false, :hidden => false)
+    param(:experimental_nplus_island, TypeBoolean,
+          "Experimental separate N+ SOI island (not a PMOS body contact)",
+          :default => false, :hidden => false)
     param(:use_nwell, TypeBoolean, "Use nwell", :default => false, :hidden => false)
   end
 
   def produce_impl
     super
-    return unless with_nsubcont
+    return unless experimental_nplus_island
     length = clamp_minimum(l, 6.0)
     y = [clamp_minimum(w, 13.0) + 18.0,
          [25.0, sdg.to_f, dsl.to_f / 2.0].max + length / 2.0 + 4.0].max

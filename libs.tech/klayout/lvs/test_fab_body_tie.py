@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Body-tie extraction for both polarities, design and fab modes.
+"""Nch body-tie extraction and fail-closed PMOS island checks.
 
-NMOS: design TIN_BLK selects the tie; fab mode identifies it physically - the
+Nch: design TIN_BLK selects the tie; fab mode identifies it physically - the
 channel lies in an N-ch (body dope) component that reaches a contacted P+ dot.
-PMOS: there is no P-ch mask and NWL has no fab mask, so the body path is the
-PMOS SOI island itself.  A contacted N+ dot inside a PMOS island is the fourth
-terminal; this rule is physical in both modes.  The dot is kept out of the
-source/drain region, so the body net never merges into the source.
+PMOS4 is unsupported. A separate experimental N+ SOI island is not a PMOS body
+contact; an N+ dot mixed into the PMOS active island must fail closed.
 
-Uncontacted tie dots fail closed for both polarities.
+Uncontacted Nch tie dots fail closed.
 """
 
 import os
@@ -42,14 +40,14 @@ if kind == "n"
   params["body_tie"] = true if tied
   pcell = "Nch"
 else
-  params["with_nsubcont"] = true if tied
   pcell = "Pch"
 end
 layout = RBA::Layout.new
 layout.dbu = 0.001
 id = lib.layout.pcell_id(pcell)
 variant = layout.cell(layout.add_pcell_variant(lib, id, params))
-top = layout.create_cell("#{kind == 'p' ? 'pch' : 'nch'}_body_tie_check")
+top = layout.create_cell(kind == "p" ? "pch_plain_check" :
+                         "nch_#{tied ? 'body_tie' : 'plain'}_check")
 top.insert(RBA::CellInstArray.new(variant.cell_index, RBA::Trans.new))
 label = layout.layer(RBA::LayerInfo.new(13, 0))
 dgl = [4.0, (22.0 - length) / 2.0, (22.0 - length) / 2.0,
@@ -58,10 +56,9 @@ pitch = 13.0 + length + 2.0 * dgl
 gate_center = 13.0 + dgl + length / 2.0
 points = [["S", 6.5, width / 2.0], ["D", 6.5 + pitch, width / 2.0],
           ["G", gate_center, -11.5]]
-if tied
-  tie_y = kind == "n" ? width + 13.0 + 6.5 :
-          [width + 18.0, [25.0, 22.0, 11.0].max + length / 2.0 + 4.0].max
-  tie_x = kind == "n" ? 2.0 * 13.0 + length + 2.0 * dgl - 6.5 : 0.0
+if tied && kind == "n"
+  tie_y = width + 13.0 + 6.5
+  tie_x = 2.0 * 13.0 + length + 2.0 * dgl - 6.5
   points << ["B", tie_x, tie_y]
 end
 points.each do |name, x, y|
@@ -70,22 +67,24 @@ points.each do |name, x, y|
 end
 layout.write($output)
 '''
-TIE_CNT_CENTER = {"n": (45.5, 39.5), "p": (0.0, 58.0)}
+TIE_CNT_CENTER = {"n": (45.5, 39.5)}
 
 
 def reference(kind, tied):
-    name = "nch_body_tie_check" if kind == "n" else "pch_body_tie_check"
-    if kind == "n":
-        model, length, width = "NCH", 10, 20
+    if kind == "p":
+        name = "pch_plain_check"
     else:
-        model, length, width = "PCH", 6, 40
-    if tied:
+        name = "nch_%s_check" % ("body_tie" if tied else "plain")
+    if kind == "p" and tied:
+        raise ValueError("PMOS body-tie reference netlists are unsupported")
+    if kind == "n" and tied:
         return (".GLOBAL SUB\n"
                 ".SUBCKT %s D G S B\n"
-                "M1 D G S SUB B %s L=%dU W=%dU\n"
+                "M1 D G S SUB B NCH L=10U W=20U\n"
                 ".ENDS\n"
                 "XTOP D G S B %s\n.END\n"
-                % (name, model, length, width, name))
+                % (name, name))
+    model, length, width = ("NCH", 10, 20) if kind == "n" else ("PCH", 6, 40)
     return (".GLOBAL SUB\n"
             ".SUBCKT %s D G S\n"
             "M1 D G S SUB %s L=%dU W=%dU\n"
@@ -144,7 +143,7 @@ def delete_tie_contact(source, destination, kind):
 
 
 def add_in_island_dot(source, destination):
-    """Add the only mask-visible PMOS tie signature: an N+ dot inside the island."""
+    """Add a contacted N+ dot to create a mixed-implant PMOS failure case."""
     layout = pya.Layout()
     layout.read(str(source))
     leaf = next(cell for cell in layout.each_cell()
@@ -186,7 +185,8 @@ class BodyTiePhysicalTests(unittest.TestCase):
         cls.layouts = {}
         cls.references = {}
         for kind in ("n", "p"):
-            for tied, suffix in ((True, "tied"), (False, "plain")):
+            configurations = ((True, "tied"), (False, "plain")) if kind == "n" else ((False, "plain"),)
+            for tied, suffix in configurations:
                 name = "%s_%s" % (kind, suffix)
                 design = cls.work / (name + "_design.gds")
                 fab = cls.work / (name + "_fab.gds")
@@ -200,16 +200,17 @@ class BodyTiePhysicalTests(unittest.TestCase):
                 ref = cls.work / (name + ".cir")
                 ref.write_text(reference(kind, tied), encoding="utf-8")
                 cls.references[name] = ref
-            name = "%s_missing_cnt" % kind
-            broken = cls.work / (name + "_design.gds")
-            delete_tie_contact(cls.layouts["%s_tied" % kind]["design"], broken, kind)
-            broken_fab = cls.work / (name + "_fab.gds")
-            result = fab_prepare(broken, broken_fab)
-            if result.returncode:
-                raise AssertionError(result.stdout + result.stderr)
-            cls.layouts[name] = {"design": broken, "fab": broken_fab}
-            cls.references[name] = cls.references["%s_tied" % kind]
-        # In-island N+ dot on a plain PMOS: the mask-visible tie signature.
+            if kind == "n":
+                name = "n_missing_cnt"
+                broken = cls.work / (name + "_design.gds")
+                delete_tie_contact(cls.layouts["n_tied"]["design"], broken, "n")
+                broken_fab = cls.work / (name + "_fab.gds")
+                result = fab_prepare(broken, broken_fab)
+                if result.returncode:
+                    raise AssertionError(result.stdout + result.stderr)
+                cls.layouts[name] = {"design": broken, "fab": broken_fab}
+                cls.references[name] = cls.references["n_tied"]
+        # A mixed N+/P+ PMOS island is a negative, fail-closed layout case.
         dot_design = cls.work / "p_in_island_dot_design.gds"
         add_in_island_dot(cls.layouts["p_plain"]["design"], dot_design)
         dot_fab = cls.work / "p_in_island_dot_fab.gds"
@@ -236,47 +237,38 @@ class BodyTiePhysicalTests(unittest.TestCase):
                 self.assertEqual(len(devices), 1, details)
                 self.assertEqual(devices[0][1], "NMOS4", details)
 
-    def test_tied_pmos_is_not_mask_visible_and_must_not_match(self):
-        """The PCell's off-island n-substrate contact relies on NWL, which has no
-        fab mask; the LVS cannot see a body tie there, so a four-terminal
-        reference must not match (documented limitation, not a silent pass)."""
+    def test_ordinary_pmos_remains_three_terminal(self):
         for mode in ("design", "fab"):
             with self.subTest(mode=mode):
-                result, details, output = self.lvs_details("p_tied", mode)
-                self.assertIn("ICPS2023_5 LVS NO MATCH", details)
+                result, details, output = self.lvs_details("p_plain", mode)
+                self.assertIn("ICPS2023_5 LVS MATCH (mismatches=0)", details)
                 devices = extracted_devices(output)
                 self.assertEqual(len(devices), 1, details)
                 self.assertEqual(devices[0][1], "PMOS", details)
 
-    def test_in_island_pmos_tie_fails_closed(self):
-        """An N+ dot inside a PMOS island is the only mask-visible tie
-        signature; PMOS4 extraction is experimental and must abort."""
+    def test_mixed_pmos_island_fails_closed_without_output(self):
         for mode in ("design", "fab"):
             with self.subTest(mode=mode):
-                result, details, _ = self.lvs_details("p_in_island_dot", mode)
+                result, details, output = self.lvs_details("p_in_island_dot", mode)
                 self.assertNotEqual(result.returncode, 0, details)
-                self.assertIn("PMOS body-tie extraction is not supported yet",
-                              details)
+                self.assertFalse(output.exists(), details)
 
-    def test_plain_devices_are_not_mistaken_for_ties(self):
-        for kind, expected in (("n", "NMOS"), ("p", "PMOS")):
-            for mode in ("design", "fab"):
-                with self.subTest(kind=kind, mode=mode):
-                    result, details, output = self.lvs_details(
-                        "%s_plain" % kind, mode,
-                        reference_name="%s_tied" % kind)
-                    self.assertIn("ICPS2023_5 LVS NO MATCH", details)
-                    devices = extracted_devices(output)
-                    self.assertEqual(len(devices), 1, details)
-                    self.assertEqual(devices[0][1], expected, details)
+    def test_plain_nmos_is_not_mistaken_for_a_body_tie(self):
+        for mode in ("design", "fab"):
+            with self.subTest(mode=mode):
+                result, details, output = self.lvs_details(
+                    "n_plain", mode, reference_name="n_tied")
+                self.assertIn("ICPS2023_5 LVS NO MATCH", details)
+                devices = extracted_devices(output)
+                self.assertEqual(len(devices), 1, details)
+                self.assertEqual(devices[0][1], "NMOS", details)
 
-    def test_uncontacted_tie_dots_fail_closed(self):
-        cases = (("n", "fab", "uncontacted P+ tie dot"),
-                 ("n", "design", "P+ dot has no contact"))
-        for kind, mode, message in cases:
-            with self.subTest(kind=kind, mode=mode):
-                result, details, _ = self.lvs_details(
-                    "%s_missing_cnt" % kind, mode)
+    def test_uncontacted_nmos_tie_dots_fail_closed(self):
+        cases = (("fab", "uncontacted P+ tie dot"),
+                 ("design", "P+ dot has no contact"))
+        for mode, message in cases:
+            with self.subTest(mode=mode):
+                result, details, _ = self.lvs_details("n_missing_cnt", mode)
                 self.assertNotEqual(result.returncode, 0, details)
                 self.assertIn(message, details)
 

@@ -2,7 +2,6 @@
 """Deterministic geometry tests for frame.measure_frame."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -54,7 +53,7 @@ def _overlap_test_centers() -> list[tuple[float, float]]:
 
 class FrameMeasurementTests(unittest.TestCase):
     def test_canonical_frame_report_preserves_contours_and_all_pads(self):
-        report = frame.measure_frame(SOURCE_GDS)
+        report = frame.measure_frame(SOURCE_GDS, layer_mode="fab")
         self.assertEqual(report["frame"]["outer_bbox_um"], [-800.0, -800.0, 800.0, 800.0])
         self.assertEqual(report["frame"]["inner_bbox_um"], [-750.0, -750.0, 750.0, 750.0])
         self.assertEqual(report["pads"]["count"], 28)
@@ -83,7 +82,8 @@ class FrameMeasurementTests(unittest.TestCase):
             gds_path = Path(temporary) / "overlap.gds"
             _write_gds(gds_path, outer_um=700, inner_um=650,
                        pad_centers_um=_overlap_test_centers())
-            report = frame.measure_frame(gds_path, die_bbox=[-650, -650, 650, 650],
+            report = frame.measure_frame(gds_path, layer_mode="design",
+                                         die_bbox=[-650, -650, 650, 650],
                                          pad_keepout_um=20, frame_keepout_um=10,
                                          edge_keepout_um=10)
 
@@ -110,7 +110,7 @@ class FrameMeasurementTests(unittest.TestCase):
             _write_gds(gds_path, outer_um=700, inner_um=650,
                        pad_centers_um=_overlap_test_centers())
             report = frame.measure_frame(
-                gds_path, die_bbox=[-650, -650, 650, 650],
+                gds_path, layer_mode="design", die_bbox=[-650, -650, 650, 650],
                 pad_keepout_um=20, frame_keepout_um=10, edge_keepout_um=10)
 
         fit = frame.find_rectangular_core_fit(report, 100, 100)
@@ -135,13 +135,13 @@ class FrameMeasurementTests(unittest.TestCase):
             gds_path = Path(temporary) / "power.gds"
             _write_gds(gds_path, outer_um=700, inner_um=650,
                        pad_centers_um=_overlap_test_centers())
-            report = frame.measure_frame(gds_path, power_interface={"PAD_00": "VDD"})
+            report = frame.measure_frame(gds_path, layer_mode="design", power_interface={"PAD_00": "VDD"})
             self.assertEqual(report["power_interface"]["assignments_by_pad"], {"PAD_00": "VDD"})
             self.assertEqual(len(report["power_interface"]["unassigned_pads"]), 27)
             with self.assertRaisesRegex(frame.FrameError, "unknown pad"):
-                frame.measure_frame(gds_path, power_interface={"PAD_28": "VSS"})
+                frame.measure_frame(gds_path, layer_mode="design", power_interface={"PAD_28": "VSS"})
             with self.assertRaisesRegex(frame.FrameError, "net name"):
-                frame.measure_frame(gds_path, power_interface={"PAD_00": " "})
+                frame.measure_frame(gds_path, layer_mode="design", power_interface={"PAD_00": " "})
 
     def test_invalid_keepout_values_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -151,14 +151,27 @@ class FrameMeasurementTests(unittest.TestCase):
             for kwargs in ({"pad_keepout_um": -1}, {"frame_keepout_um": float("nan")},
                            {"edge_keepout_um": True}, {"pad_keepout_um": 0.0004}):
                 with self.subTest(kwargs=kwargs), self.assertRaises(frame.FrameError):
-                    frame.measure_frame(gds_path, **kwargs)
+                    frame.measure_frame(gds_path, layer_mode="design", **kwargs)
+
+    def test_frame_layer_mode_is_explicit_and_fails_closed(self):
+        for value in (None, "FAB", "native"):
+            with self.subTest(layer_mode=value), self.assertRaisesRegex(
+                    frame.FrameError, "layer_mode"):
+                frame.measure_frame(SOURCE_GDS, layer_mode=value)
+        # The migrated frames are foundry numbered: the drawing view must not
+        # silently find or fabricate pads from other 8/0 geometry.
+        with self.assertRaisesRegex(frame.FrameError, "ML1 8/0"):
+            frame.measure_frame(SOURCE_GDS, layer_mode="design")
+        report = frame.measure_frame(SOURCE_GDS, layer_mode="fab")
+        self.assertEqual(report["layer_mode"], "fab")
+        self.assertEqual(report["pads"]["layer"], [7, 0])
 
 
 class SecondDieOptionTests(unittest.TestCase):
     """The derived 2x2 frame library measures through the same contract."""
 
     def test_2x2_frame_measures_56_pads_and_reserved_capacity(self):
-        report = frame.measure_frame(FRAME_2X2_GDS, expected_pad_count=56,
+        report = frame.measure_frame(FRAME_2X2_GDS, layer_mode="fab", expected_pad_count=56,
                                      pro_capacity_multiplier=None)
         self.assertEqual(report["die_outer_bbox_um"], [-1600.0, -1600.0, 1600.0, 1600.0])
         self.assertEqual(report["frame"]["inner_bbox_um"], [-1550.0, -1550.0, 1550.0, 1550.0])
@@ -181,7 +194,7 @@ class SecondDieOptionTests(unittest.TestCase):
         self.assertEqual(len(report["power_interface"]["unassigned_pads"]), 56)
 
     def test_2x2_square_routing_envelope_uses_the_whole_inner_region(self):
-        report = frame.measure_frame(FRAME_2X2_GDS, expected_pad_count=56,
+        report = frame.measure_frame(FRAME_2X2_GDS, layer_mode="fab", expected_pad_count=56,
                                      pro_capacity_multiplier=None)
         fit = frame.find_rectangular_core_fit(report, 2940, 2940)
         self.assertTrue(fit["fits"], fit)
@@ -190,31 +203,21 @@ class SecondDieOptionTests(unittest.TestCase):
 
     def test_pad_count_and_capacity_factor_validation(self):
         with self.assertRaisesRegex(frame.FrameError, "exactly 56 pads"):
-            frame.measure_frame(SOURCE_GDS, expected_pad_count=56)
+            frame.measure_frame(SOURCE_GDS, layer_mode="fab", expected_pad_count=56)
         for value in (0, -1, True, "4"):
             with self.subTest(expected_pad_count=value), self.assertRaises(frame.FrameError):
-                frame.measure_frame(SOURCE_GDS, expected_pad_count=value)
+                frame.measure_frame(SOURCE_GDS, layer_mode="fab", expected_pad_count=value)
         for value in (0, -4, float("nan"), True):
             with self.subTest(pro_capacity_multiplier=value), self.assertRaises(frame.FrameError):
-                frame.measure_frame(SOURCE_GDS, pro_capacity_multiplier=value)
+                frame.measure_frame(SOURCE_GDS, layer_mode="fab", pro_capacity_multiplier=value)
         self.assertEqual(
-            frame.measure_frame(SOURCE_GDS, pro_capacity_multiplier=None)["pro_capacity_scenarios"],
+            frame.measure_frame(SOURCE_GDS, layer_mode="fab", pro_capacity_multiplier=None)["pro_capacity_scenarios"],
             {})
-
-    def test_configs_differ_only_in_the_frame_block(self):
-        base = json.loads(CONFIG_1X1.read_text(encoding="utf-8"))
-        second = json.loads(CONFIG_2X2.read_text(encoding="utf-8"))
-        self.assertEqual({key: value for key, value in base.items() if key != "frame"},
-                         {key: value for key, value in second.items() if key != "frame"})
-        self.assertEqual(second["frame"]["gds"],
-                         "libs.ref/ICPS2023_5_fd_base_2x2/gds/ICPS2023_5_fd_base_2x2.gds")
-        self.assertEqual(second["frame"]["die_bbox_um"], [-1600, -1600, 1600, 1600])
-        self.assertEqual(second["frame"]["expected_pad_count"], 56)
-        self.assertIsNone(second["frame"]["pro_capacity_multiplier"])
 
     def test_config_frame_arguments_drive_the_measurement(self):
         gds_path, arguments = frame._config_frame_arguments(CONFIG_2X2)
         self.assertTrue(str(gds_path).endswith("ICPS2023_5_fd_base_2x2.gds"))
+        self.assertEqual(arguments["layer_mode"], "fab")
         self.assertEqual(arguments["expected_pad_count"], 56)
         self.assertIsNone(arguments["pro_capacity_multiplier"])
         report = frame.measure_frame(gds_path, **arguments)

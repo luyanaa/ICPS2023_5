@@ -137,7 +137,7 @@ non-device diffusion:
 
 | Term | Value | Extracted? | Source/ownership |
 |------|------:|:----------:|--------|
-| Eligible N/P diffusion to assumed `SUB` | 0.086 fF/µm² | yes, model assumption | minimalFab p.9, MOSFET Capacitance; reference p.4 `CNdiff`/`CPdiff` |
+| Eligible N/P diffusion to assumed `SUB` | 0.086 fF/µm² | yes, explicit return contract | minimalFab p.9, MOSFET Capacitance; reference p.4 `CNdiff`/`CPdiff`; BOX return analytically supported, measurement unconfirmed |
 | Explicit diffusion-capacitor Cox | 2.3 fF/µm² | **no** | LVS `NDIFFCAP`/`PDIFFCAP`; minimalFab p.9 |
 | NFET overlap | 5 fF/µm | **no** | minimalFab p.9; no validated perimeter rule |
 | PFET overlap | 6.8 fF/µm | **no** | minimalFab p.9; no validated perimeter rule |
@@ -150,17 +150,36 @@ solution or full distributed-RC model.
 
 The PDFs report `CNdiff`/`CPdiff` density, measurement dimensions, and bias,
 but do not identify the return conductor. Mapping eligible passive diffusion
-to global `SUB` is, as of 2026-10-17, an **analytically confirmed physical
-attribution** rather than a free modeling choice: the ideal 400 nm BOX
-parallel-plate density `eps0*eps_r/t_BOX = 0.086327 fF/um2` matches the
-measured 0.086 fF/um2 within measurement rounding (-0.38%), the 0.086-to-2.3
-fF/um2 ratio on p.9 is exactly the 400 nm-to-15 nm dielectric-thickness ratio,
-and the SOI structure offers no other return path for a diffusion-area-proportional
-term. See [`audit_box_capacitance.md`](audit_box_capacitance.md) for the full
-attribution argument and its boundaries (area term only; per-edge/perimeter
-terms remain uncharacterized; a future back-gate C-V must re-confirm it).
-MOS-access, `RES`, explicit `CAP`, and `DIO` regions
-are excluded from this density to keep device-owned terms separate.
+to global `SUB` is an explicit modeling **contract**, not a measured terminal
+identification: the ideal 400 nm BOX parallel-plate density
+`eps0*eps_r/t_BOX = 0.086327 fF/um2` matches the measured 0.086 fF/um2 within
+displayed rounding, and the 0.086-to-2.3 fF/um2 ratio on p.9 equals the
+400 nm-to-15 nm dielectric-thickness ratio, so the BOX is the strongest
+candidate explanation. That arithmetic still cannot show that the measurement
+instrument's return electrode was the substrate, nor that the tabulated
+density was computed from the same geometry. Status:
+`BOX_RETURN_ANALYTICALLY_SUPPORTED / MEASUREMENT_UNCONFIRMED`. See
+[`audit_box_capacitance.md`](audit_box_capacitance.md) for the argument and its
+boundaries (area term only; per-edge/perimeter terms remain uncharacterized; a
+future back-gate C-V must re-confirm it). MOS-access, `RES`, explicit `CAP`,
+and `DIO` regions are excluded from this density to keep device-owned terms
+separate.
+
+#### Capacitance ownership matrix
+
+Each physical term has exactly one implementing owner in the assembled deck;
+that is an implementation bookkeeping rule, not a measured deembedding.
+
+| Physical term | Implementing owner | Current boundary |
+|---|---|---|
+| MOS channel/body internal charge, D/G/S/E four-terminal charge | BSIMSOI device model | Model-internal; PEX emits no duplicate gate or channel capacitance |
+| Gate-to-diffusion overlap `CGSO`/`CGDO` (5 / 6.8 fF/um) | BSIMSOI card parameters | Measured p.9 one-dimensional overlap; a future field solver must not re-add this to the external network |
+| Intrinsic back-gate/body response | BSIMSOI internal state | Uncalibrated for this PDK; no measured body/back-gate C-V exists |
+| Eligible external N/P diffusion area to assumed `SUB` | PEX `CAP_TO_SUB` | 0.086 fF/um2 area term only, outside bounded MOS corridors and outside `RES`/`CAP`/`DIO`; return electrode analytically supported, measurement unconfirmed |
+| Explicit diffusion-capacitor windows (2.3 fF/um2) | LVS `NDIFFCAP`/`PDIFFCAP` devices | Not emitted by PEX. Note the four-terminal assembler currently accepts only tagged `R_TIN` passive devices, so CAP assembly is a separate contract item |
+| `MIMCAP`/`TINCAP` (0.115 fF/um2) | LVS devices, legacy/unqualified | Not qualified by the supplied PDFs |
+| Undoped SOI film, perimeter/fringe, routing/interline and TiN-ML1 coupling, diode C-V | **Unmodelled** | No qualified coefficient exists; nothing is inferred |
+| Interconnect/contact resistance `RDSW` + `RCNT` | see ngspice README | Implemented once each, but bare-vs-contact separation is `RDSW_RCNT_SEPARATION_UNCALIBRATED` |
 
 The PDK gives no numeric qualified interconnect-coupling coefficient: p.9
 reports device Cox, MOSFET diffusion density, and one-dimensional MOS overlap,
@@ -178,10 +197,10 @@ Independently, an ideal parallel-plate estimate for the 400 nm BOX shown in
 `AIST-SOI-CMOS.xs`, using `εr=3.9`, is
 `ε0 εr / tBOX = 0.0863 fF/µm²` (8.63 fF per 100 µm²). This value is **not**
 separately emitted by this deck: the deck's emitted 0.086 fF/µm² diffusion
-density and this analytic BOX density are the same physical term, as formally
-attributed in [`audit_box_capacitance.md`](audit_box_capacitance.md). The
-source, physical terminal, and device-ownership boundaries documented there
-still apply.
+density and this analytic BOX density are the candidate same physical term; the
+measurement side of that identity is unconfirmed (see above). The source,
+physical terminal, and device-ownership boundaries documented in
+[`audit_box_capacitance.md`](audit_box_capacitance.md) still apply.
 
 The measured overlap values are one-dimensional fF/µm quantities.  They are
 documented but omitted from the netlist because the source documents do not

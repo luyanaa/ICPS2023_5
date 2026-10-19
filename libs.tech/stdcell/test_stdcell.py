@@ -304,7 +304,7 @@ class StandardCellTests(unittest.TestCase):
         for name in ("NAND2_X1", "NOR2_X1"):
             with self.subTest(cell=name):
                 layout, top, manifest = geometry.build_cell(
-                    logic.cell_specs()[name], 500.0)
+                    logic.cell_specs()[name], 500.0, architecture="channel")
                 boxes = {
                     (number, 0): [shape.box for shape in
                                   top.shapes(layout.layer(number, 0)).each()]
@@ -377,34 +377,41 @@ class StandardCellTests(unittest.TestCase):
                 self.assertEqual(len(rows), 1 << len(spec["inputs"]), name)
 
 
-    def test_spice_library_can_be_included_for_cell_simulation(self):
-        specs = logic.cell_specs()
+    def _check_inverter_library(self, library, work):
+        deck = [
+            f'.lib "{characterize.MODELS.resolve()}" b4soi',
+            f'.include "{library.resolve()}"',
+            ".GLOBAL SUB", "VPOWER VDD 0 3", "VVSS VSS 0 0", "VSUB SUB 0 0",
+            "VA A 0 0", "XINV A Y VDD VSS INV_X1",
+            ".control", "set noaskquit", "op", "echo LOW_INPUT", "print v(Y)",
+            "alter VA 3", "op", "echo HIGH_INPUT", "print v(Y)",
+            "quit", ".endc", ".end"]
+        text = characterize._run(deck, work)
+
+        def output_after(marker):
+            match = re.search(
+                rf"{marker}\s*\n\s*v\(y\)\s*=\s*({characterize.NUMBER})",
+                text, re.I)
+            self.assertIsNotNone(match, marker)
+            return float(match.group(1))
+
+        self.assertGreater(output_after("LOW_INPUT"), 2.7)
+        self.assertLess(output_after("HIGH_INPUT"), 0.3)
+
+    def test_generated_spice_library_switches_inverter(self):
         with tempfile.TemporaryDirectory(prefix="icps_stdcell_library_") as temporary:
             root = Path(temporary)
             generated = root / "generated.spice"
-            logic.write_reference({"specs": specs}, generated, library=True)
-            published = (HERE.parents[1] / "libs.ref/ICPS2023_5_gen_sc/"
-                         "spice/ICPS2023_5_gen_sc.spice")
-            for index, library in enumerate((generated, published)):
-                deck = [
-                    f'.lib "{characterize.MODELS.resolve()}" b4soi',
-                    f'.include "{library.resolve()}"',
-                    ".GLOBAL SUB", "VPOWER VDD 0 3", "VVSS VSS 0 0", "VSUB SUB 0 0",
-                    "VA A 0 0", "XINV A Y VDD VSS INV_X1",
-                    ".control", "set noaskquit", "op", "echo LOW_INPUT", "print v(Y)",
-                    "alter VA 3", "op", "echo HIGH_INPUT", "print v(Y)",
-                    "quit", ".endc", ".end"]
-                text = characterize._run(deck, root / f"simulation_{index}")
+            logic.write_reference({"specs": logic.cell_specs()}, generated, library=True)
+            self._check_inverter_library(generated, root / "simulation")
 
-                def output_after(marker):
-                    match = re.search(
-                        rf"{marker}\s*\n\s*v\(y\)\s*=\s*({characterize.NUMBER})",
-                        text, re.I)
-                    self.assertIsNotNone(match, marker)
-                    return float(match.group(1))
-
-                self.assertGreater(output_after("LOW_INPUT"), 2.7)
-                self.assertLess(output_after("HIGH_INPUT"), 0.3)
+    def test_published_spice_library_switches_inverter(self):
+        published = (HERE.parents[1] / "libs.ref/ICPS2023_5_gen_sc/"
+                     "spice/ICPS2023_5_gen_sc.spice")
+        if not published.is_file():
+            self.skipTest("standard-cell publication withdrawn; published simulation NOT RUN")
+        with tempfile.TemporaryDirectory(prefix="icps_stdcell_publication_") as temporary:
+            self._check_inverter_library(published, Path(temporary) / "simulation")
 
     def test_sequential_reference_capture_and_hold(self):
         specs = logic.cell_specs()
@@ -561,11 +568,14 @@ class StandardCellTests(unittest.TestCase):
         self.assertNotEqual(comparison["rc_summary"]["design"],
                             comparison["rc_summary"]["fab"])
 
-    def test_aoi21_strict_physical_pex_and_characterization(self):
+    def test_aoi21_channel_minimum_preserves_strict_physical_and_electrical_contracts(self):
         spec = logic.cell_specs()["AOI21_X1"]
         with tempfile.TemporaryDirectory(prefix="icps_stdcell_physical_") as temporary:
             root = Path(temporary)
-            layout, top, manifest = geometry.build_cell(spec, 500)
+            import channel_geometry
+            minimum = channel_geometry.minimum_height_um(spec)
+            layout, top, manifest = geometry.build_cell(
+                spec, minimum, architecture="channel")
             layout.rename_cell(top.cell_index(), spec["name"])
             gds = root / (spec["name"] + ".gds")
             reference = root / (spec["name"] + ".spice")
